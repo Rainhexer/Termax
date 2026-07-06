@@ -3,8 +3,9 @@ import { CanvasAddon } from "@xterm/addon-canvas";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { listen } from "@tauri-apps/api/event";
-import { writable } from "svelte/store";
+import { get, writable } from "svelte/store";
 import { ipc } from "./ipc";
+import { settings } from "./settings";
 
 export const loadingPanes = writable<Set<string>>(new Set());
 
@@ -105,17 +106,31 @@ export async function initPtyListeners(onExit: (paneId: string) => void) {
   });
 }
 
+// Reactively update all open terminals when settings change.
+settings.subscribe(s => {
+  const fontSize = s.appearance.fontSize;
+  const fontFamily = s.appearance.fontFamily;
+  for (const entry of registry.values()) {
+    if (entry.opened) {
+      entry.term.options.fontSize = fontSize;
+      entry.term.options.fontFamily = fontFamily;
+    }
+  }
+});
+
 function create(paneId: string): Entry {
+  const s = get(settings);
   const term = new Terminal({
-    fontFamily: "'JetBrainsMono Nerd Font', 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
-    fontSize: 13,
-    cursorBlink: true,
+    fontFamily: s.appearance.fontFamily,
+    fontSize: s.appearance.fontSize,
+    cursorBlink: s.terminal.cursorBlink,
+    cursorStyle: s.terminal.cursorStyle,
     allowProposedApi: true,
-    scrollback: 10000,
+    scrollback: s.terminal.scrollback,
     theme: {
       background: "#131316",
       foreground: "#e4e4e7",
-      cursor: "#34d399",
+      cursor: s.terminal.cursorColor,
       cursorAccent: "#131316",
       selectionBackground: "#3f3f46",
       black: "#18181b",
@@ -326,6 +341,14 @@ export function fitPane(paneId: string) {
 
 export function focusTerminal(paneId: string) {
   registry.get(paneId)?.term.focus();
+}
+
+/** Type text into a pane's terminal without submitting it. */
+export function typeInPane(paneId: string, text: string) {
+  const entry = registry.get(paneId);
+  if (!entry || entry.exited) return;
+  ipc.writePty(paneId, text);
+  entry.term.focus();
 }
 
 export function runInPane(paneId: string, command: string) {

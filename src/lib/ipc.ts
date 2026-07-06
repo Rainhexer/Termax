@@ -2,13 +2,16 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   ChangeArea,
   ChangeEntry,
+  FileContent,
   FileDiff,
   GitStatus,
   LayoutNode,
   Project,
   SessionInfo,
+  TreeEntry,
   VaultCommand,
 } from "./types";
+import type { AppSettings, DetectedAgent } from "./settings";
 
 export const ipc = {
   // PTY
@@ -50,4 +53,17 @@ export const ipc = {
   getChanges: () => invoke<ChangeEntry[]>("get_changes"),
   getGitStatus: () => invoke<GitStatus | null>("git_status"),
   getDiff: (path: string, area?: ChangeArea) => invoke<FileDiff>("get_diff", { path, area }),
+
+  // Settings
+  getSettings: () => invoke<AppSettings>("get_settings"),
+  saveSettings: (settings: AppSettings) => invoke<void>("save_settings", { settings }),
+  detectAgents: () => invoke<DetectedAgent[]>("detect_agents"),
+  validateCommand: (command: string) => invoke<boolean>("validate_command", { command }),
+  openUrl: (url: string) => invoke<void>("open_url", { url }),
+
+  // File tree
+  listDir: (path: string) => invoke<TreeEntry[]>("list_dir", { path }),
+  readFile: (path: string) => invoke<FileContent>("read_file", { path }),
+  writeFile: (path: string, content: string) => invoke<void>("write_file", { path, content }),
+  revealInFileManager: (path: string) => invoke<void>("reveal_in_file_manager", { path }),
 };

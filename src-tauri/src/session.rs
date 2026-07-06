@@ -4,12 +4,18 @@ use serde::Serialize;
 use similar::TextDiff;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 use walkdir::WalkDir;
 
-const MAX_FILE_SIZE: u64 = 1024 * 1024; // 1 MiB per file snapshot cap
-const IGNORED_DIRS: &[&str] = &[
+/// Per-file snapshot/diff cap in bytes; driven by the oversized-limit setting.
+static SNAPSHOT_LIMIT: AtomicU64 = AtomicU64::new(1024 * 1024);
+
+pub fn set_snapshot_limit(bytes: u64) {
+    SNAPSHOT_LIMIT.store(bytes.max(1), Ordering::Relaxed);
+}
+pub const IGNORED_DIRS: &[&str] = &[
     ".git",
     "node_modules",
     "target",
@@ -45,6 +51,16 @@ struct ActiveSession {
 #[derive(Default)]
 pub struct SessionManager {
     session: Mutex<Option<ActiveSession>>,
+}
+
+impl SessionManager {
+    /// Project root and whether the session runs in git mode, if a session is active.
+    pub fn root_info(&self) -> Option<(PathBuf, bool)> {
+        let guard = self.session.lock().unwrap();
+        guard
+            .as_ref()
+            .map(|s| (s.root.clone(), matches!(s.mode, Mode::Git)))
+    }
 }
 
 #[derive(Serialize)]
@@ -98,7 +114,7 @@ fn is_git_signal(path: &Path, root: &Path) -> bool {
 
 fn read_text(path: &Path) -> Option<String> {
     let meta = std::fs::metadata(path).ok()?;
-    if !meta.is_file() || meta.len() > MAX_FILE_SIZE {
+    if !meta.is_file() || meta.len() > SNAPSHOT_LIMIT.load(Ordering::Relaxed) {
         return None;
     }
     let bytes = std::fs::read(path).ok()?;

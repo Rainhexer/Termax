@@ -9,20 +9,27 @@
     initListeners,
     refreshChanges,
     addPane,
+    fsTick,
   } from "./lib/stores";
+  import { loadSettings, settingsOpen } from "./lib/settings";
   import ProjectPicker from "./lib/components/ProjectPicker.svelte";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import TilingLayout from "./lib/components/TilingLayout.svelte";
   import DiffModal from "./lib/components/DiffModal.svelte";
+  import SettingsModal from "./lib/components/SettingsModal.svelte";
 
   onMount(() => {
     initListeners();
+    loadSettings();
     loadProjects();
 
     let timer: ReturnType<typeof setTimeout> | undefined;
     const unlisten = listen("fs-changed", () => {
       clearTimeout(timer);
-      timer = setTimeout(refreshChanges, 400);
+      timer = setTimeout(() => {
+        refreshChanges();
+        fsTick.update((n) => n + 1);
+      }, 400);
     });
     return () => {
       unlisten.then((fn) => fn());
@@ -54,5 +61,9 @@
 
   {#if $diffTarget}
     <DiffModal target={$diffTarget} />
+  {/if}
+
+  {#if $settingsOpen}
+    <SettingsModal />
   {/if}
 </div>

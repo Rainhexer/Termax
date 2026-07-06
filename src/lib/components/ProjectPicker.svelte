@@ -1,7 +1,9 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
   import { projects, openProject, loadProjects } from "../stores";
+  import { settingsOpen } from "../settings";
   import { ipc } from "../ipc";
+  import TerminalIcon from "./TerminalIcon.svelte";
 
   let error = $state<string | null>(null);
 
@@ -24,7 +26,14 @@
   }
 </script>
 
-<div class="flex h-full w-full items-center justify-center bg-zinc-950">
+<div class="relative flex h-full w-full items-center justify-center bg-zinc-950">
+  <button
+    class="absolute right-4 top-4 rounded-md p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+    title="Settings"
+    onclick={() => settingsOpen.set(true)}
+  >
+    <TerminalIcon type="gear" className="h-4 w-4" />
+  </button>
   <div class="w-[420px]">
     <div class="mb-6 text-center">
       <h1 class="text-2xl font-bold tracking-tight text-zinc-100">

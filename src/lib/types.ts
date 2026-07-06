@@ -2,7 +2,7 @@ export interface VaultCommand {
   id: string;
   name: string;
   command: string;
-  /** Terminal-type title the command runs in (see terminalTypes.ts). */
+  /** Launcher id the command runs in (see settings.ts). */
   terminalType: string;
 }
 
@@ -20,6 +20,10 @@ export interface PaneNode {
   title: string;
   /** Command launched in this pane; null means plain shell. */
   launch: string | null;
+  /** Pane content; absent means "terminal" (backward compat with saved layouts). */
+  kind?: "terminal" | "editor";
+  /** Project-relative path of the file shown; editor panes only. */
+  file?: string;
 }
 
 export interface SplitNode {
@@ -66,5 +70,19 @@ export interface DiffTarget {
 export interface FileDiff {
   original: string;
   modified: string;
+  binary: boolean;
+}
+
+export interface TreeEntry {
+  name: string;
+  /** Path relative to the project root, forward slashes. */
+  path: string;
+  isDir: boolean;
+  /** .gitignored (git mode) or in the built-in ignore list (snapshot mode). */
+  ignored: boolean;
+}
+
+export interface FileContent {
+  content: string;
   binary: boolean;
 }

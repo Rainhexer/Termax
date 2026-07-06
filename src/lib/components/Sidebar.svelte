@@ -1,11 +1,13 @@
 <script lang="ts">
   import { activeProject, addPane, closeProject, sidebarCollapsed, runVaultCommand } from "../stores";
-  import { TERMINAL_TYPES, terminalType } from "../terminalTypes";
+  import { enabledLaunchers, launcherById, settings, settingsOpen } from "../settings";
   import CommandVault from "./CommandVault.svelte";
   import ChangesPanel from "./ChangesPanel.svelte";
+  import FileTree from "./FileTree.svelte";
   import TerminalIcon from "./TerminalIcon.svelte";
 
-  const launchers = TERMINAL_TYPES;
+  const launchers = $derived(enabledLaunchers($settings));
+  const width = $derived($sidebarCollapsed ? 48 : $settings.appearance.sidebarWidth);
 
   let vaultOpen = $state(false);
   let vaultTriggerEl = $state<HTMLElement>();
@@ -27,8 +29,7 @@
 
 <aside
   class="relative flex shrink-0 flex-col border-r border-zinc-800 bg-zinc-950 transition-all duration-200"
-  class:w-64={!$sidebarCollapsed}
-  class:w-12={$sidebarCollapsed}
+  style="width: {width}px"
 >
   {#if $sidebarCollapsed}
     <div class="flex flex-col items-center gap-2 py-2">
@@ -42,15 +43,22 @@
         title="Expand sidebar"
         onclick={() => sidebarCollapsed.set(false)}
       >▶</button>
+      <button
+        class="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+        title="Settings"
+        onclick={() => settingsOpen.set(true)}
+      >
+        <TerminalIcon type="gear" className="h-4 w-4" />
+      </button>
 
       <div class="h-px w-5 shrink-0 bg-zinc-800"></div>
 
       <div class="flex flex-col items-center gap-2 overflow-y-auto">
-        {#each launchers as launcher (launcher.title)}
+        {#each launchers as launcher (launcher.id)}
           <button
             class="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-emerald-400 hover:bg-zinc-800"
-            title={launcher.label}
-            onclick={() => addPane(launcher.command, launcher.title)}
+            title={launcher.name}
+            onclick={() => addPane(launcher.command, launcher.name)}
           >
             <TerminalIcon type={launcher.icon} className="h-4 w-4" />
           </button>
@@ -83,7 +91,7 @@
                   class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-zinc-200 hover:bg-zinc-800"
                   onclick={() => { runVaultCommand(cmd); vaultOpen = false; }}
                 >
-                  <span class="text-emerald-400"><TerminalIcon type={terminalType(cmd.terminalType).icon} className="h-3.5 w-3.5" /></span>
+                  <span class="text-emerald-400"><TerminalIcon type={launcherById(cmd.terminalType).icon} className="h-3.5 w-3.5" /></span>
                   <span class="min-w-0 flex-1 truncate">{cmd.name}</span>
                 </button>
               {/each}
@@ -100,7 +108,14 @@
         onclick={closeProject}
       >←</button>
       <button
-        class="ml-auto rounded-md px-1 py-0.5 text-xs text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+        class="ml-auto rounded-md p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+        title="Settings"
+        onclick={() => settingsOpen.set(true)}
+      >
+        <TerminalIcon type="gear" className="h-3.5 w-3.5" />
+      </button>
+      <button
+        class="rounded-md px-1 py-0.5 text-xs text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
         title="Collapse sidebar"
         onclick={() => sidebarCollapsed.set(true)}
       >◀</button>
@@ -116,19 +131,20 @@
 
       <div class="flex flex-col gap-1">
         <h2 class="px-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Launch</h2>
-        {#each launchers as launcher (launcher.title)}
+        {#each launchers as launcher (launcher.id)}
           <button
             class="flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-left text-xs text-zinc-200 hover:border-emerald-600/50 hover:bg-zinc-800"
-            onclick={() => addPane(launcher.command, launcher.title)}
+            onclick={() => addPane(launcher.command, launcher.name)}
           >
             <span class="inline-flex w-5 items-center justify-center text-emerald-400"><TerminalIcon type={launcher.icon} className="h-4 w-4" /></span>
-            {launcher.label}
+            {launcher.name}
             <span class="ml-auto text-[10px] text-zinc-600">new pane</span>
           </button>
         {/each}
       </div>
 
       <CommandVault />
+      <FileTree />
       <ChangesPanel />
     </div>
   {/if}

@@ -1,7 +1,9 @@
+mod fstree;
 mod git;
 mod projects;
 mod pty;
 mod session;
+mod settings;
 
 use tauri::Manager;
 
@@ -12,6 +14,7 @@ pub fn run() {
         .setup(|app| {
             let store = projects::ProjectStore::load(app.handle());
             app.manage(store);
+            app.manage(settings::SettingsStore::load(app.handle()));
             app.manage(pty::PtyManager::default());
             app.manage(session::SessionManager::default());
             Ok(())
@@ -40,6 +43,15 @@ pub fn run() {
             session::git_status,
             session::get_changes,
             session::get_diff,
+            fstree::list_dir,
+            fstree::read_file,
+            fstree::write_file,
+            fstree::reveal_in_file_manager,
+            settings::get_settings,
+            settings::save_settings,
+            settings::detect_agents,
+            settings::validate_command,
+            settings::open_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

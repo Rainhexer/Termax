@@ -4,11 +4,28 @@
     diffTarget,
     gitMode,
     gitStatus,
+    highlightedChange,
     refreshChanges,
     showUntracked,
     toggleUntracked,
   } from "../stores";
   import type { ChangeEntry } from "../types";
+
+  let listEl = $state<HTMLDivElement>();
+  let flashPath = $state<string | null>(null);
+
+  // "Show in Changes" from the file tree: scroll the entry into view and flash it.
+  $effect(() => {
+    const path = $highlightedChange;
+    if (!path || !listEl) return;
+    highlightedChange.set(null);
+    const el = listEl.querySelector<HTMLElement>(`[data-path="${CSS.escape(path)}"]`);
+    if (!el) return;
+    el.scrollIntoView({ block: "center", behavior: "smooth" });
+    flashPath = path;
+    const timer = setTimeout(() => (flashPath = null), 1600);
+    return () => clearTimeout(timer);
+  });
 
   // Snapshot-mode statuses
   const statusColor: Record<string, string> = {
@@ -100,11 +117,13 @@
     </p>
   {/if}
 
-  <div class="min-h-0 flex-1 overflow-y-auto">
+  <div class="min-h-0 flex-1 overflow-y-auto" bind:this={listEl}>
     {#each visible as change (`${change.area ?? "snap"}:${change.path}`)}
       {@const b = badge(change)}
       <button
-        class="flex w-full items-center gap-1.5 rounded-md px-1 py-0.5 text-left hover:bg-zinc-800/70"
+        class="flex w-full items-center gap-1.5 rounded-md px-1 py-0.5 text-left transition-colors hover:bg-zinc-800/70
+          {flashPath === change.path ? 'bg-emerald-500/20' : ''}"
+        data-path={change.path}
         title="{change.path}{change.area ? ` (${change.area})` : ''}"
         onclick={() => diffTarget.set({ path: change.path, area: change.area })}
       >

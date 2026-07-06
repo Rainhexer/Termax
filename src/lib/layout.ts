@@ -91,5 +91,5 @@ export function movePaneToSplit(
   const targetStillExists = findPane(afterRemove, targetId);
   if (!targetStillExists) return node;
 
-  return splitPane(afterRemove, targetId, { ...fromPane, id: crypto.randomUUID() }, dir, before);
+  return splitPane(afterRemove, targetId, fromPane, dir, before);
 }

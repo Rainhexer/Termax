@@ -1,0 +1,205 @@
+use crate::session::SessionManager;
+use serde::Serialize;
+use std::collections::HashSet;
+use std::io::Write;
+use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Stdio};
+
+const MAX_EDITOR_FILE_SIZE: u64 = 2 * 1024 * 1024; // 2 MiB cap for editor panes
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TreeEntry {
+    pub name: String,
+    /// Path relative to the project root, using forward slashes.
+    pub path: String,
+    pub is_dir: bool,
+    /// True when .gitignored (git mode) or in the built-in ignore list.
+    pub ignored: bool,
+}
+
+#[derive(Serialize)]
+pub struct FileContent {
+    pub content: String,
+    pub binary: bool,
+}
+
+/// Resolve a project-relative path, rejecting anything that escapes the root.
+fn resolve(root: &Path, rel: &str) -> Result<PathBuf, String> {
+    let rel_path = Path::new(rel);
+    if rel_path.is_absolute()
+        || rel_path
+            .components()
+            .any(|c| matches!(c, Component::ParentDir))
+    {
+        return Err(format!("invalid path: {rel}"));
+    }
+    Ok(root.join(rel_path))
+}
+
+/// Batch-query git for which of the given relative paths are ignored.
+fn git_ignored(root: &Path, rels: &[String]) -> HashSet<String> {
+    let mut ignored = HashSet::new();
+    if rels.is_empty() {
+        return ignored;
+    }
+    let Ok(mut child) = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["check-ignore", "--stdin", "-z"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return ignored;
+    };
+    if let Some(stdin) = child.stdin.take() {
+        let mut stdin = stdin;
+        for rel in rels {
+            let _ = stdin.write_all(rel.as_bytes());
+            let _ = stdin.write_all(b"\0");
+        }
+    }
+    if let Ok(out) = child.wait_with_output() {
+        for path in String::from_utf8_lossy(&out.stdout).split('\0') {
+            if !path.is_empty() {
+                ignored.insert(path.to_string());
+            }
+        }
+    }
+    ignored
+}
+
+#[tauri::command]
+pub fn list_dir(
+    manager: tauri::State<SessionManager>,
+    path: String,
+) -> Result<Vec<TreeEntry>, String> {
+    let (root, git_mode) = manager.root_info().ok_or("no active session")?;
+    let dir = resolve(&root, &path)?;
+
+    let mut entries: Vec<(String, bool)> = Vec::new();
+    for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
+        let Ok(entry) = entry else { continue };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        entries.push((name, is_dir));
+    }
+    entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
+
+    let rels: Vec<String> = entries
+        .iter()
+        .map(|(name, _)| {
+            if path.is_empty() {
+                name.clone()
+            } else {
+                format!("{path}/{name}")
+            }
+        })
+        .collect();
+
+    let ignored_set = if git_mode {
+        git_ignored(&root, &rels)
+    } else {
+        HashSet::new()
+    };
+
+    Ok(entries
+        .into_iter()
+        .zip(rels)
+        .map(|((name, is_dir), rel)| {
+            let ignored = ignored_set.contains(&rel)
+                || name == ".git"
+                || (!git_mode && crate::session::IGNORED_DIRS.contains(&name.as_str()));
+            TreeEntry {
+                name,
+                path: rel,
+                is_dir,
+                ignored,
+            }
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub fn read_file(
+    manager: tauri::State<SessionManager>,
+    path: String,
+) -> Result<FileContent, String> {
+    let (root, _) = manager.root_info().ok_or("no active session")?;
+    let abs = resolve(&root, &path)?;
+    let meta = std::fs::metadata(&abs).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err(format!("not a file: {path}"));
+    }
+    if meta.len() > MAX_EDITOR_FILE_SIZE {
+        return Ok(FileContent {
+            content: String::new(),
+            binary: true,
+        });
+    }
+    let bytes = std::fs::read(&abs).map_err(|e| e.to_string())?;
+    if bytes.contains(&0) {
+        return Ok(FileContent {
+            content: String::new(),
+            binary: true,
+        });
+    }
+    Ok(FileContent {
+        content: String::from_utf8_lossy(&bytes).into_owned(),
+        binary: false,
+    })
+}
+
+#[tauri::command]
+pub fn write_file(
+    manager: tauri::State<SessionManager>,
+    path: String,
+    content: String,
+) -> Result<(), String> {
+    let (root, _) = manager.root_info().ok_or("no active session")?;
+    let abs = resolve(&root, &path)?;
+    if !abs.is_file() {
+        return Err(format!("not a file: {path}"));
+    }
+    std::fs::write(&abs, content).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn reveal_in_file_manager(
+    manager: tauri::State<SessionManager>,
+    path: String,
+) -> Result<(), String> {
+    let (root, _) = manager.root_info().ok_or("no active session")?;
+    let abs = resolve(&root, &path)?;
+
+    #[cfg(target_os = "linux")]
+    {
+        let dir = if abs.is_dir() {
+            abs.clone()
+        } else {
+            abs.parent().map(Path::to_path_buf).unwrap_or(root)
+        };
+        Command::new("xdg-open")
+            .arg(dir)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg("-R")
+            .arg(&abs)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer")
+            .arg(format!("/select,{}", abs.display()))
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}

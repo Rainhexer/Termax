@@ -1,6 +1,7 @@
 <script lang="ts">
   import TilingLayout from "./TilingLayout.svelte";
   import TerminalPane from "./TerminalPane.svelte";
+  import EditorPane from "./EditorPane.svelte";
   import type { LayoutNode } from "../types";
   import { resizeSplit } from "../stores";
 
@@ -30,7 +31,11 @@
 </script>
 
 {#if node.type === "pane"}
-  <TerminalPane pane={node} />
+  {#if node.kind === "editor"}
+    <EditorPane pane={node} />
+  {:else}
+    <TerminalPane pane={node} />
+  {/if}
 {:else}
   <div
     bind:this={container}

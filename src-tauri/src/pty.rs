@@ -48,6 +48,7 @@ impl PtyManager {
         command: Option<String>,
         rows: u16,
         cols: u16,
+        shell_override: Option<String>,
     ) -> Result<(), String> {
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -59,7 +60,7 @@ impl PtyManager {
             })
             .map_err(|e| e.to_string())?;
 
-        let shell = default_shell();
+        let shell = shell_override.unwrap_or_else(default_shell);
         let mut cmd = match &command {
             Some(c) if !c.trim().is_empty() => {
                 let mut cmd = CommandBuilder::new(&shell);
@@ -156,13 +157,15 @@ impl PtyManager {
 pub fn spawn_pty(
     app: AppHandle,
     manager: tauri::State<PtyManager>,
+    settings: tauri::State<crate::settings::SettingsStore>,
     pane_id: String,
     cwd: String,
     command: Option<String>,
     rows: u16,
     cols: u16,
 ) -> Result<(), String> {
-    manager.spawn(app, pane_id, cwd, command, rows, cols)
+    let shell_override = settings.shell_override();
+    manager.spawn(app, pane_id, cwd, command, rows, cols, shell_override)
 }
 
 #[tauri::command]

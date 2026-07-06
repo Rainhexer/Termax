@@ -3,6 +3,8 @@
   import { monaco, languageForPath } from "../monaco";
   import { ipc } from "../ipc";
   import { diffTarget } from "../stores";
+  import { settings } from "../settings";
+  import { get } from "svelte/store";
   import type { DiffTarget } from "../types";
 
   let { target }: { target: DiffTarget } = $props();
@@ -43,7 +45,7 @@
             automaticLayout: true,
             readOnly: true,
             minimap: { enabled: false },
-            fontSize: 12,
+            fontSize: get(settings).appearance.editorFontSize,
             scrollBeyondLastLine: false,
           });
           return;
@@ -54,7 +56,7 @@
           readOnly: true,
           renderSideBySide: true,
           minimap: { enabled: false },
-          fontSize: 12,
+          fontSize: get(settings).appearance.editorFontSize,
           scrollBeyondLastLine: false,
         });
         diffEditor.setModel({
