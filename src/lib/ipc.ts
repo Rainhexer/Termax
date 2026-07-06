@@ -1,5 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ChangeEntry, FileDiff, LayoutNode, Project, VaultCommand } from "./types";
+import type {
+  ChangeArea,
+  ChangeEntry,
+  FileDiff,
+  GitStatus,
+  LayoutNode,
+  Project,
+  SessionInfo,
+  VaultCommand,
+} from "./types";
 
 export const ipc = {
   // PTY
@@ -36,8 +45,9 @@ export const ipc = {
     invoke<void>("remove_vault_command", { projectId, commandId }),
 
   // Change tracking
-  startSession: (projectPath: string) => invoke<number>("start_session", { projectPath }),
+  startSession: (projectPath: string) => invoke<SessionInfo>("start_session", { projectPath }),
   stopSession: () => invoke<void>("stop_session"),
   getChanges: () => invoke<ChangeEntry[]>("get_changes"),
-  getDiff: (path: string) => invoke<FileDiff>("get_diff", { path }),
+  getGitStatus: () => invoke<GitStatus | null>("git_status"),
+  getDiff: (path: string, area?: ChangeArea) => invoke<FileDiff>("get_diff", { path, area }),
 };

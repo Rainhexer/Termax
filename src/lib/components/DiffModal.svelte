@@ -2,17 +2,25 @@
   import { onMount } from "svelte";
   import { monaco, languageForPath } from "../monaco";
   import { ipc } from "../ipc";
-  import { diffPath } from "../stores";
+  import { diffTarget } from "../stores";
+  import type { DiffTarget } from "../types";
 
-  let { path }: { path: string } = $props();
+  let { target }: { target: DiffTarget } = $props();
 
   let host: HTMLDivElement;
   let binary = $state(false);
   let error = $state<string | null>(null);
-  let editor: import("monaco-editor").editor.IStandaloneDiffEditor | undefined;
+  let diffEditor: import("monaco-editor").editor.IStandaloneDiffEditor | undefined;
+  let plainEditor: import("monaco-editor").editor.IStandaloneCodeEditor | undefined;
+
+  const areaLabel: Record<string, string> = {
+    staged: "staged · vs HEAD",
+    unstaged: "unstaged · vs index",
+    untracked: "untracked · new file",
+  };
 
   function close() {
-    diffPath.set(null);
+    diffTarget.set(null);
   }
 
   onMount(() => {
@@ -20,14 +28,27 @@
 
     (async () => {
       try {
-        const diff = await ipc.getDiff(path);
+        const diff = await ipc.getDiff(target.path, target.area);
         if (disposed) return;
         if (diff.binary) {
           binary = true;
           return;
         }
-        const lang = languageForPath(path);
-        editor = monaco.editor.createDiffEditor(host, {
+        const lang = languageForPath(target.path);
+        if (target.area === "untracked") {
+          plainEditor = monaco.editor.create(host, {
+            value: diff.modified,
+            language: lang,
+            theme: "vs-dark",
+            automaticLayout: true,
+            readOnly: true,
+            minimap: { enabled: false },
+            fontSize: 12,
+            scrollBeyondLastLine: false,
+          });
+          return;
+        }
+        diffEditor = monaco.editor.createDiffEditor(host, {
           theme: "vs-dark",
           automaticLayout: true,
           readOnly: true,
@@ -36,7 +57,7 @@
           fontSize: 12,
           scrollBeyondLastLine: false,
         });
-        editor.setModel({
+        diffEditor.setModel({
           original: monaco.editor.createModel(diff.original, lang),
           modified: monaco.editor.createModel(diff.modified, lang),
         });
@@ -53,10 +74,13 @@
     return () => {
       disposed = true;
       window.removeEventListener("keydown", onKey);
-      const model = editor?.getModel();
-      editor?.dispose();
+      const model = diffEditor?.getModel();
+      diffEditor?.dispose();
       model?.original.dispose();
       model?.modified.dispose();
+      const plainModel = plainEditor?.getModel();
+      plainEditor?.dispose();
+      plainModel?.dispose();
     };
   });
 </script>
@@ -68,7 +92,10 @@
     onclick={(e) => e.stopPropagation()}
   >
     <div class="flex h-9 shrink-0 items-center gap-2 border-b border-zinc-800 bg-zinc-900 px-3">
-      <span class="font-mono text-xs text-zinc-300">{path}</span>
+      <span class="font-mono text-xs text-zinc-300">{target.path}</span>
+      {#if target.area}
+        <span class="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">{areaLabel[target.area] ?? target.area}</span>
+      {/if}
       <button
         class="ml-auto rounded px-2 py-0.5 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
         onclick={close}

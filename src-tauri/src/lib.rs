@@ -1,3 +1,4 @@
+mod git;
 mod projects;
 mod pty;
 mod session;
@@ -36,6 +37,7 @@ pub fn run() {
             projects::remove_vault_command,
             session::start_session,
             session::stop_session,
+            session::git_status,
             session::get_changes,
             session::get_diff,
         ])

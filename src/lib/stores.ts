@@ -1,5 +1,5 @@
 import { get, writable } from "svelte/store";
-import type { ChangeEntry, LayoutNode, Project, VaultCommand } from "./types";
+import type { ChangeEntry, DiffTarget, GitStatus, LayoutNode, Project, VaultCommand } from "./types";
 import { ipc } from "./ipc";
 import { launchFor } from "./terminalTypes";
 import * as layoutOps from "./layout";
@@ -10,7 +10,23 @@ export const activeProject = writable<Project | null>(null);
 export const layout = writable<LayoutNode | null>(null);
 export const focusedPaneId = writable<string | null>(null);
 export const changes = writable<ChangeEntry[]>([]);
-export const diffPath = writable<string | null>(null);
+export const diffTarget = writable<DiffTarget | null>(null);
+export const sidebarCollapsed = writable(false);
+/** null = no git repo (snapshot mode). */
+export const gitStatus = writable<GitStatus | null>(null);
+export const gitMode = writable(false);
+export const showUntracked = writable(true);
+
+const untrackedKey = (projectId: string) => `termix.showUntracked.${projectId}`;
+
+export function toggleUntracked() {
+  const project = get(activeProject);
+  showUntracked.update((v) => {
+    const next = !v;
+    if (project) localStorage.setItem(untrackedKey(project.id), String(next));
+    return next;
+  });
+}
 
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -48,8 +64,12 @@ export async function openProject(project: Project) {
   layout.set(tree);
   focusedPaneId.set(layoutOps.collectPanes(tree)[0]?.id ?? null);
 
+  showUntracked.set(localStorage.getItem(untrackedKey(project.id)) !== "false");
+
   try {
-    await ipc.startSession(project.path);
+    const info = await ipc.startSession(project.path);
+    gitMode.set(info.git);
+    if (info.git) await refreshChanges();
   } catch (err) {
     console.error("start_session failed", err);
   }
@@ -66,7 +86,9 @@ export async function closeProject() {
   layout.set(null);
   focusedPaneId.set(null);
   changes.set([]);
-  diffPath.set(null);
+  diffTarget.set(null);
+  gitStatus.set(null);
+  gitMode.set(false);
 }
 
 /** Open a new pane: split the focused pane, or become the root if layout is empty. */
@@ -123,6 +145,15 @@ export function movePane(fromId: string, toId: string) {
   setLayout(layoutOps.swapPanes(tree, fromId, toId));
 }
 
+export function splitPaneAt(fromId: string, targetId: string, dir: "row" | "col", before = false) {
+  if (fromId === targetId) return;
+  const tree = get(layout);
+  if (!tree) return;
+  const result = layoutOps.movePaneToSplit(tree, fromId, targetId, dir, before);
+  if (result) setLayout(result);
+  focusedPaneId.set(targetId);
+}
+
 export function resizeSplit(splitId: string, ratio: number) {
   const tree = get(layout);
   if (!tree) return;
@@ -131,9 +162,15 @@ export function resizeSplit(splitId: string, ratio: number) {
 
 export async function refreshChanges() {
   try {
-    changes.set(await ipc.getChanges());
+    const [entries, status] = await Promise.all([
+      ipc.getChanges(),
+      get(gitMode) ? ipc.getGitStatus() : Promise.resolve(null),
+    ]);
+    changes.set(entries);
+    gitStatus.set(status);
   } catch {
     changes.set([]);
+    gitStatus.set(null);
   }
 }
 

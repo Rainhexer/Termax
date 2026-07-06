@@ -33,11 +33,34 @@ export interface SplitNode {
 
 export type LayoutNode = PaneNode | SplitNode;
 
+export type ChangeArea = "staged" | "unstaged" | "untracked";
+
 export interface ChangeEntry {
   path: string;
-  status: "created" | "modified" | "deleted";
+  /** Snapshot mode: "created" | "modified" | "deleted". Git mode: single letter (A/M/D/R/C/U). */
+  status: string;
   added: number;
   removed: number;
+  /** Present only in git mode. */
+  area?: ChangeArea;
+}
+
+export interface GitStatus {
+  branch: string;
+  detached: boolean;
+  hasUpstream: boolean;
+  ahead: number;
+  behind: number;
+}
+
+export interface SessionInfo {
+  git: boolean;
+  fileCount: number;
+}
+
+export interface DiffTarget {
+  path: string;
+  area?: ChangeArea;
 }
 
 export interface FileDiff {

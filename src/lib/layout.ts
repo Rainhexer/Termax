@@ -14,12 +14,14 @@ export function findPane(node: LayoutNode | null, id: string): PaneNode | null {
   return collectPanes(node).find((p) => p.id === id) ?? null;
 }
 
-/** Replace the pane `targetId` with a split of it and `pane`. Returns new tree. */
+/** Replace the pane `targetId` with a split of it and `pane`. Returns new tree.
+ *  When `before` is true, `pane` becomes the first child (`a`), otherwise the second (`b`). */
 export function splitPane(
   node: LayoutNode,
   targetId: string,
   pane: PaneNode,
   dir: "row" | "col",
+  before = false,
 ): LayoutNode {
   if (node.type === "pane") {
     if (node.id !== targetId) return node;
@@ -28,12 +30,12 @@ export function splitPane(
       id: crypto.randomUUID(),
       dir,
       ratio: 0.5,
-      a: node,
-      b: pane,
+      a: before ? pane : node,
+      b: before ? node : pane,
     };
     return split;
   }
-  return { ...node, a: splitPane(node.a, targetId, pane, dir), b: splitPane(node.b, targetId, pane, dir) };
+  return { ...node, a: splitPane(node.a, targetId, pane, dir, before), b: splitPane(node.b, targetId, pane, dir, before) };
 }
 
 /** Remove pane `targetId`; the sibling takes the split's place. Returns new tree or null if empty. */
@@ -64,4 +66,30 @@ export function setRatio(node: LayoutNode, splitId: string, ratio: number): Layo
   if (node.type === "pane") return node;
   if (node.id === splitId) return { ...node, ratio };
   return { ...node, a: setRatio(node.a, splitId, ratio), b: setRatio(node.b, splitId, ratio) };
+}
+
+/**
+ * Move pane `fromId` out of the tree and insert it as a split neighbor of
+ * `targetId` in direction `dir`.  The new split wraps `targetId` and the
+ * moved pane; `fromId` is removed from its original position first.
+ * When `before` is true, the moved pane becomes the first child (`a`).
+ */
+export function movePaneToSplit(
+  node: LayoutNode,
+  fromId: string,
+  targetId: string,
+  dir: "row" | "col",
+  before = false,
+): LayoutNode | null {
+  if (fromId === targetId) return node;
+  const fromPane = findPane(node, fromId);
+  if (!fromPane) return node;
+
+  const afterRemove = removePane(node, fromId);
+  if (!afterRemove) return null;
+
+  const targetStillExists = findPane(afterRemove, targetId);
+  if (!targetStillExists) return node;
+
+  return splitPane(afterRemove, targetId, { ...fromPane, id: crypto.randomUUID() }, dir, before);
 }

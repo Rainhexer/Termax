@@ -4,7 +4,7 @@
   import {
     activeProject,
     layout,
-    diffPath,
+    diffTarget,
     loadProjects,
     initListeners,
     refreshChanges,
@@ -52,7 +52,7 @@
     <ProjectPicker />
   {/if}
 
-  {#if $diffPath}
-    <DiffModal path={$diffPath} />
+  {#if $diffTarget}
+    <DiffModal target={$diffTarget} />
   {/if}
 </div>
