@@ -175,6 +175,7 @@ pub fn start_session(
         )
     };
 
+    let fetch_app = app.clone();
     let watch_root = root.clone();
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(event) = res {
@@ -209,6 +210,18 @@ pub fn start_session(
         .watch(&root, RecursiveMode::Recursive)
         .map_err(|e| e.to_string())?;
 
+    // Fetch once in the background so ahead/behind reflect the real remote on
+    // open — otherwise a repo that was pushed elsewhere looks up to date until
+    // the user manually fetches. The refs write triggers the usual refresh.
+    if git_mode {
+        let fetch_root = root.clone();
+        std::thread::spawn(move || {
+            if git::fetch(&fetch_root).is_ok() {
+                let _ = fetch_app.emit("fs-changed", ());
+            }
+        });
+    }
+
     *manager.session.lock().unwrap() = Some(ActiveSession {
         root,
         mode,
@@ -233,6 +246,30 @@ pub fn git_status(manager: tauri::State<SessionManager>) -> Result<Option<git::G
         Mode::Git => git::status(&session.root).map(|(status, _)| Some(status)),
         Mode::Snapshot { .. } => Ok(None),
     }
+}
+
+/// Root of the active git-mode session, or an error for snapshot/no session.
+/// The lock is released before the (possibly slow, network-bound) git call.
+fn git_root(manager: &SessionManager) -> Result<PathBuf, String> {
+    let guard = manager.session.lock().unwrap();
+    let session = guard.as_ref().ok_or("no active session")?;
+    match session.mode {
+        Mode::Git => Ok(session.root.clone()),
+        Mode::Snapshot { .. } => Err("not a git repository".into()),
+    }
+}
+
+#[tauri::command]
+pub fn git_fetch(manager: tauri::State<SessionManager>) -> Result<git::GitStatus, String> {
+    let root = git_root(&manager)?;
+    git::fetch(&root)?;
+    git::status(&root).map(|(status, _)| status)
+}
+
+#[tauri::command]
+pub fn git_pull(manager: tauri::State<SessionManager>) -> Result<String, String> {
+    let root = git_root(&manager)?;
+    git::pull(&root)
 }
 
 #[tauri::command]

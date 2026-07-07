@@ -13,6 +13,7 @@
     lockFlash,
     movePane,
     splitPaneAt,
+    draggedPaneId,
   } from "../stores";
 
   type DropZone = "top" | "bottom" | "left" | "right" | "center";
@@ -76,9 +77,10 @@
 
   function onDrop(e: DragEvent) {
     e.preventDefault();
-    const fromId = e.dataTransfer?.getData("text/pane");
+    const fromId = e.dataTransfer?.getData("text/pane") ?? $draggedPaneId;
     const zone = currentZone;
     currentZone = null;
+    draggedPaneId.set(null);
     if (!fromId) return;
 
     if (zone === "center") {
@@ -286,7 +288,8 @@
   <div
     class="flex h-7 shrink-0 cursor-grab items-center gap-1.5 border-b border-zinc-800 bg-zinc-950 px-2 active:cursor-grabbing"
     draggable="true"
-    ondragstart={(e) => e.dataTransfer?.setData("text/pane", pane.id)}
+    ondragstart={(e) => { e.dataTransfer?.setData("text/pane", pane.id); draggedPaneId.set(pane.id); }}
+    ondragend={() => draggedPaneId.set(null)}
   >
     <span class="truncate font-mono text-[11px] {focused ? 'text-emerald-400' : 'text-zinc-400'}">
       {path}

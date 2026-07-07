@@ -97,7 +97,8 @@
   let dragIndex = $state<number | null>(null);
   let dropIndex = $state<number | null>(null);
 
-  function onDrop() {
+  function onDrop(e: DragEvent) {
+    e.preventDefault();
     if (dragIndex === null || dropIndex === null || dragIndex === dropIndex) {
       dragIndex = dropIndex = null;
       return;
@@ -179,13 +180,13 @@
       <div
         class="group flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900/60 px-2 py-1.5"
         class:opacity-50={dragIndex === i}
-        ondragover={(e) => { e.preventDefault(); dropIndex = i; }}
-        ondrop={(e) => { e.preventDefault(); onDrop(); }}
+        ondragover={(e) => { e.preventDefault(); e.dataTransfer!.dropEffect = 'move'; dropIndex = i; }}
+        ondrop={(e) => onDrop(e)}
       >
         <span
           class="cursor-grab select-none text-zinc-600 hover:text-zinc-400 active:cursor-grabbing"
           draggable="true"
-          ondragstart={() => { dragIndex = i; }}
+          ondragstart={(e) => { e.dataTransfer!.setData('text/plain', ''); e.dataTransfer!.effectAllowed = 'move'; dragIndex = i; }}
           ondragend={() => { dragIndex = dropIndex = null; }}
           title="Drag to reorder"
         >⠿</span>
@@ -240,8 +241,8 @@
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
       class="h-2"
-      ondragover={(e) => { e.preventDefault(); dropIndex = launchers.length; }}
-      ondrop={(e) => { e.preventDefault(); onDrop(); }}
+      ondragover={(e) => { e.preventDefault(); e.dataTransfer!.dropEffect = 'move'; dropIndex = launchers.length; }}
+      ondrop={(e) => onDrop(e)}
     ></div>
   </div>
 

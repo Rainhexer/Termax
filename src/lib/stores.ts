@@ -16,6 +16,10 @@ export const sidebarCollapsed = writable(false);
 /** null = no git repo (snapshot mode). */
 export const gitStatus = writable<GitStatus | null>(null);
 export const gitMode = writable(false);
+/** True while a fetch or pull is running; disables the remote buttons. */
+export const gitBusy = writable(false);
+/** Last fetch/pull error message, shown in the Changes panel; null when clear. */
+export const gitError = writable<string | null>(null);
 export const showUntracked = writable(true);
 /** Bumped (debounced) on every fs-changed event; drives file-tree refresh. */
 export const fsTick = writable(0);
@@ -25,6 +29,10 @@ export const highlightedChange = writable<string | null>(null);
 export const explorerLocked = writable(true);
 /** Bumped on every attempted edit while locked, to drive the lock icon flash. */
 export const lockFlash = writable(0);
+
+/** Tracks the pane being dragged (WKWebView workaround: dataTransfer.getData
+ *  returns empty in drop events on macOS). */
+export const draggedPaneId = writable<string | null>(null);
 
 const untrackedKey = (projectId: string) => `termix.showUntracked.${projectId}`;
 
@@ -100,6 +108,8 @@ export async function closeProject() {
   diffTarget.set(null);
   gitStatus.set(null);
   gitMode.set(false);
+  gitBusy.set(false);
+  gitError.set(null);
   highlightedChange.set(null);
   resetTree();
 }
@@ -212,6 +222,35 @@ export async function refreshChanges() {
   } catch {
     changes.set([]);
     gitStatus.set(null);
+  }
+}
+
+/** Fetch from the remote to refresh ahead/behind against the real upstream. */
+export async function fetchRemote() {
+  if (!get(gitMode) || get(gitBusy)) return;
+  gitBusy.set(true);
+  gitError.set(null);
+  try {
+    gitStatus.set(await ipc.gitFetch());
+  } catch (err) {
+    gitError.set(String(err));
+  } finally {
+    gitBusy.set(false);
+  }
+}
+
+/** Fast-forward pull, then refresh the panel. Surfaces git's error on failure. */
+export async function pullRemote() {
+  if (!get(gitMode) || get(gitBusy)) return;
+  gitBusy.set(true);
+  gitError.set(null);
+  try {
+    await ipc.gitPull();
+    await refreshChanges();
+  } catch (err) {
+    gitError.set(String(err));
+  } finally {
+    gitBusy.set(false);
   }
 }
 

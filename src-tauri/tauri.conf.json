@@ -16,7 +16,8 @@
         "width": 1400,
         "height": 900,
         "minWidth": 800,
-        "minHeight": 500
+        "minHeight": 500,
+        "dragDropEnabled": false
       }
     ],
     "security": {
@@ -25,7 +26,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["deb", "rpm"],
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.png"]
+    "targets": ["deb", "rpm", "dmg"],
+    "icon": ["icons/icon.icns", "icons/icon.png", "icons/icon.ico", "icons/32x32.png", "icons/128x128.png"]
   }
 }

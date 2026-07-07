@@ -67,7 +67,7 @@ impl PtyManager {
                 #[cfg(windows)]
                 cmd.args(["/C", c]);
                 #[cfg(not(windows))]
-                cmd.args(["-lc", c]);
+                cmd.args(["-ilc", c]);
                 cmd
             }
             _ => CommandBuilder::new(&shell),

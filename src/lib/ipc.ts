@@ -52,6 +52,8 @@ export const ipc = {
   stopSession: () => invoke<void>("stop_session"),
   getChanges: () => invoke<ChangeEntry[]>("get_changes"),
   getGitStatus: () => invoke<GitStatus | null>("git_status"),
+  gitFetch: () => invoke<GitStatus>("git_fetch"),
+  gitPull: () => invoke<string>("git_pull"),
   getDiff: (path: string, area?: ChangeArea) => invoke<FileDiff>("get_diff", { path, area }),
 
   // Settings

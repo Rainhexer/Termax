@@ -53,6 +53,8 @@ export interface GitStatus {
   branch: string;
   detached: boolean;
   hasUpstream: boolean;
+  /** Tracking ref, e.g. "origin/main"; null when no upstream is set. */
+  upstream: string | null;
   ahead: number;
   behind: number;
 }

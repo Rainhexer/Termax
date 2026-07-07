@@ -212,9 +212,82 @@ fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
+/// Extra install dirs per OS that a GUI app's inherited `$PATH` often misses.
+/// GUI processes (Tauri, launched from Finder/dock) get a stripped PATH that
+/// excludes Homebrew, user-local, and version-manager bins. `~` expands to the
+/// home dir. Add a line here to teach the scanner a new location.
+#[cfg(target_os = "macos")]
+const EXTRA_DIRS: &[&str] = &[
+    "/opt/homebrew/bin",     // Homebrew (Apple Silicon)
+    "/usr/local/bin",        // Homebrew (Intel), common installs
+    "~/.local/bin",          // pipx, user pip
+    "~/.npm-global/bin",     // npm global prefix
+    "~/.bun/bin",            // Bun
+    "~/.cargo/bin",          // Rust/cargo
+    "~/.deno/bin",           // Deno
+    "~/.volta/bin",          // Volta
+    "~/go/bin",              // Go
+];
+
+#[cfg(target_os = "linux")]
+const EXTRA_DIRS: &[&str] = &[
+    "/usr/local/bin",
+    "~/.local/bin",          // pipx, user pip
+    "~/.npm-global/bin",     // npm global prefix
+    "~/.bun/bin",            // Bun
+    "~/.cargo/bin",          // Rust/cargo
+    "~/.deno/bin",           // Deno
+    "~/.volta/bin",          // Volta
+    "~/go/bin",              // Go
+    "/snap/bin",             // Snap
+    "/var/lib/flatpak/exports/bin",
+];
+
+#[cfg(target_os = "windows")]
+const EXTRA_DIRS: &[&str] = &[
+    "~/AppData/Roaming/npm",             // npm global
+    "~/AppData/Local/Microsoft/WinGet/Links", // winget shims
+    "~/.bun/bin",
+    "~/.cargo/bin",
+    "~/scoop/shims",                     // Scoop
+];
+
+/// Expand a leading `~` to the user's home directory.
+fn expand_home(dir: &str) -> Option<PathBuf> {
+    match dir.strip_prefix("~/") {
+        Some(rest) => dirs_home().map(|h| h.join(rest)),
+        None => Some(PathBuf::from(dir)),
+    }
+}
+
+/// Home dir without pulling an extra crate: HOME on unix, USERPROFILE on windows.
+fn dirs_home() -> Option<PathBuf> {
+    #[cfg(windows)]
+    let key = "USERPROFILE";
+    #[cfg(not(windows))]
+    let key = "HOME";
+    std::env::var_os(key).map(PathBuf::from)
+}
+
+/// All dirs to probe: inherited `$PATH` first, then OS-specific well-known dirs
+/// (deduped, home-expanded). Order preserves `$PATH` precedence.
+fn search_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(paths) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&paths));
+    }
+    for extra in EXTRA_DIRS {
+        if let Some(dir) = expand_home(extra) {
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+    }
+    dirs
+}
+
 fn find_on_path(bin: &str) -> Option<PathBuf> {
-    let paths = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&paths) {
+    for dir in search_dirs() {
         let candidate = dir.join(bin);
         if is_executable(&candidate) {
             return Some(candidate);
