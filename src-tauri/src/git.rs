@@ -9,6 +9,8 @@ pub struct GitStatus {
     pub branch: String,
     pub detached: bool,
     pub has_upstream: bool,
+    /// Tracking ref, e.g. "origin/main"; None when no upstream is set.
+    pub upstream: Option<String>,
     pub ahead: usize,
     pub behind: usize,
 }
@@ -104,6 +106,7 @@ pub fn status(root: &Path) -> Result<(GitStatus, Vec<GitChangeEntry>), String> {
     let mut branch = String::from("HEAD");
     let mut detached = false;
     let mut has_upstream = false;
+    let mut upstream = None;
     let mut ahead = 0;
     let mut behind = 0;
     let mut entries = Vec::new();
@@ -121,8 +124,9 @@ pub fn status(root: &Path) -> Result<(GitStatus, Vec<GitChangeEntry>), String> {
             } else {
                 branch = rest.to_string();
             }
-        } else if line.starts_with("# branch.upstream ") {
+        } else if let Some(rest) = line.strip_prefix("# branch.upstream ") {
             has_upstream = true;
+            upstream = Some(rest.to_string());
         } else if let Some(rest) = line.strip_prefix("# branch.ab ") {
             for part in rest.split_whitespace() {
                 if let Some(n) = part.strip_prefix('+') {
@@ -204,11 +208,25 @@ pub fn status(root: &Path) -> Result<(GitStatus, Vec<GitChangeEntry>), String> {
             branch,
             detached,
             has_upstream,
+            upstream,
             ahead,
             behind,
         },
         entries,
     ))
+}
+
+/// Fetch from the default remote so ahead/behind reflect the real upstream.
+/// Best-effort: network/auth failures bubble up as the caller's error.
+pub fn fetch(root: &Path) -> Result<(), String> {
+    git(root, &["fetch", "--quiet"]).map(|_| ())
+}
+
+/// Fast-forward pull. Returns git's stdout on success. A diverged branch or a
+/// dirty worktree that blocks the fast-forward comes back as git's stderr Err,
+/// which the UI surfaces verbatim.
+pub fn pull(root: &Path) -> Result<String, String> {
+    git_text(root, &["pull", "--ff-only"]).map(|s| s.trim().to_string())
 }
 
 /// Blob content, or None if the object doesn't exist or is binary.

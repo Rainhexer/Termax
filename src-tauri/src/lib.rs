@@ -41,6 +41,8 @@ pub fn run() {
             session::start_session,
             session::stop_session,
             session::git_status,
+            session::git_fetch,
+            session::git_pull,
             session::get_changes,
             session::get_diff,
             fstree::list_dir,

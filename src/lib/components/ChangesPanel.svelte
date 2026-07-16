@@ -2,9 +2,13 @@
   import {
     changes,
     diffTarget,
+    fetchRemote,
+    gitBusy,
+    gitError,
     gitMode,
     gitStatus,
     highlightedChange,
+    pullRemote,
     refreshChanges,
     showUntracked,
     toggleUntracked,
@@ -80,11 +84,41 @@
           {#if $gitStatus.behind > 0}
             <span class="font-mono text-[10px] text-amber-500" title="Commits behind upstream">↓{$gitStatus.behind}</span>
           {/if}
+          <button
+            class="rounded px-1 font-mono text-[11px] text-zinc-500 hover:bg-zinc-800 hover:text-emerald-400 disabled:opacity-40"
+            title="Fetch from remote (check for updates)"
+            disabled={$gitBusy}
+            onclick={fetchRemote}
+          >⤓</button>
         {:else}
           <span class="text-[10px] text-zinc-600">(no remote)</span>
         {/if}
       {/if}
     </div>
+
+    {#if $gitStatus && $gitStatus.behind > 0}
+      {@const n = $gitStatus.behind}
+      <div class="mx-1 mb-1 flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-950/40 px-2 py-1.5">
+        <span class="min-w-0 flex-1 text-[11px] text-amber-300">
+          Behind {$gitStatus.upstream ?? "upstream"} by {n} commit{n === 1 ? "" : "s"}.
+          {#if $gitStatus.ahead > 0}Local branch has diverged.{:else}Pull to update.{/if}
+        </span>
+        <button
+          class="shrink-0 rounded bg-amber-500/20 px-2 py-0.5 text-[11px] font-semibold text-amber-200 hover:bg-amber-500/30 disabled:opacity-50"
+          title={$gitStatus.ahead > 0
+            ? "git pull --ff-only (will fail on a diverged branch; resolve in a terminal)"
+            : "git pull --ff-only"}
+          disabled={$gitBusy}
+          onclick={pullRemote}
+        >{$gitBusy ? "Pulling…" : "Pull"}</button>
+      </div>
+    {/if}
+
+    {#if $gitError}
+      <div class="mx-1 mb-1 rounded-md border border-red-500/40 bg-red-950/40 px-2 py-1">
+        <p class="whitespace-pre-wrap break-words font-mono text-[10px] text-red-300">{$gitError}</p>
+      </div>
+    {/if}
   {:else}
     <p class="px-1 pb-0.5 text-[10px] text-zinc-600">No git repository</p>
   {/if}
