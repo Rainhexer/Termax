@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { PaneNode } from "../types";
-  import { attach, fitPane, focusTerminal, loadingPanes } from "../terminals";
+  import { attach, fitPane, focusTerminal, loadingPanes, fileDropPaneId } from "../terminals";
   import { activeProject, focusedPaneId, closePane, addPane, movePane, splitPaneAt } from "../stores";
 
   type DropZone = "top" | "bottom" | "left" | "right" | "center";
@@ -11,6 +11,7 @@
   let currentZone = $state<DropZone | null>(null);
 
   const focused = $derived($focusedPaneId === pane.id);
+  const fileDropTarget = $derived($fileDropPaneId === pane.id);
   const loading = $derived(pane.launch && $loadingPanes.has(pane.id));
 
   function getDropZone(e: DragEvent): DropZone | null {
@@ -76,13 +77,17 @@
 <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
 <div
   bind:this={self}
+  data-pane-id={pane.id}
   class="relative flex h-full w-full min-w-0 min-h-0 flex-col overflow-hidden rounded-lg border bg-[#131316] transition-colors
-    {currentZone && currentZone !== 'center' ? 'border-emerald-400' : focused ? 'border-emerald-500/60' : 'border-zinc-800'}"
+    {fileDropTarget || (currentZone && currentZone !== 'center') ? 'border-emerald-400' : focused ? 'border-emerald-500/60' : 'border-zinc-800'}"
   onmousedown={focus}
   ondragover={onDragOver}
   ondragleave={onDragLeave}
   ondrop={onDrop}
 >
+  {#if fileDropTarget}
+    <div class="pointer-events-none absolute inset-0 z-20 rounded-lg bg-emerald-500/10 ring-2 ring-inset ring-emerald-400"></div>
+  {/if}
   {#if currentZone && currentZone !== "center"}
     <div class="pointer-events-none absolute inset-0 z-10 rounded-lg bg-emerald-500/5"></div>
     {#if currentZone === "top"}

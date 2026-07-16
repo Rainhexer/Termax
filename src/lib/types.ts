@@ -11,7 +11,23 @@ export interface Project {
   name: string;
   path: string;
   commands: VaultCommand[];
+  /** Persisted workspace. Newer projects store a {@link Workspace}; older ones
+   *  store a bare {@link LayoutNode} (single-tab, auto-migrated on open). */
+  layout: Workspace | LayoutNode | null;
+}
+
+/** One tab: a full terminal/editor grid plus its focused pane. */
+export interface Tab {
+  id: string;
+  title: string;
   layout: LayoutNode | null;
+  focusedPaneId: string | null;
+}
+
+/** Persisted per-project tab set. Distinguished from a bare LayoutNode by `tabs`. */
+export interface Workspace {
+  tabs: Tab[];
+  activeTabId: string;
 }
 
 export interface PaneNode {

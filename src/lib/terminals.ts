@@ -3,11 +3,15 @@ import { CanvasAddon } from "@xterm/addon-canvas";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { get, writable } from "svelte/store";
 import { ipc } from "./ipc";
 import { settings } from "./settings";
 
 export const loadingPanes = writable<Set<string>>(new Set());
+
+// Pane currently under an OS file drag (for drop-target highlight).
+export const fileDropPaneId = writable<string | null>(null);
 
 interface Entry {
   term: Terminal;
@@ -103,6 +107,45 @@ export async function initPtyListeners(onExit: (paneId: string) => void) {
     if (entry) entry.exited = true;
     removeLoading(e.payload.pane_id);
     onExit(e.payload.pane_id);
+  });
+}
+
+// Backslash-escape shell-special chars so a dropped path pastes as a single
+// argument (matches how native terminals handle file drops). Coding CLIs
+// (claude/opencode) read this as literal text; the shell reads it as one path.
+function shellEscapePath(path: string): string {
+  return path.replace(/([^A-Za-z0-9_./:@%+=-])/g, "\\$1");
+}
+
+// Map a physical (device-pixel) cursor position to the pane under it.
+function paneIdAtPoint(physX: number, physY: number): string | null {
+  const dpr = window.devicePixelRatio || 1;
+  const el = document.elementFromPoint(physX / dpr, physY / dpr);
+  const host = el?.closest<HTMLElement>("[data-pane-id]");
+  return host?.dataset.paneId ?? null;
+}
+
+let fileDropReady = false;
+
+// OS file drops are intercepted by the webview (dragDropEnabled), so DOM drop
+// events never fire for external files. Listen to Tauri's drag-drop event,
+// find the pane under the cursor, and type the escaped paths into its PTY.
+export async function initFileDrop() {
+  if (fileDropReady) return;
+  fileDropReady = true;
+  await getCurrentWebview().onDragDropEvent((e) => {
+    const p = e.payload;
+    if (p.type === "over") {
+      fileDropPaneId.set(paneIdAtPoint(p.position.x, p.position.y));
+    } else if (p.type === "leave") {
+      fileDropPaneId.set(null);
+    } else if (p.type === "drop") {
+      fileDropPaneId.set(null);
+      const paneId = paneIdAtPoint(p.position.x, p.position.y);
+      if (!paneId || !p.paths.length) return;
+      const text = p.paths.map(shellEscapePath).join(" ") + " ";
+      typeInPane(paneId, text);
+    }
   });
 }
 

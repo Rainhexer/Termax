@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <rect width="1024" height="1024" rx="200" ry="200" fill="#18181B"/>
+
+  <!-- Chevron scaled 1.35x, centered on canvas -->
+  <polygon points="160,279 160,393 322,512 160,656 160,744 457,512" fill="#34D399"/>
+
+  <!-- Circle: r=132 stroke=88 (scaled), cx=687 cy=440 -->
+  <circle cx="687" cy="440" r="132" fill="none" stroke="#34D399" stroke-width="88"/>
+
+  <!-- Cursor scaled 1.35x -->
+  <rect x="511" y="657" width="353" height="88" fill="#34D399"/>
+</svg>

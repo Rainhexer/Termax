@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <rect width="1024" height="1024" rx="200" ry="200" fill="#1C1C1E"/>
+
+  <!-- Chevron: arm width 80px, y 300-724, center 512 -->
+  <polygon points="140,300 290,512 140,724 220,724 370,512 220,300" fill="#3DDC97"/>
+
+  <!-- Underscore: wider + taller for kawaii balance -->
+  <rect x="400" y="648" width="170" height="78" rx="12" fill="#3DDC97"/>
+
+  <!-- Terminal zero: slightly oval, stroke=75 matches arm weight -->
+  <!-- cx=720 rx=110 ry=130 → visual outer rx=147.5 ry=167.5 → right edge=867, padding=27 -->
+  <ellipse cx="720" cy="500" rx="110" ry="130" fill="none" stroke="#3DDC97" stroke-width="75"/>
+
+  <!-- Forward slash through zero (terminal zero style) -->
+  <!-- from lower-left inner to upper-right inner of ellipse -->
+  <line x1="660" y1="590" x2="780" y2="410" stroke="#3DDC97" stroke-width="50" stroke-linecap="round"/>
+</svg>

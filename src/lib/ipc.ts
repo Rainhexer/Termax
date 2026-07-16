@@ -10,6 +10,7 @@ import type {
   SessionInfo,
   TreeEntry,
   VaultCommand,
+  Workspace,
 } from "./types";
 import type { AppSettings, DetectedAgent } from "./settings";
 
@@ -26,7 +27,7 @@ export const ipc = {
   listProjects: () => invoke<Project[]>("list_projects"),
   addProject: (name: string, path: string) => invoke<Project>("add_project", { name, path }),
   removeProject: (id: string) => invoke<void>("remove_project", { id }),
-  saveLayout: (id: string, layout: LayoutNode | null) =>
+  saveLayout: (id: string, layout: Workspace | LayoutNode | null) =>
     invoke<void>("save_layout", { id, layout }),
   addVaultCommand: (projectId: string, name: string, command: string, terminalType: string) =>
     invoke<VaultCommand>("add_vault_command", { projectId, name, command, terminalType }),

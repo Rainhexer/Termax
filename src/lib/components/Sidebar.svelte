@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { activeProject, addPane, closeProject, sidebarCollapsed, runVaultCommand } from "../stores";
+  import { activeProject, addPane, closeProject, sidebarCollapsed, runVaultCommand, newTab } from "../stores";
   import { enabledLaunchers, launcherById, settings, settingsOpen } from "../settings";
   import CommandVault from "./CommandVault.svelte";
   import ChangesPanel from "./ChangesPanel.svelte";
@@ -43,6 +43,11 @@
         title="Expand sidebar"
         onclick={() => sidebarCollapsed.set(false)}
       >▶</button>
+      <button
+        class="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-base text-zinc-500 hover:bg-zinc-800 hover:text-emerald-400"
+        title="New tab"
+        onclick={newTab}
+      >+</button>
       <button
         class="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
         title="Settings"
@@ -101,33 +106,38 @@
       </div>
     </div>
   {:else}
-    <div class="flex items-center gap-1 p-1">
+    <div class="flex items-start gap-2 p-3 pb-2">
       <button
-        class="rounded-md px-1.5 py-0.5 text-sm text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+        class="mt-0.5 rounded-md px-1.5 py-0.5 text-sm text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
         title="Back to projects"
         onclick={closeProject}
       >←</button>
-      <button
-        class="ml-auto rounded-md p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
-        title="Settings"
-        onclick={() => settingsOpen.set(true)}
-      >
-        <TerminalIcon type="gear" className="h-3.5 w-3.5" />
-      </button>
-      <button
-        class="rounded-md px-1 py-0.5 text-xs text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
-        title="Collapse sidebar"
-        onclick={() => sidebarCollapsed.set(true)}
-      >◀</button>
+      <div class="min-w-0 flex-1">
+        <h1 class="truncate text-sm font-semibold text-zinc-100">{$activeProject?.name}</h1>
+        <p class="truncate font-mono text-[10px] text-zinc-600">{$activeProject?.path}</p>
+      </div>
+      <div class="flex items-center gap-0.5">
+        <button
+          class="rounded-md px-1.5 py-0.5 text-base leading-none text-zinc-500 hover:bg-zinc-800 hover:text-emerald-400"
+          title="New tab"
+          onclick={newTab}
+        >+</button>
+        <button
+          class="rounded-md p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+          title="Settings"
+          onclick={() => settingsOpen.set(true)}
+        >
+          <TerminalIcon type="gear" className="h-3.5 w-3.5" />
+        </button>
+        <button
+          class="rounded-md px-1 py-0.5 text-xs text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+          title="Collapse sidebar"
+          onclick={() => sidebarCollapsed.set(true)}
+        >◀</button>
+      </div>
     </div>
 
-    <div class="flex flex-1 flex-col gap-4 overflow-y-auto p-3 pt-0">
-      <div class="flex items-center gap-2">
-        <div class="min-w-0">
-          <h1 class="truncate text-sm font-semibold text-zinc-100">{$activeProject?.name}</h1>
-          <p class="truncate font-mono text-[10px] text-zinc-600">{$activeProject?.path}</p>
-        </div>
-      </div>
+    <div class="flex flex-1 flex-col gap-4 overflow-y-auto px-3 pb-3">
 
       <div class="flex flex-col gap-1">
         <h2 class="px-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Launch</h2>

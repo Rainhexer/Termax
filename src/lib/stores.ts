@@ -1,5 +1,5 @@
 import { get, writable } from "svelte/store";
-import type { ChangeEntry, DiffTarget, GitStatus, LayoutNode, PaneNode, Project, VaultCommand } from "./types";
+import type { ChangeEntry, DiffTarget, GitStatus, LayoutNode, PaneNode, Project, Tab, VaultCommand, Workspace } from "./types";
 import { ipc } from "./ipc";
 import { launchFor, launcherById } from "./settings";
 import * as layoutOps from "./layout";
@@ -8,6 +8,11 @@ import { loadDir, resetTree } from "./filetree";
 
 export const projects = writable<Project[]>([]);
 export const activeProject = writable<Project | null>(null);
+/** All tabs in the active project. */
+export const tabs = writable<Tab[]>([]);
+/** Id of the tab whose grid is currently shown. */
+export const activeTabId = writable<string | null>(null);
+/** Working grid of the active tab. Pane ops mutate this; tab switches swap it. */
 export const layout = writable<LayoutNode | null>(null);
 export const focusedPaneId = writable<string | null>(null);
 export const changes = writable<ChangeEntry[]>([]);
@@ -39,21 +44,121 @@ export function toggleUntracked() {
 
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
 
+/** Fold the live grid (`layout`/`focusedPaneId`) back into the active tab. */
+function syncActiveTab() {
+  const id = get(activeTabId);
+  tabs.update((list) =>
+    list.map((t) =>
+      t.id === id ? { ...t, layout: get(layout), focusedPaneId: get(focusedPaneId) } : t,
+    ),
+  );
+}
+
 function persistLayout() {
   const project = get(activeProject);
   if (!project) return;
-  const tree = get(layout);
+  syncActiveTab();
+  const workspace: Workspace = { tabs: get(tabs), activeTabId: get(activeTabId)! };
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    ipc.saveLayout(project.id, tree).catch(() => {});
+    ipc.saveLayout(project.id, workspace).catch(() => {});
     projects.update((list) =>
-      list.map((p) => (p.id === project.id ? { ...p, layout: tree } : p)),
+      list.map((p) => (p.id === project.id ? { ...p, layout: workspace } : p)),
     );
   }, 500);
 }
 
 function setLayout(tree: LayoutNode | null) {
   layout.set(tree);
+  persistLayout();
+}
+
+/** Build the tab set for a project, migrating legacy single-layout saves. */
+function loadWorkspace(project: Project): Workspace {
+  const raw = project.layout as Workspace | LayoutNode | null;
+  if (raw && "tabs" in raw && Array.isArray(raw.tabs) && raw.tabs.length) {
+    const activeId = raw.tabs.some((t) => t.id === raw.activeTabId)
+      ? raw.activeTabId
+      : raw.tabs[0].id;
+    return { tabs: raw.tabs, activeTabId: activeId };
+  }
+  // Legacy: bare LayoutNode (or null) → wrap in a single tab.
+  const tree = raw && "type" in raw ? (raw as LayoutNode) : layoutOps.newPane(null, "shell");
+  const tab: Tab = {
+    id: crypto.randomUUID(),
+    title: "Tab 1",
+    layout: tree,
+    focusedPaneId: layoutOps.collectPanes(tree)[0]?.id ?? null,
+  };
+  return { tabs: [tab], activeTabId: tab.id };
+}
+
+/** Load a tab's grid into the live stores (does not touch other tabs). */
+function activateTab(tab: Tab) {
+  activeTabId.set(tab.id);
+  layout.set(tab.layout);
+  focusedPaneId.set(tab.focusedPaneId ?? layoutOps.collectPanes(tab.layout)[0]?.id ?? null);
+}
+
+/** Switch to another tab, saving the current grid first. */
+export function switchTab(id: string) {
+  if (get(activeTabId) === id) return;
+  syncActiveTab();
+  const next = get(tabs).find((t) => t.id === id);
+  if (!next) return;
+  activateTab(next);
+  persistLayout();
+}
+
+/** Open a fresh tab with one shell and switch to it. */
+export function newTab() {
+  syncActiveTab();
+  const pane = layoutOps.newPane(null, "shell");
+  const tab: Tab = {
+    id: crypto.randomUUID(),
+    title: `Tab ${get(tabs).length + 1}`,
+    layout: pane,
+    focusedPaneId: pane.id,
+  };
+  tabs.update((list) => [...list, tab]);
+  activateTab(tab);
+  persistLayout();
+}
+
+/** Close a tab, destroying its terminals. Never removes the last tab. */
+export function closeTab(id: string) {
+  const list = get(tabs);
+  if (list.length <= 1) return;
+  const tab = list.find((t) => t.id === id);
+  if (!tab) return;
+  for (const p of layoutOps.collectPanes(tab.layout)) {
+    for (const [cmdId, linked] of commandPanes) {
+      if (linked === p.id) commandPanes.delete(cmdId);
+    }
+    terminals.destroyPane(p.id);
+  }
+  const idx = list.findIndex((t) => t.id === id);
+  const remaining = list.filter((t) => t.id !== id);
+  const wasActive = get(activeTabId) === id;
+  tabs.set(remaining);
+  if (wasActive) activateTab(remaining[Math.min(idx, remaining.length - 1)]);
+  persistLayout();
+}
+
+/** Switch to the tab `dir` steps from the active one, wrapping around. */
+export function cycleTab(dir: 1 | -1) {
+  const list = get(tabs);
+  if (list.length <= 1) return;
+  const idx = list.findIndex((t) => t.id === get(activeTabId));
+  if (idx === -1) return;
+  const next = list[(idx + dir + list.length) % list.length];
+  switchTab(next.id);
+}
+
+export function renameTab(id: string, title: string) {
+  const name = title.trim();
+  if (!name) return;
+  tabs.update((list) => list.map((t) => (t.id === id ? { ...t, title: name } : t)));
   persistLayout();
 }
 
@@ -66,12 +171,9 @@ export async function openProject(project: Project) {
   activeProject.set(project);
   changes.set([]);
 
-  let tree = project.layout;
-  if (!tree) {
-    tree = layoutOps.newPane(null, "shell");
-  }
-  layout.set(tree);
-  focusedPaneId.set(layoutOps.collectPanes(tree)[0]?.id ?? null);
+  const ws = loadWorkspace(project);
+  tabs.set(ws.tabs);
+  activateTab(ws.tabs.find((t) => t.id === ws.activeTabId)!);
 
   showUntracked.set(localStorage.getItem(untrackedKey(project.id)) !== "false");
 
@@ -90,10 +192,14 @@ export async function closeProject() {
   const current = get(activeProject);
   if (!current) return;
   clearTimeout(saveTimer);
-  await ipc.saveLayout(current.id, get(layout)).catch(() => {});
+  syncActiveTab();
+  const workspace: Workspace = { tabs: get(tabs), activeTabId: get(activeTabId)! };
+  await ipc.saveLayout(current.id, workspace).catch(() => {});
   terminals.destroyAll();
   await ipc.stopSession().catch(() => {});
   activeProject.set(null);
+  tabs.set([]);
+  activeTabId.set(null);
   layout.set(null);
   focusedPaneId.set(null);
   changes.set([]);
@@ -218,4 +324,5 @@ export async function refreshChanges() {
 /** Wire global PTY listeners; pane auto-closes when its process exits. */
 export function initListeners() {
   terminals.initPtyListeners((paneId) => closePane(paneId));
+  terminals.initFileDrop();
 }
