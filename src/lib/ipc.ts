@@ -75,6 +75,8 @@ export const ipc = {
   // File tree
   listDir: (path: string) => invoke<TreeEntry[]>("list_dir", { path }),
   readFile: (path: string) => invoke<FileContent>("read_file", { path }),
+  readFileDataUrl: (path: string) => invoke<string>("read_file_data_url", { path }),
   writeFile: (path: string, content: string) => invoke<void>("write_file", { path, content }),
   revealInFileManager: (path: string) => invoke<void>("reveal_in_file_manager", { path }),
+  openInDefaultApp: (path: string) => invoke<void>("open_in_default_app", { path }),
 };

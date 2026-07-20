@@ -1,0 +1,23 @@
+pkgbase = termax-git
+	pkgdesc = Terminal multiplexer and project manager for AI coding agents
+	pkgver = r1.0000000
+	pkgrel = 1
+	url = https://github.com/Rainhexer/Termax
+	arch = x86_64
+	arch = aarch64
+	license = MIT
+	makedepends = git
+	makedepends = rust
+	makedepends = cargo
+	makedepends = nodejs
+	makedepends = npm
+	makedepends = pkgconf
+	depends = webkit2gtk-4.1
+	depends = gtk3
+	depends = hicolor-icon-theme
+	provides = termax
+	conflicts = termax
+	source = termax::git+https://github.com/Rainhexer/Termax.git
+	sha256sums = SKIP
+
+pkgname = termax-git

@@ -1,0 +1,62 @@
+# Maintainer: Ravn <magnusrrc@gmail.com>
+_pkgname=termax
+pkgname=termax-git
+pkgver=r1.0000000
+pkgrel=1
+pkgdesc="Terminal multiplexer and project manager for AI coding agents"
+arch=('x86_64' 'aarch64')
+url="https://github.com/Rainhexer/Termax"
+license=('MIT')
+depends=('webkit2gtk-4.1' 'gtk3' 'hicolor-icon-theme')
+makedepends=('git' 'rust' 'cargo' 'nodejs' 'npm' 'pkgconf')
+provides=("$_pkgname")
+conflicts=("$_pkgname")
+source=("$_pkgname::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+	cd "$srcdir/$_pkgname"
+	printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+	cd "$srcdir/$_pkgname"
+	# Reproducible, network-pinned install of the frontend deps.
+	npm ci
+}
+
+build() {
+	cd "$srcdir/$_pkgname"
+	# Build the frontend (vite -> dist) and the Rust binary, no bundling.
+	# --no-bundle skips .deb/.rpm/AppImage packaging; we install by hand below.
+	export RUSTUP_TOOLCHAIN=stable
+	npm run tauri build -- --no-bundle
+}
+
+package() {
+	cd "$srcdir/$_pkgname"
+
+	install -Dm755 "src-tauri/target/release/$_pkgname" \
+		"$pkgdir/usr/bin/$_pkgname"
+
+	install -Dm644 "src-tauri/icons/128x128.png" \
+		"$pkgdir/usr/share/icons/hicolor/128x128/apps/$_pkgname.png"
+	install -Dm644 "src-tauri/icons/32x32.png" \
+		"$pkgdir/usr/share/icons/hicolor/32x32/apps/$_pkgname.png"
+
+	install -Dm644 LICENSE \
+		"$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+
+	install -Dm644 /dev/stdin \
+		"$pkgdir/usr/share/applications/$_pkgname.desktop" <<-EOF
+		[Desktop Entry]
+		Name=Termax
+		Comment=$pkgdesc
+		Exec=$_pkgname
+		Icon=$_pkgname
+		Terminal=false
+		Type=Application
+		Categories=Development;Utility;
+		StartupWMClass=Termax
+	EOF
+}

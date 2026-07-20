@@ -1,6 +1,6 @@
 import { get, writable } from "svelte/store";
 import { ask } from "@tauri-apps/plugin-dialog";
-import type { ChangeEntry, DiffTarget, GitStatus, LayoutNode, PaneNode, Project, Tab, VaultCommand, Workspace } from "./types";
+import type { ChangeEntry, GitStatus, LayoutNode, PaneNode, Project, Tab, VaultCommand, Workspace } from "./types";
 import { ipc } from "./ipc";
 import { launchFor, launcherById } from "./settings";
 import * as layoutOps from "./layout";
@@ -17,7 +17,6 @@ export const activeTabId = writable<string | null>(null);
 export const layout = writable<LayoutNode | null>(null);
 export const focusedPaneId = writable<string | null>(null);
 export const changes = writable<ChangeEntry[]>([]);
-export const diffTarget = writable<DiffTarget | null>(null);
 export const sidebarCollapsed = writable(false);
 /** null = no git repo (snapshot mode). */
 export const gitStatus = writable<GitStatus | null>(null);
@@ -240,7 +239,6 @@ export async function closeProject() {
   layout.set(null);
   focusedPaneId.set(null);
   changes.set([]);
-  diffTarget.set(null);
   gitStatus.set(null);
   gitMode.set(false);
   gitBusy.set(false);
@@ -285,13 +283,17 @@ export function splitFocused(dir: "row" | "col") {
   addPane(null, "shell", dir);
 }
 
-/** Open a file in an editor pane; focuses the existing pane if already open. */
-export function openFile(path: string) {
+/** Open a file in an editor pane; focuses the existing pane if already open.
+ *  `diff` opens (or flips an already-open pane) straight to the changes view. */
+export function openFile(path: string, opts: { diff?: boolean } = {}) {
   const tree = get(layout);
   const existing = layoutOps
     .collectPanes(tree)
     .find((p) => p.kind === "editor" && p.file === path);
   if (existing) {
+    if (opts.diff && !existing.diff) {
+      setLayout(layoutOps.setPaneDiff(tree!, existing.id, true));
+    }
     focusedPaneId.set(existing.id);
     return;
   }
@@ -303,6 +305,7 @@ export function openFile(path: string) {
     launch: null,
     kind: "editor",
     file: path,
+    diff: opts.diff,
   };
   if (!tree) {
     setLayout(pane);
@@ -311,6 +314,13 @@ export function openFile(path: string) {
     setLayout(layoutOps.splitPane(tree, target, pane, "row"));
   }
   focusedPaneId.set(pane.id);
+}
+
+/** Persist an editor pane's diff-view toggle so it survives reloads/restarts. */
+export function setPaneDiff(paneId: string, diff: boolean) {
+  const tree = get(layout);
+  if (!tree) return;
+  setLayout(layoutOps.setPaneDiff(tree, paneId, diff));
 }
 
 export function closePane(paneId: string) {

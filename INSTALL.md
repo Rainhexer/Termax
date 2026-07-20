@@ -48,14 +48,25 @@ REPO=Rainhexer/Termax; u=$(curl -fsSL "https://api.github.com/repos/$REPO/releas
 
 ## Arch / Manjaro / EndeavourOS
 
-No AUR package yet — use the AppImage (top of this file) after installing its
-runtime deps, or [build from source](BUILD.md):
+Build and install the native package from source with `makepkg`. This compiles
+Termax and installs the binary, desktop entry, and icons — no AppImage needed.
 
 ```sh
-sudo pacman -S --needed webkit2gtk-4.1 fuse2 gtk3
+git clone https://github.com/Rainhexer/Termax.git
+cd Termax/aur
+makepkg -si
 ```
 
-Then run the AppImage one-liner above.
+`makepkg -si` pulls the build tools and runtime deps automatically, compiles the
+app, and installs it with `pacman`. Launch it from your app menu or run `termax`.
+
+To uninstall: `sudo pacman -R termax-git`.
+
+> **Prefer the AppImage?** It runs without installing. Grab the runtime deps
+> first, then use the AppImage one-liner at the top of this file:
+> ```sh
+> sudo pacman -S --needed webkit2gtk-4.1 fuse2 gtk3
+> ```
 
 ---
 

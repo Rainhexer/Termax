@@ -2,7 +2,6 @@
   import {
     changes,
     checkoutBranch,
-    diffTarget,
     fetchRemote,
     gitBusy,
     gitError,
@@ -12,6 +11,7 @@
     highlightedChange,
     loadBranches,
     openBranchOnRemote,
+    openFile,
     pullRemote,
     refreshChanges,
     restricted,
@@ -273,7 +273,7 @@
           {flashPath === change.path ? 'bg-emerald-500/20' : ''}"
         data-path={change.path}
         title="{change.path}{change.area ? ` (${change.area})` : ''}"
-        onclick={() => diffTarget.set({ path: change.path, area: change.area })}
+        onclick={() => openFile(change.path, { diff: true })}
       >
         <span class="w-3 shrink-0 font-mono text-[11px] font-bold {b.color}">{b.char}</span>
         <span class="min-w-0 flex-1 truncate font-mono text-[11px] text-zinc-300">{change.path}</span>

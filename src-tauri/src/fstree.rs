@@ -167,6 +167,43 @@ pub fn read_file(
     })
 }
 
+/// Read a file as a base64 `data:` URL for inline image/asset preview.
+#[tauri::command]
+pub fn read_file_data_url(
+    manager: tauri::State<SessionManager>,
+    path: String,
+) -> Result<String, String> {
+    use base64::Engine;
+    let (root, _) = manager.root_info().ok_or("no active session")?;
+    let abs = resolve(&root, &path)?;
+    let meta = std::fs::metadata(&abs).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err(format!("not a file: {path}"));
+    }
+    if meta.len() > MAX_EDITOR_FILE_SIZE {
+        return Err("file too large to preview".into());
+    }
+    let ext = abs
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let mime = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        "avif" => "image/avif",
+        "svg" => "image/svg+xml",
+        _ => "application/octet-stream",
+    };
+    let bytes = std::fs::read(&abs).map_err(|e| e.to_string())?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(format!("data:{mime};base64,{b64}"))
+}
+
 #[tauri::command]
 pub fn write_file(
     manager: tauri::State<SessionManager>,
@@ -213,6 +250,43 @@ pub fn reveal_in_file_manager(
     {
         Command::new("explorer")
             .arg(format!("/select,{}", abs.display()))
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Open a file in the OS default application (external editor / viewer).
+#[tauri::command]
+pub fn open_in_default_app(
+    manager: tauri::State<SessionManager>,
+    path: String,
+) -> Result<(), String> {
+    let (root, _) = manager.root_info().ok_or("no active session")?;
+    let abs = resolve(&root, &path)?;
+    if !abs.exists() {
+        return Err(format!("not found: {path}"));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("xdg-open")
+            .arg(&abs)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(&abs)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(&abs)
             .spawn()
             .map_err(|e| e.to_string())?;
     }

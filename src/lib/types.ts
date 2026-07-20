@@ -40,6 +40,8 @@ export interface PaneNode {
   kind?: "terminal" | "editor";
   /** Project-relative path of the file shown; editor panes only. */
   file?: string;
+  /** Editor panes: open showing the diff (changes) view instead of plain content. */
+  diff?: boolean;
 }
 
 export interface SplitNode {
@@ -82,11 +84,6 @@ export interface SessionInfo {
   fileCount: number;
   /** True when the folder was opened untrusted: git disabled, snapshot only. */
   restricted: boolean;
-}
-
-export interface DiffTarget {
-  path: string;
-  area?: ChangeArea;
 }
 
 export interface FileDiff {

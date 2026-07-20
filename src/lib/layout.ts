@@ -62,6 +62,12 @@ export function swapPanes(node: LayoutNode, idA: string, idB: string): LayoutNod
   return replace(node);
 }
 
+/** Set the diff-view flag on an editor pane. Returns new tree. */
+export function setPaneDiff(node: LayoutNode, paneId: string, diff: boolean): LayoutNode {
+  if (node.type === "pane") return node.id === paneId ? { ...node, diff } : node;
+  return { ...node, a: setPaneDiff(node.a, paneId, diff), b: setPaneDiff(node.b, paneId, diff) };
+}
+
 export function setRatio(node: LayoutNode, splitId: string, ratio: number): LayoutNode {
   if (node.type === "pane") return node;
   if (node.id === splitId) return { ...node, ratio };

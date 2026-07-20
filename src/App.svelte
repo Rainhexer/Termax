@@ -4,7 +4,6 @@
   import {
     activeProject,
     layout,
-    diffTarget,
     loadProjects,
     initListeners,
     refreshChanges,
@@ -17,7 +16,6 @@
   import Sidebar from "./lib/components/Sidebar.svelte";
   import TabBar from "./lib/components/TabBar.svelte";
   import TilingLayout from "./lib/components/TilingLayout.svelte";
-  import DiffModal from "./lib/components/DiffModal.svelte";
   import SettingsModal from "./lib/components/SettingsModal.svelte";
 
   onMount(() => {
@@ -76,10 +74,6 @@
     </div>
   {:else}
     <ProjectPicker />
-  {/if}
-
-  {#if $diffTarget}
-    <DiffModal target={$diffTarget} />
   {/if}
 
   {#if $settingsOpen}
