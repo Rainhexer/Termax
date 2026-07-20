@@ -38,10 +38,7 @@ impl ProjectStore {
             .unwrap_or_else(|_| PathBuf::from("."));
         let _ = fs::create_dir_all(&dir);
         let file = dir.join("projects.json");
-        let projects = fs::read_to_string(&file)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let projects = crate::store_io::load_json_or_default(&file);
         Self {
             projects: Mutex::new(projects),
             file: Mutex::new(file),
@@ -51,8 +48,7 @@ impl ProjectStore {
     fn save(&self) -> Result<(), String> {
         let projects = self.projects.lock().unwrap();
         let file = self.file.lock().unwrap();
-        let json = serde_json::to_string_pretty(&*projects).map_err(|e| e.to_string())?;
-        fs::write(&*file, json).map_err(|e| e.to_string())
+        crate::store_io::write_json_atomic(&*file, &*projects)
     }
 }
 

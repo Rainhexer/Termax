@@ -1,4 +1,5 @@
 import { get, writable } from "svelte/store";
+import { ask } from "@tauri-apps/plugin-dialog";
 import type { ChangeEntry, DiffTarget, GitStatus, LayoutNode, PaneNode, Project, Tab, VaultCommand, Workspace } from "./types";
 import { ipc } from "./ipc";
 import { launchFor, launcherById } from "./settings";
@@ -25,7 +26,13 @@ export const gitMode = writable(false);
 export const gitBusy = writable(false);
 /** Last fetch/pull error message, shown in the Changes panel; null when clear. */
 export const gitError = writable<string | null>(null);
+/** Transient status line for the last git action ("Fetching…", "Up to date",
+ *  "On main", …), shown in the Changes panel; auto-clears. null when idle. */
+export const gitMessage = writable<string | null>(null);
 export const showUntracked = writable(true);
+/** True when the active folder was opened untrusted: git is disabled until the
+ *  user trusts it. Drives the "trust folder" banner in the Changes panel. */
+export const restricted = writable(false);
 /** Bumped (debounced) on every fs-changed event; drives file-tree refresh. */
 export const fsTick = writable(0);
 /** Change-entry path to scroll to / flash in the Changes panel. */
@@ -39,7 +46,7 @@ export const lockFlash = writable(0);
  *  returns empty in drop events on macOS). */
 export const draggedPaneId = writable<string | null>(null);
 
-const untrackedKey = (projectId: string) => `termix.showUntracked.${projectId}`;
+const untrackedKey = (projectId: string) => `termax.showUntracked.${projectId}`;
 
 export function toggleUntracked() {
   const project = get(activeProject);
@@ -186,14 +193,36 @@ export async function openProject(project: Project) {
   showUntracked.set(localStorage.getItem(untrackedKey(project.id)) !== "false");
 
   resetTree();
+
+  // Folder trust: opening a project runs git, which reads .git/config — the
+  // untrusted-repo code-execution vector. Prompt on first open; a declined or
+  // not-yet-trusted folder opens in restricted (snapshot-only, no git) mode.
+  let trusted = await ipc.isTrusted(project.path);
+  if (!trusted) {
+    trusted = await ask(
+      `Termax runs git and can execute commands in this folder.\n\n${project.path}\n\nDo you trust the authors of the files here?`,
+      { title: "Trust this folder?", kind: "warning", okLabel: "Trust folder", cancelLabel: "Open restricted" },
+    );
+    if (trusted) await ipc.trustFolder(project.path).catch(() => {});
+  }
+
   try {
-    const info = await ipc.startSession(project.path);
+    const info = await ipc.startSession(project.path, trusted);
     gitMode.set(info.git);
+    restricted.set(info.restricted);
     if (info.git) await refreshChanges();
     await loadDir("");
   } catch (err) {
     console.error("start_session failed", err);
   }
+}
+
+/** Trust the currently open folder and re-open it so git activates. */
+export async function trustCurrentFolder() {
+  const project = get(activeProject);
+  if (!project) return;
+  await ipc.trustFolder(project.path).catch(() => {});
+  await openProject(project);
 }
 
 export async function closeProject() {
@@ -216,6 +245,8 @@ export async function closeProject() {
   gitMode.set(false);
   gitBusy.set(false);
   gitError.set(null);
+  gitMessage.set(null);
+  restricted.set(false);
   highlightedChange.set(null);
   resetTree();
 }
@@ -331,14 +362,37 @@ export async function refreshChanges() {
   }
 }
 
-/** Fetch from the remote to refresh ahead/behind against the real upstream. */
+/** Show a transient status line, auto-clearing after a delay unless another
+ *  message replaces it first (guarded by a monotonic token). */
+let gitMsgToken = 0;
+function flashGitMessage(msg: string, ms = 4000) {
+  const token = ++gitMsgToken;
+  gitMessage.set(msg);
+  setTimeout(() => {
+    if (gitMsgToken === token) gitMessage.set(null);
+  }, ms);
+}
+
+/** Fetch from the remote to refresh ahead/behind against the real upstream,
+ *  reporting the resulting state ("Up to date" / "N behind"). */
 export async function fetchRemote() {
   if (!get(gitMode) || get(gitBusy)) return;
   gitBusy.set(true);
   gitError.set(null);
+  gitMessage.set("Fetching…");
+  gitMsgToken++;
   try {
-    gitStatus.set(await ipc.gitFetch());
+    const after = await ipc.gitFetch();
+    gitStatus.set(after);
+    const target = after.upstream ?? "upstream";
+    if (after.behind === 0) {
+      flashGitMessage(`Up to date with ${target}`);
+    } else {
+      const n = after.behind;
+      flashGitMessage(`${n} commit${n === 1 ? "" : "s"} behind ${target}`);
+    }
   } catch (err) {
+    gitMessage.set(null);
     gitError.set(String(err));
   } finally {
     gitBusy.set(false);
@@ -350,13 +404,68 @@ export async function pullRemote() {
   if (!get(gitMode) || get(gitBusy)) return;
   gitBusy.set(true);
   gitError.set(null);
+  gitMessage.set("Pulling…");
+  gitMsgToken++;
   try {
-    await ipc.gitPull();
+    const out = await ipc.gitPull();
     await refreshChanges();
+    flashGitMessage(/already up to date/i.test(out) ? "Already up to date" : "Pulled — fast-forwarded");
   } catch (err) {
+    gitMessage.set(null);
     gitError.set(String(err));
   } finally {
     gitBusy.set(false);
+  }
+}
+
+/** Local branch names for the switcher; empty on failure. */
+export async function loadBranches(): Promise<string[]> {
+  if (!get(gitMode)) return [];
+  try {
+    return await ipc.gitBranches();
+  } catch {
+    return [];
+  }
+}
+
+/** Switch branches, then refresh the panel. Git's error (e.g. dirty worktree)
+ *  is surfaced verbatim on failure. */
+export async function checkoutBranch(branch: string) {
+  if (!get(gitMode) || get(gitBusy)) return;
+  if (get(gitStatus)?.branch === branch) return;
+  gitBusy.set(true);
+  gitError.set(null);
+  gitMessage.set(`Switching to ${branch}…`);
+  gitMsgToken++;
+  try {
+    gitStatus.set(await ipc.gitCheckout(branch));
+    await refreshChanges();
+    flashGitMessage(`On ${branch}`);
+  } catch (err) {
+    gitMessage.set(null);
+    gitError.set(String(err));
+  } finally {
+    gitBusy.set(false);
+  }
+}
+
+/** Open the current branch on the remote host (GitHub-style /tree/ URL).
+ *  Surfaces a message on success and the error on failure so the action is
+ *  never silently a no-op. */
+export async function openBranchOnRemote() {
+  const status = get(gitStatus);
+  if (!status?.remoteUrl) {
+    flashGitMessage("No remote configured");
+    return;
+  }
+  // Preserve slashes in branch names (feature/foo) while escaping each segment.
+  const ref = status.branch.split("/").map(encodeURIComponent).join("/");
+  const url = `${status.remoteUrl}/tree/${ref}`;
+  try {
+    await ipc.openUrl(url);
+    flashGitMessage("Opened in browser");
+  } catch (err) {
+    gitError.set(String(err));
   }
 }
 

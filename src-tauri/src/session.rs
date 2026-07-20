@@ -68,6 +68,9 @@ pub struct SessionInfo {
     pub git: bool,
     #[serde(rename = "fileCount")]
     pub file_count: usize,
+    /// True when the folder was opened without trust: git is disabled and only
+    /// snapshot tracking runs. The UI shows a "trust folder" banner.
+    pub restricted: bool,
 }
 
 #[derive(Serialize)]
@@ -151,13 +154,17 @@ pub fn start_session(
     app: AppHandle,
     manager: tauri::State<SessionManager>,
     project_path: String,
+    trusted: bool,
 ) -> Result<SessionInfo, String> {
     let root = PathBuf::from(&project_path);
     if !root.is_dir() {
         return Err(format!("not a directory: {project_path}"));
     }
 
-    let git_mode = git::is_repo(&root);
+    // Only touch git for trusted folders — `is_repo`/`fetch`/`status` all read
+    // `.git/config`, the untrusted-repo code-execution vector. An untrusted
+    // folder opens in snapshot mode regardless of whether it is a repo.
+    let git_mode = trusted && git::is_repo(&root);
 
     let (mode, file_count, changed_for_watcher) = if git_mode {
         (Mode::Git, 0, None)
@@ -230,6 +237,7 @@ pub fn start_session(
     Ok(SessionInfo {
         git: git_mode,
         file_count,
+        restricted: !trusted,
     })
 }
 
@@ -270,6 +278,22 @@ pub fn git_fetch(manager: tauri::State<SessionManager>) -> Result<git::GitStatus
 pub fn git_pull(manager: tauri::State<SessionManager>) -> Result<String, String> {
     let root = git_root(&manager)?;
     git::pull(&root)
+}
+
+#[tauri::command]
+pub fn git_branches(manager: tauri::State<SessionManager>) -> Result<Vec<String>, String> {
+    let root = git_root(&manager)?;
+    git::branches(&root)
+}
+
+#[tauri::command]
+pub fn git_checkout(
+    manager: tauri::State<SessionManager>,
+    branch: String,
+) -> Result<git::GitStatus, String> {
+    let root = git_root(&manager)?;
+    git::checkout(&root, &branch)?;
+    git::status(&root).map(|(status, _)| status)
 }
 
 #[tauri::command]

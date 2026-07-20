@@ -13,6 +13,9 @@ pub struct GitStatus {
     pub upstream: Option<String>,
     pub ahead: usize,
     pub behind: usize,
+    /// Browser URL for the repo's remote (e.g. "https://github.com/owner/repo"),
+    /// normalized from an SSH or HTTPS git remote. None when there's no remote.
+    pub remote_url: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -26,10 +29,36 @@ pub struct GitChangeEntry {
     pub removed: usize,
 }
 
-fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    let out = Command::new("git")
+/// Platform null device, used to neutralize `core.hooksPath`.
+#[cfg(windows)]
+const NULL_DEVICE: &str = "NUL";
+#[cfg(not(windows))]
+const NULL_DEVICE: &str = "/dev/null";
+
+/// A `git` invocation hardened against hostile repositories. Running git inside
+/// a directory whose `.git/config` is attacker-controlled is a known
+/// code-execution vector (`core.fsmonitor`, `core.pager`, hooks, `protocol.ext`
+/// helpers). We disable those and forbid interactive credential prompts. Folder
+/// trust (see `trust.rs`) is the primary gate; this is defense-in-depth so even
+/// a trusted repo can't invoke a hook/fsmonitor binary implicitly.
+fn git_command(root: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.env("GIT_TERMINAL_PROMPT", "0")
+        .args([
+            "-c",
+            "core.fsmonitor=",
+            "-c",
+            &format!("core.hooksPath={NULL_DEVICE}"),
+            "-c",
+            "protocol.ext.allow=never",
+        ])
         .arg("-C")
-        .arg(root)
+        .arg(root);
+    cmd
+}
+
+fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let out = git_command(root)
         .args(args)
         .output()
         .map_err(|e| format!("failed to run git: {e}"))?;
@@ -44,9 +73,7 @@ fn git_text(root: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 pub fn is_repo(root: &Path) -> bool {
-    Command::new("git")
-        .arg("-C")
-        .arg(root)
+    git_command(root)
         .args(["rev-parse", "--git-dir"])
         .output()
         .map(|o| o.status.success())
@@ -211,9 +238,79 @@ pub fn status(root: &Path) -> Result<(GitStatus, Vec<GitChangeEntry>), String> {
             upstream,
             ahead,
             behind,
+            remote_url: remote_web_url(root),
         },
         entries,
     ))
+}
+
+/// Local branch names, in git's default (alphabetical) order. Used to populate
+/// the branch switcher.
+pub fn branches(root: &Path) -> Result<Vec<String>, String> {
+    let text = git_text(root, &["branch", "--format=%(refname:short)"])?;
+    Ok(text
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
+}
+
+/// Switch to `branch`. Errors (e.g. uncommitted changes that would be
+/// overwritten) come back as git's stderr, which the UI surfaces verbatim.
+pub fn checkout(root: &Path, branch: &str) -> Result<(), String> {
+    git(root, &["checkout", branch]).map(|_| ())
+}
+
+/// Browser URL for the repo's default remote (origin, else the first remote),
+/// or None when there is no remote or it can't be parsed.
+fn remote_web_url(root: &Path) -> Option<String> {
+    let raw = git_text(root, &["remote", "get-url", "origin"])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            let first = git_text(root, &["remote"])
+                .ok()?
+                .lines()
+                .next()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())?
+                .to_string();
+            git_text(root, &["remote", "get-url", &first])
+                .ok()
+                .map(|s| s.trim().to_string())
+        })?;
+    normalize_remote_url(&raw)
+}
+
+/// Normalize an SSH or HTTPS git remote into an `https://host/owner/repo` web
+/// URL, stripping any embedded credentials, the `.git` suffix, and ports.
+fn normalize_remote_url(url: &str) -> Option<String> {
+    let url = url.trim().trim_end_matches('/');
+    let (host, path) = if let Some(rest) = url.strip_prefix("git@") {
+        // scp-like: git@host:owner/repo(.git)
+        let (host, path) = rest.split_once(':')?;
+        (host, path)
+    } else if let Some(rest) = url
+        .strip_prefix("ssh://")
+        .or_else(|| url.strip_prefix("git://"))
+        .or_else(|| url.strip_prefix("https://"))
+        .or_else(|| url.strip_prefix("http://"))
+    {
+        // Drop any user[:pass]@ credential, then split host from path.
+        let rest = rest.rsplit_once('@').map(|(_, r)| r).unwrap_or(rest);
+        rest.split_once('/')?
+    } else {
+        return None;
+    };
+    // Host may carry a port (ssh://host:22/...) — keep only the hostname.
+    let host = host.split(':').next().unwrap_or(host).trim();
+    let path = path.trim_start_matches('/').trim_end_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    if host.is_empty() || path.is_empty() {
+        return None;
+    }
+    Some(format!("https://{host}/{path}"))
 }
 
 /// Fetch from the default remote so ahead/behind reflect the real upstream.

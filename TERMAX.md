@@ -1,4 +1,4 @@
-# Termix
+# Termax
 
 A cross-platform terminal multiplexer and project manager for AI coding agents.
 
@@ -6,7 +6,7 @@ Built with **Tauri v2**, **Svelte**, **xterm.js**, and **Monaco Editor**.
 
 ## Overview
 
-Termix is a single-window GUI application that tiles terminals and provides project management workflows for terminal-based coding agents (Claude Code, OpenCode, and others).
+Termax is a single-window GUI application that tiles terminals and provides project management workflows for terminal-based coding agents (Claude Code, OpenCode, and others).
 
 ## Features
 

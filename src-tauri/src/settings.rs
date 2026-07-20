@@ -130,10 +130,7 @@ impl SettingsStore {
             .unwrap_or_else(|_| PathBuf::from("."));
         let _ = fs::create_dir_all(&dir);
         let file = dir.join("settings.json");
-        let settings: Settings = fs::read_to_string(&file)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let settings: Settings = crate::store_io::load_json_or_default(&file);
         crate::session::set_snapshot_limit(settings.terminal.oversized_limit_kb * 1024);
         Self {
             settings: Mutex::new(settings),
@@ -155,8 +152,7 @@ impl SettingsStore {
     fn save(&self) -> Result<(), String> {
         let settings = self.settings.lock().unwrap();
         let file = self.file.lock().unwrap();
-        let json = serde_json::to_string_pretty(&*settings).map_err(|e| e.to_string())?;
-        fs::write(&*file, json).map_err(|e| e.to_string())
+        crate::store_io::write_json_atomic(&*file, &*settings)
     }
 }
 
@@ -341,7 +337,9 @@ pub async fn detect_agents() -> Vec<DetectedAgent> {
         .collect()
 }
 
-/// Open an http(s) URL in the system browser.
+/// Open an http(s) URL in the system browser. Detached with its stdio nulled so
+/// the opener process (and the browser it launches) survives independently of
+/// the app and never blocks on an inherited pipe.
 #[tauri::command]
 pub fn open_url(url: String) -> Result<(), String> {
     if !url.starts_with("https://") && !url.starts_with("http://") {
@@ -353,11 +351,23 @@ pub fn open_url(url: String) -> Result<(), String> {
     let cmd = "open";
     #[cfg(target_os = "windows")]
     let cmd = "explorer";
-    Command::new(cmd)
+
+    let mut command = Command::new(cmd);
+    command
         .arg(&url)
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // Detach into its own process group so it isn't tied to the app's session.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    match command.spawn() {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("failed to open {url} with {cmd}: {e}")),
+    }
 }
 
 /// True when the command resolves: absolute/relative path to an executable,

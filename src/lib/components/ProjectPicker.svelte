@@ -4,6 +4,7 @@
   import { settingsOpen } from "../settings";
   import { ipc } from "../ipc";
   import TerminalIcon from "./TerminalIcon.svelte";
+  import logoUrl from "../assets/termax-logo.svg";
 
   let error = $state<string | null>(null);
 
@@ -36,8 +37,8 @@
   </button>
   <div class="w-[420px]">
     <div class="mb-6 text-center">
-      <h1 class="text-2xl font-bold tracking-tight text-zinc-100">
-        <span class="font-mono text-emerald-400">&gt;_</span> Termix
+      <h1 class="flex items-center justify-center gap-2 text-2xl font-bold tracking-tight text-zinc-100">
+        <img src={logoUrl} alt="Termax logo" class="h-7 w-7" /> Termax
       </h1>
       <p class="mt-1 text-xs text-zinc-500">Terminal multiplexer for AI coding agents</p>
     </div>

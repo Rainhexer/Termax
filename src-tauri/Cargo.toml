@@ -1,11 +1,12 @@
 [package]
-name = "termix"
+name = "termax"
 version = "0.1.0"
 description = "Terminal multiplexer and project manager for AI coding agents"
+license = "MIT"
 edition = "2021"
 
 [lib]
-name = "termix_lib"
+name = "termax_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

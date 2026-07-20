@@ -73,11 +73,15 @@ export interface GitStatus {
   upstream: string | null;
   ahead: number;
   behind: number;
+  /** Browser URL for the remote, e.g. "https://github.com/owner/repo"; null when there's no remote. */
+  remoteUrl: string | null;
 }
 
 export interface SessionInfo {
   git: boolean;
   fileCount: number;
+  /** True when the folder was opened untrusted: git disabled, snapshot only. */
+  restricted: boolean;
 }
 
 export interface DiffTarget {

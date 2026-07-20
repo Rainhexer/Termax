@@ -4,6 +4,8 @@ mod projects;
 mod pty;
 mod session;
 mod settings;
+mod store_io;
+mod trust;
 
 use tauri::Manager;
 
@@ -15,6 +17,7 @@ pub fn run() {
             let store = projects::ProjectStore::load(app.handle());
             app.manage(store);
             app.manage(settings::SettingsStore::load(app.handle()));
+            app.manage(trust::TrustStore::load(app.handle()));
             app.manage(pty::PtyManager::default());
             app.manage(session::SessionManager::default());
             Ok(())
@@ -43,6 +46,8 @@ pub fn run() {
             session::git_status,
             session::git_fetch,
             session::git_pull,
+            session::git_branches,
+            session::git_checkout,
             session::get_changes,
             session::get_diff,
             fstree::list_dir,
@@ -54,6 +59,9 @@ pub fn run() {
             settings::detect_agents,
             settings::validate_command,
             settings::open_url,
+            trust::is_trusted,
+            trust::trust_folder,
+            trust::revoke_trust,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

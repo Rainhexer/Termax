@@ -1,13 +1,29 @@
 <script lang="ts">
   let { type = "shell", className = "" }: { type?: string; className?: string } = $props();
 
-  // Custom launcher icons are stored as raw <svg> markup; force them to fill
-  // the wrapper so they scale like the built-ins.
-  const customSvg = $derived(
-    type.trimStart().startsWith("<svg")
-      ? type.replace("<svg", '<svg style="width:100%;height:100%" ')
-      : null,
-  );
+  // Custom launcher icons are stored as raw <svg> markup and injected via
+  // {@html}. Sanitize before rendering: strip anything scriptable (script/
+  // foreignObject tags, on* handlers, and javascript:/data:text URLs) so a
+  // pasted icon can't execute JS in the app (which has invoke() access).
+  function sanitizeSvg(markup: string): string | null {
+    const trimmed = markup.trimStart();
+    if (!trimmed.startsWith("<svg")) return null;
+    let s = trimmed
+      // drop <script> / <foreignObject> element blocks entirely
+      .replace(/<\s*(script|foreignObject)[\s\S]*?<\s*\/\s*\1\s*>/gi, "")
+      // drop self-closing / unclosed variants of the same
+      .replace(/<\s*(script|foreignObject)\b[^>]*>/gi, "")
+      // strip on*="..." / on*='...' event handlers
+      .replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, "")
+      // neutralize javascript:/vbscript: and inline-script data: URLs in href/xlink:href/src
+      .replace(
+        /((?:xlink:)?(?:href|src))\s*=\s*("|')\s*(?:javascript:|vbscript:|data:text\/html)[^"']*\2/gi,
+        '$1=$2#$2',
+      );
+    // force the svg to fill its wrapper like the built-ins
+    return s.replace("<svg", '<svg style="width:100%;height:100%" ');
+  }
+  const customSvg = $derived(sanitizeSvg(type));
 </script>
 
 {#if customSvg}

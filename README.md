@@ -1,6 +1,6 @@
-# Termix >_0
+# Termax >_0
 
-[![Download](https://img.shields.io/badge/Download-Latest_Release-4A90D9?style=for-the-badge)](https://github.com/FlyvendeMus/Termix/releases/latest) [![Donate](https://img.shields.io/badge/Donate-Support_Termix-FF6B6B?style=for-the-badge)](https://rainhexer.space/donate)
+[![Download](https://img.shields.io/badge/Download-Latest_Release-4A90D9?style=for-the-badge)](https://github.com/Rainhexer/Termax/releases/latest) [![Donate](https://img.shields.io/badge/Donate-Support_Termax-FF6B6B?style=for-the-badge)](https://rainhexer.space/donate)
 
 **A terminal multiplexer built for AI coding agents.** Tile terminals, track changes, and launch Claude Code or any other agent — all inside one focused window on **Linux**, **macOS**, and **Windows**.
 
@@ -8,14 +8,14 @@
 
 <table>
   <tr>
-    <td align="center"><img src=".github/screenshots/demo-overview.png" width="640" alt="Termix overview"><br>Tiled terminals with sidebar and change tracking</td>
+    <td align="center"><img src=".github/screenshots/demo-overview.png" width="640" alt="Termax overview"><br>Tiled terminals with sidebar and change tracking</td>
   </tr>
   <tr>
     <td align="center"><img src=".github/screenshots/demo-split.gif" width="640" alt="Drag-to-split terminals"><br>Split and resize panes freely</td>
   </tr>
 </table>
 
-## What makes Termix different
+## What makes Termax different
 
 ### Command Vault
 
@@ -29,7 +29,7 @@ Save frequently-used commands per project. Execute them in any terminal pane wit
 
 ### Git-aware change tracking
 
-Termix watches your project during an agent session. Every file creation, edit, and deletion is captured and diffed against a pre-session snapshot. When git is present the diff runs against the last commit; otherwise a snapshot is taken at session start.
+Termax watches your project during an agent session. Every file creation, edit, and deletion is captured and diffed against a pre-session snapshot. When git is present the diff runs against the last commit; otherwise a snapshot is taken at session start.
 
 <table>
   <tr>
@@ -39,11 +39,11 @@ Termix watches your project during an agent session. Every file creation, edit, 
 
 ### First-class coding agent integration
 
-Termix auto-detects installed agents on `$PATH` and adds them to the sidebar. Launch them into any pane with one click. Each launcher shows its detected version.
+Termax auto-detects installed agents on `$PATH` and adds them to the sidebar. Launch them into any pane with one click. Each launcher shows its detected version.
 
 ```
                           ┌─────────────────────────────────┐
-                          │          Termix Sidebar          │
+                          │          Termax Sidebar          │
                           │                                  │
   ╔══════════════╗        │  ▶  Shell                        │
   ║  Claude Code ║───────►│  ▶  Claude Code   v1.x.x        │
@@ -71,7 +71,7 @@ Termix auto-detects installed agents on `$PATH` and adds them to the sidebar. La
 
 **Project-based workflow** — Each project is a directory. Terminal panes always root there. Switching projects restores your exact layout and open terminals.
 
-**Integrated file explorer** — Browse and open files without leaving Termix. Monaco Editor opens inline for quick edits.
+**Integrated file explorer** — Browse and open files without leaving Termax. Monaco Editor opens inline for quick edits.
 
 **Configurable appearance** — Font family, size, cursor style, and color theme — all tunable from settings.
 
@@ -88,9 +88,9 @@ Termix auto-detects installed agents on `$PATH` and adds them to the sidebar. La
 | Diffing | similar |
 | Styling | Tailwind CSS |
 
-## Get Termix
+## Get Termax
 
-Pre-built binaries are available on the [Releases page](https://github.com/FlyvendeMus/Termix/releases).
+Pre-built binaries are available on the [Releases page](https://github.com/Rainhexer/Termax/releases).
 
 To build from source, see [BUILD.md](BUILD.md). The build produces a `.deb`, `.rpm`, or `.AppImage` on Linux; a `.dmg` on macOS; an `.msi` on Windows.
 
@@ -98,9 +98,9 @@ To build from source, see [BUILD.md](BUILD.md). The build produces a `.deb`, `.r
 
 | What | macOS | Linux | Windows |
 |------|-------|-------|---------|
-| Settings (`settings.json`) | `~/Library/Application Support/dev.ravn.termix/` | `~/.config/dev.ravn.termix/` | `%APPDATA%\dev.ravn.termix\` |
+| Settings (`settings.json`) | `~/Library/Application Support/dev.ravn.termax/` | `~/.config/dev.ravn.termax/` | `%APPDATA%\dev.ravn.termax\` |
 
 ## Documentation
 
 - **[BUILD.md](BUILD.md)** — building and packaging for each platform
-- **[TERMIX.md](TERMIX.md)** — product specification and architecture
+- **[TERMAX.md](TERMAX.md)** — product specification and architecture

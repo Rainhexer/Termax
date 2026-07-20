@@ -25,6 +25,13 @@ pub struct FileContent {
 }
 
 /// Resolve a project-relative path, rejecting anything that escapes the root.
+///
+/// The `..`/absolute-string checks reject the obvious escapes, but a symlink
+/// *inside* the project (e.g. `notes -> ~/.bashrc`) would otherwise let a
+/// read/write follow the link outside the root. So we canonicalize both the
+/// root and the target and require the resolved path to stay contained. All
+/// callers operate on paths that already exist, so `canonicalize` (which
+/// requires existence) is safe here.
 fn resolve(root: &Path, rel: &str) -> Result<PathBuf, String> {
     let rel_path = Path::new(rel);
     if rel_path.is_absolute()
@@ -34,7 +41,15 @@ fn resolve(root: &Path, rel: &str) -> Result<PathBuf, String> {
     {
         return Err(format!("invalid path: {rel}"));
     }
-    Ok(root.join(rel_path))
+    let canonical_root = root.canonicalize().map_err(|e| e.to_string())?;
+    let resolved = canonical_root
+        .join(rel_path)
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    if !resolved.starts_with(&canonical_root) {
+        return Err(format!("path escapes project root: {rel}"));
+    }
+    Ok(resolved)
 }
 
 /// Batch-query git for which of the given relative paths are ignored.

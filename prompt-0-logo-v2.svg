@@ -1,0 +1,22 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect x="0" y="0" width="1024" height="1024" rx="200" ry="200" fill="#191A1D"/>
+
+  <!-- Chevron ">" - sharp terminal-style prompt -->
+  <polyline points="190,320 386,512 190,704"
+            fill="none"
+            stroke="#3ECF8E"
+            stroke-width="72"
+            stroke-linecap="butt"
+            stroke-linejoin="miter"/>
+
+  <!-- Underscore "_" -->
+  <rect x="420" y="660" width="176" height="58" fill="#3ECF8E"/>
+
+  <!-- "0" with center dot, real terminal-font proportions -->
+  <ellipse cx="748" cy="474" rx="128" ry="176"
+           fill="none"
+           stroke="#3ECF8E"
+           stroke-width="70"/>
+  <circle cx="748" cy="474" r="34" fill="#3ECF8E"/>
+</svg>

@@ -1,22 +1,72 @@
 <script lang="ts">
   import {
     changes,
+    checkoutBranch,
     diffTarget,
     fetchRemote,
     gitBusy,
     gitError,
+    gitMessage,
     gitMode,
     gitStatus,
     highlightedChange,
+    loadBranches,
+    openBranchOnRemote,
     pullRemote,
     refreshChanges,
+    restricted,
     showUntracked,
     toggleUntracked,
+    trustCurrentFolder,
   } from "../stores";
   import type { ChangeEntry } from "../types";
 
   let listEl = $state<HTMLDivElement>();
   let flashPath = $state<string | null>(null);
+
+  // Branch switcher dropdown state.
+  let branchMenuOpen = $state(false);
+  let branchList = $state<string[]>([]);
+  let branchFilter = $state("");
+  let branchAnchor = $state<HTMLElement>();
+
+  async function toggleBranchMenu() {
+    if (branchMenuOpen) {
+      branchMenuOpen = false;
+      return;
+    }
+    branchFilter = "";
+    branchList = await loadBranches();
+    branchMenuOpen = true;
+  }
+
+  async function pickBranch(name: string) {
+    branchMenuOpen = false;
+    await checkoutBranch(name);
+  }
+
+  let filteredBranches = $derived(
+    branchFilter.trim()
+      ? branchList.filter((b) => b.toLowerCase().includes(branchFilter.trim().toLowerCase()))
+      : branchList,
+  );
+
+  // Close the branch menu on outside click or Escape.
+  $effect(() => {
+    if (!branchMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (branchAnchor && !branchAnchor.contains(e.target as Node)) branchMenuOpen = false;
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") branchMenuOpen = false;
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  });
 
   // "Show in Changes" from the file tree: scroll the entry into view and flash it.
   $effect(() => {
@@ -70,13 +120,74 @@
 </script>
 
 <div class="flex min-h-0 flex-1 flex-col gap-1">
+  {#if $restricted}
+    <div class="mx-1 mb-1 flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-950/40 px-2 py-1.5">
+      <span class="min-w-0 flex-1 text-[11px] text-amber-300">
+        Folder not trusted — git is disabled. Only session snapshot tracking is active.
+      </span>
+      <button
+        class="shrink-0 rounded bg-amber-500/20 px-2 py-0.5 text-[11px] font-semibold text-amber-200 hover:bg-amber-500/30"
+        title="Trust this folder and enable git"
+        onclick={trustCurrentFolder}
+      >Trust folder</button>
+    </div>
+  {/if}
   {#if $gitMode}
     <div class="flex flex-wrap items-center gap-1.5 px-1 pb-0.5">
       {#if $gitStatus}
-        <span
-          class="max-w-full truncate rounded bg-emerald-950/60 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-400"
-          title={$gitStatus.detached ? "Detached HEAD" : "Current branch"}
-        >{$gitStatus.detached ? `HEAD (${$gitStatus.branch})` : $gitStatus.branch}</span>
+        <div class="relative" bind:this={branchAnchor}>
+          <button
+            class="flex max-w-full items-center gap-1 rounded bg-emerald-950/60 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-400 hover:bg-emerald-900/60 disabled:opacity-50"
+            title="Switch branch"
+            disabled={$gitBusy}
+            onclick={toggleBranchMenu}
+          >
+            <span class="truncate">{$gitStatus.detached ? `HEAD (${$gitStatus.branch})` : $gitStatus.branch}</span>
+            <span class="text-[8px] text-emerald-500/70">▾</span>
+          </button>
+
+          {#if branchMenuOpen}
+            <div
+              class="absolute left-0 top-full z-20 mt-1 max-h-72 w-56 overflow-hidden rounded-md border border-zinc-700 bg-zinc-900 shadow-xl shadow-black/50"
+            >
+              {#if $gitStatus.remoteUrl}
+                <button
+                  class="flex w-full items-center gap-1.5 border-b border-zinc-800 px-2 py-1.5 text-left text-[11px] text-zinc-300 hover:bg-zinc-800"
+                  title={`Open ${$gitStatus.branch} on ${$gitStatus.remoteUrl}`}
+                  onclick={() => {
+                    branchMenuOpen = false;
+                    openBranchOnRemote();
+                  }}
+                >
+                  <span class="text-zinc-500">↗</span>
+                  <span class="min-w-0 flex-1 truncate">View branch on remote</span>
+                </button>
+              {/if}
+              <div class="border-b border-zinc-800 p-1">
+                <input
+                  class="w-full rounded bg-zinc-800 px-2 py-1 text-[11px] text-zinc-200 placeholder:text-zinc-600 focus:outline-none"
+                  placeholder="Switch branch…"
+                  bind:value={branchFilter}
+                  onmousedown={(e) => e.stopPropagation()}
+                />
+              </div>
+              <div class="max-h-52 overflow-y-auto py-0.5">
+                {#each filteredBranches as b (b)}
+                  <button
+                    class="flex w-full items-center gap-1.5 px-2 py-1 text-left font-mono text-[11px] hover:bg-zinc-800
+                      {b === $gitStatus.branch ? 'text-emerald-400' : 'text-zinc-300'}"
+                    onclick={() => pickBranch(b)}
+                  >
+                    <span class="w-2.5 shrink-0 text-emerald-400">{b === $gitStatus.branch ? "✓" : ""}</span>
+                    <span class="min-w-0 flex-1 truncate">{b}</span>
+                  </button>
+                {:else}
+                  <p class="px-2 py-1.5 text-[11px] text-zinc-600">No matching branches</p>
+                {/each}
+              </div>
+            </div>
+          {/if}
+        </div>
         {#if $gitStatus.hasUpstream}
           {#if $gitStatus.ahead > 0}
             <span class="font-mono text-[10px] text-emerald-500" title="Commits ahead of upstream">↑{$gitStatus.ahead}</span>
@@ -92,6 +203,9 @@
           >⤓</button>
         {:else}
           <span class="text-[10px] text-zinc-600">(no remote)</span>
+        {/if}
+        {#if $gitMessage}
+          <span class="min-w-0 flex-1 truncate text-[10px] text-zinc-500" title={$gitMessage}>{$gitMessage}</span>
         {/if}
       {/if}
     </div>
@@ -119,7 +233,7 @@
         <p class="whitespace-pre-wrap break-words font-mono text-[10px] text-red-300">{$gitError}</p>
       </div>
     {/if}
-  {:else}
+  {:else if !$restricted}
     <p class="px-1 pb-0.5 text-[10px] text-zinc-600">No git repository</p>
   {/if}
 

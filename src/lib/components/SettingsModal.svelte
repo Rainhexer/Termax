@@ -4,6 +4,7 @@
   import { ipc } from "../ipc";
   import { settings, settingsOpen, syncDetected, updateSettings } from "../settings";
   import LauncherSettings from "./LauncherSettings.svelte";
+  import logoUrl from "../assets/termax-logo.svg";
 
   type Section = "launchers" | "appearance" | "terminal" | "about";
   let section = $state<Section>("launchers");
@@ -25,7 +26,7 @@
     { style: "bar", blink: true, label: "Blink bar" },
   ];
 
-  const REPO_URL = "https://github.com/FlyvendeMus/Termix";
+  const REPO_URL = "https://github.com/Rainhexer/Termax";
 
   function close() {
     settingsOpen.set(false);
@@ -193,9 +194,9 @@
       {:else}
         <h2 class="mb-3 text-sm font-semibold text-zinc-100">About</h2>
         <div class="flex flex-col gap-3 text-xs text-zinc-400">
-          <div>
-            <span class="font-mono text-emerald-400">&gt;_</span>
-            <span class="ml-1 text-sm font-semibold text-zinc-100">Termix</span>
+          <div class="flex items-center">
+            <img src={logoUrl} alt="Termax logo" class="h-5 w-5" />
+            <span class="ml-1.5 text-sm font-semibold text-zinc-100">Termax</span>
             <span class="ml-2 font-mono text-zinc-500">v{appVersion || "0.1.0"}</span>
           </div>
           <p>Terminal multiplexer and project manager for AI coding agents.</p>

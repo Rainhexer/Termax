@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Termix",
+  "productName": "Termax",
   "version": "0.1.0",
-  "identifier": "dev.ravn.termix",
+  "identifier": "dev.ravn.termax",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Termix",
+        "title": "Termax",
         "width": 1400,
         "height": 900,
         "minWidth": 800,
@@ -21,12 +21,12 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; img-src 'self' data:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; connect-src 'self' ipc: http://ipc.localhost"
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["deb", "rpm", "dmg"],
+    "targets": ["deb", "rpm", "appimage", "dmg", "msi"],
     "icon": ["icons/icon.icns", "icons/icon.png", "icons/icon.ico", "icons/32x32.png", "icons/128x128.png"]
   }
 }
