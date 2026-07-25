@@ -32,6 +32,11 @@ export const showUntracked = writable(true);
 /** True when the active folder was opened untrusted: git is disabled until the
  *  user trusts it. Drives the "trust folder" banner in the Changes panel. */
 export const restricted = writable(false);
+/** True once the backend session for the active project is up. Editor panes and
+ *  other fs-reading views wait for this: a restored layout mounts before
+ *  `start_session` resolves, and reading a file too early fails with
+ *  "no active session". */
+export const sessionReady = writable(false);
 /** Bumped (debounced) on every fs-changed event; drives file-tree refresh. */
 export const fsTick = writable(0);
 /** Change-entry path to scroll to / flash in the Changes panel. */
@@ -40,10 +45,15 @@ export const highlightedChange = writable<string | null>(null);
 export const explorerLocked = writable(true);
 /** Bumped on every attempted edit while locked, to drive the lock icon flash. */
 export const lockFlash = writable(0);
+/** Pixel size of the tiling area, kept current by App.svelte. Drives automatic
+ *  placement of new panes; the zeros are replaced on first layout. */
+export const paneAreaSize = writable<layoutOps.Size>({ w: 0, h: 0 });
 
 /** Tracks the pane being dragged (WKWebView workaround: dataTransfer.getData
  *  returns empty in drop events on macOS). */
 export const draggedPaneId = writable<string | null>(null);
+/** Tracks the tab being dragged along the tab bar (same WKWebView workaround). */
+export const draggedTabId = writable<string | null>(null);
 
 const untrackedKey = (projectId: string) => `termax.showUntracked.${projectId}`;
 
@@ -169,6 +179,130 @@ export function cycleTab(dir: 1 | -1) {
   switchTab(next.id);
 }
 
+/** Move the tab `id` to `toIndex` in the bar (index in the pre-move list). */
+export function reorderTab(id: string, toIndex: number) {
+  const list = get(tabs);
+  const from = list.findIndex((t) => t.id === id);
+  if (from === -1) return;
+  const clamped = Math.max(0, Math.min(list.length, toIndex));
+  // Dropping just before or just after itself is a no-op.
+  if (clamped === from || clamped === from + 1) return;
+  const next = [...list];
+  const [tab] = next.splice(from, 1);
+  next.splice(clamped > from ? clamped - 1 : clamped, 0, tab);
+  tabs.set(next);
+  persistLayout();
+}
+
+/** Shift the active tab one slot left (-1) or right (1). */
+export function moveActiveTab(dir: 1 | -1) {
+  const list = get(tabs);
+  const idx = list.findIndex((t) => t.id === get(activeTabId));
+  if (idx === -1) return;
+  const target = idx + dir;
+  if (target < 0 || target >= list.length) return;
+  reorderTab(list[idx].id, dir === 1 ? target + 1 : target);
+}
+
+/** Cut `paneId` out of whichever non-active tab owns it, dropping that tab if it
+ *  empties. Returns the detached node (terminal keeps running — the terminal
+ *  registry is keyed by pane id and lives outside the component tree). */
+function cutPaneFromOtherTab(paneId: string): PaneNode | null {
+  const activeId = get(activeTabId);
+  const list = get(tabs);
+  const owner = list.find((t) => t.id !== activeId && layoutOps.findPane(t.layout, paneId));
+  if (!owner?.layout) return null;
+  const pane = layoutOps.findPane(owner.layout, paneId)!;
+  const rest = layoutOps.removePane(owner.layout, paneId);
+  let next = list.map((t) =>
+    t.id === owner.id
+      ? {
+          ...t,
+          layout: rest,
+          focusedPaneId:
+            t.focusedPaneId === paneId ? (layoutOps.collectPanes(rest)[0]?.id ?? null) : t.focusedPaneId,
+        }
+      : t,
+  );
+  if (!rest && next.length > 1) next = next.filter((t) => t.id !== owner.id);
+  tabs.set(next);
+  return pane;
+}
+
+/** Move a pane into another tab, grafting it onto that tab's grid root.
+ *  The pane's terminal is not destroyed — it re-attaches when the tab renders. */
+export function movePaneToTab(paneId: string, toTabId: string) {
+  if (get(activeTabId) === toTabId) return;
+  syncActiveTab();
+  const list = get(tabs);
+  const from = list.find((t) => layoutOps.findPane(t.layout, paneId));
+  const to = list.find((t) => t.id === toTabId);
+  if (!from || !to || from.id === to.id || !from.layout) return;
+
+  const pane = layoutOps.findPane(from.layout, paneId)!;
+  const rest = layoutOps.removePane(from.layout, paneId);
+  let next = list.map((t) => {
+    if (t.id === from.id) {
+      return {
+        ...t,
+        layout: rest,
+        focusedPaneId:
+          t.focusedPaneId === paneId ? (layoutOps.collectPanes(rest)[0]?.id ?? null) : t.focusedPaneId,
+      };
+    }
+    if (t.id === to.id) {
+      return { ...t, layout: layoutOps.appendPane(t.layout, pane), focusedPaneId: paneId };
+    }
+    return t;
+  });
+  // Source tab left empty: drop it and follow the pane to its new home.
+  const dropSource = !rest && next.length > 1;
+  if (dropSource) next = next.filter((t) => t.id !== from.id);
+  tabs.set(next);
+
+  const active = next.find((t) => t.id === get(activeTabId));
+  if (!active) {
+    activateTab(next.find((t) => t.id === toTabId)!);
+  } else if (active.id === from.id || active.id === to.id) {
+    layout.set(active.layout);
+    focusedPaneId.set(active.focusedPaneId ?? layoutOps.collectPanes(active.layout)[0]?.id ?? null);
+  }
+  persistLayout();
+}
+
+/** Tear a pane out into a brand-new tab and switch to it. */
+export function movePaneToNewTab(paneId: string) {
+  syncActiveTab();
+  const list = get(tabs);
+  const from = list.find((t) => layoutOps.findPane(t.layout, paneId));
+  if (!from?.layout) return;
+  // A lone pane in its own tab is already a tab of its own.
+  if (layoutOps.collectPanes(from.layout).length === 1) return;
+  const pane = layoutOps.findPane(from.layout, paneId)!;
+  const rest = layoutOps.removePane(from.layout, paneId);
+  const tab: Tab = {
+    id: crypto.randomUUID(),
+    title: pane.title,
+    layout: pane,
+    focusedPaneId: pane.id,
+  };
+  tabs.set([
+    ...list.map((t) =>
+      t.id === from.id
+        ? {
+            ...t,
+            layout: rest,
+            focusedPaneId:
+              t.focusedPaneId === paneId ? (layoutOps.collectPanes(rest)[0]?.id ?? null) : t.focusedPaneId,
+          }
+        : t,
+    ),
+    tab,
+  ]);
+  activateTab(tab);
+  persistLayout();
+}
+
 export function renameTab(id: string, title: string) {
   const name = title.trim();
   if (!name) return;
@@ -182,6 +316,7 @@ export async function loadProjects() {
 
 export async function openProject(project: Project) {
   await closeProject();
+  sessionReady.set(false);
   activeProject.set(project);
   changes.set([]);
 
@@ -209,6 +344,7 @@ export async function openProject(project: Project) {
     const info = await ipc.startSession(project.path, trusted);
     gitMode.set(info.git);
     restricted.set(info.restricted);
+    sessionReady.set(true);
     if (info.git) await refreshChanges();
     await loadDir("");
   } catch (err) {
@@ -233,6 +369,7 @@ export async function closeProject() {
   await ipc.saveLayout(current.id, workspace).catch(() => {});
   terminals.destroyAll();
   await ipc.stopSession().catch(() => {});
+  sessionReady.set(false);
   activeProject.set(null);
   tabs.set([]);
   activeTabId.set(null);
@@ -250,14 +387,33 @@ export async function closeProject() {
 }
 
 /** Open a new pane: split the focused pane, or become the root if layout is empty. */
-export function addPane(launch: string | null, title: string, dir: "row" | "col" = "row"): string {
+/** Where an automatically placed pane should go, and how it should be split.
+ *  Falls back to the focused pane when the tiling area has not been measured
+ *  yet (first paint) or is degenerate. */
+function autoPlacement(tree: LayoutNode): { target: string; dir: "row" | "col" } {
+  const view = get(paneAreaSize);
+  if (view.w > 0 && view.h > 0) {
+    const placement = layoutOps.choosePlacement(tree, view);
+    return { target: placement.targetId, dir: placement.dir };
+  }
+  const target = get(focusedPaneId) ?? layoutOps.collectPanes(tree).at(-1)!.id;
+  return { target, dir: "row" };
+}
+
+/** Open a new pane. With no `dir`, the spot is chosen automatically (split the
+ *  biggest pane that stays above the minimum size); passing `dir` forces a
+ *  split of the focused pane along that axis. */
+export function addPane(launch: string | null, title: string, dir?: "row" | "col"): string {
   const pane = layoutOps.newPane(launch, title);
   const tree = get(layout);
   if (!tree) {
     setLayout(pane);
-  } else {
+  } else if (dir) {
     const target = get(focusedPaneId) ?? layoutOps.collectPanes(tree).at(-1)!.id;
     setLayout(layoutOps.splitPane(tree, target, pane, dir));
+  } else {
+    const { target, dir: autoDir } = autoPlacement(tree);
+    setLayout(layoutOps.splitPane(tree, target, pane, autoDir));
   }
   focusedPaneId.set(pane.id);
   return pane.id;
@@ -310,8 +466,8 @@ export function openFile(path: string, opts: { diff?: boolean } = {}) {
   if (!tree) {
     setLayout(pane);
   } else {
-    const target = get(focusedPaneId) ?? layoutOps.collectPanes(tree).at(-1)!.id;
-    setLayout(layoutOps.splitPane(tree, target, pane, "row"));
+    const { target, dir } = autoPlacement(tree);
+    setLayout(layoutOps.splitPane(tree, target, pane, dir));
   }
   focusedPaneId.set(pane.id);
 }
@@ -340,6 +496,12 @@ export function movePane(fromId: string, toId: string) {
   if (fromId === toId) return;
   const tree = get(layout);
   if (!tree) return;
+  // Pane dragged in from another tab: no position to swap with, so graft it
+  // next to the drop target instead.
+  if (!layoutOps.findPane(tree, fromId)) {
+    splitPaneAt(fromId, toId, "row");
+    return;
+  }
   setLayout(layoutOps.swapPanes(tree, fromId, toId));
 }
 
@@ -347,6 +509,13 @@ export function splitPaneAt(fromId: string, targetId: string, dir: "row" | "col"
   if (fromId === targetId) return;
   const tree = get(layout);
   if (!tree) return;
+  if (!layoutOps.findPane(tree, fromId)) {
+    const pane = cutPaneFromOtherTab(fromId);
+    if (!pane) return;
+    setLayout(layoutOps.splitPane(tree, targetId, pane, dir, before));
+    focusedPaneId.set(pane.id);
+    return;
+  }
   const result = layoutOps.movePaneToSplit(tree, fromId, targetId, dir, before);
   if (result) setLayout(result);
   focusedPaneId.set(targetId);
@@ -356,6 +525,14 @@ export function resizeSplit(splitId: string, ratio: number) {
   const tree = get(layout);
   if (!tree) return;
   setLayout(layoutOps.setRatio(tree, splitId, ratio));
+}
+
+export function resizeCorner(splitId1: string, ratio1: number, splitId2: string, ratio2: number) {
+  const tree = get(layout);
+  if (!tree) return;
+  let newTree = layoutOps.setRatio(tree, splitId1, ratio1);
+  newTree = layoutOps.setRatio(newTree, splitId2, ratio2);
+  setLayout(newTree);
 }
 
 export async function refreshChanges() {

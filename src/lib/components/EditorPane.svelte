@@ -13,6 +13,7 @@
     fsTick,
     lockFlash,
     movePane,
+    sessionReady,
     setPaneDiff,
     splitPaneAt,
     draggedPaneId,
@@ -267,9 +268,26 @@
     ipc.revealInFileManager(path).catch((err) => (saveError = String(err)));
   }
 
+  /** Re-run the load after a failure (session came up late, transient fs error). */
+  function retry() {
+    generation++;
+    plainEditor?.dispose();
+    plainEditor = undefined;
+    model?.dispose();
+    model = undefined;
+    loadedContent = null;
+    binary = false;
+    error = null;
+    imageData = null;
+    load(path);
+  }
+
   // (Re)create everything whenever this pane starts showing a different file.
+  // Also re-runs when the session comes up: a restored layout mounts before
+  // start_session resolves, and loading then would fail with "no active session".
   $effect(() => {
     const p = path;
+    const ready = $sessionReady;
     binary = false;
     error = null;
     externallyChanged = false;
@@ -281,7 +299,7 @@
     previewText = "";
     imageData = null;
     menuOpen = false;
-    load(p);
+    if (ready) load(p);
     return () => {
       generation++;
       plainEditor?.dispose();
@@ -325,6 +343,7 @@
     const tick = $fsTick;
     if (tick === lastTick) return;
     lastTick = tick;
+    if (!$sessionReady) return;
     if (model) reloadFromDisk();
     else if (imageOnly) {
       const gen = generation;
@@ -474,8 +493,18 @@
       >✕</button>
     </div>
   </div>
-  {#if error}
-    <div class="flex flex-1 items-center justify-center px-4 text-center text-sm text-red-400">{error}</div>
+  {#if !$sessionReady}
+    <div class="flex flex-1 items-center justify-center px-4 text-center text-sm text-zinc-500">
+      Opening session…
+    </div>
+  {:else if error}
+    <div class="flex flex-1 flex-col items-center justify-center gap-3 px-4 text-center">
+      <span class="text-sm text-red-400">{error}</span>
+      <button
+        class="rounded-md border border-zinc-700 px-3 py-1 text-xs text-zinc-300 hover:border-emerald-500 hover:text-emerald-400"
+        onclick={(e) => { e.stopPropagation(); retry(); }}
+      >Retry</button>
+    </div>
   {:else if imageOnly}
     <div class="flex min-h-0 flex-1 items-center justify-center overflow-auto bg-[#1a1a1a] p-4">
       {#if imageData}
