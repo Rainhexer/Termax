@@ -3,10 +3,48 @@
   import TerminalPane from "./TerminalPane.svelte";
   import EditorPane from "./EditorPane.svelte";
   import type { LayoutNode } from "../types";
-  import { resizeSplit, resizeCorner } from "../stores";
+  import { maximizedPaneId, resizeSplit, resizeCorners } from "../stores";
 
   let { node }: { node: LayoutNode } = $props();
   let container: HTMLDivElement | undefined;
+
+  let cornerGroups = $derived.by<{ rowSplitIds: string[]; colSplitIds: string[]; xPct: number; yPct: number }[]>(() => {
+    if (node.type !== "split") return [];
+    const groups: { rowSplitIds: string[]; colSplitIds: string[]; xPct: number; yPct: number }[] = [];
+
+    if (node.dir === "row") {
+      const colChildren: { id: string; ratio: number }[] = [];
+      if (node.a.type === "split" && node.a.dir === "col") colChildren.push({ id: node.a.id, ratio: node.a.ratio });
+      if (node.b.type === "split" && node.b.dir === "col") colChildren.push({ id: node.b.id, ratio: node.b.ratio });
+      if (!colChildren.length) return groups;
+
+      const byRatio = new Map<number, string[]>();
+      for (const c of colChildren) {
+        const k = Math.round(c.ratio * 1000);
+        if (!byRatio.has(k)) byRatio.set(k, []);
+        byRatio.get(k)!.push(c.id);
+      }
+      for (const [k, ids] of byRatio) {
+        groups.push({ rowSplitIds: [node.id], colSplitIds: ids, xPct: node.ratio * 100, yPct: (k / 1000) * 100 });
+      }
+    } else {
+      const rowChildren: { id: string; ratio: number }[] = [];
+      if (node.a.type === "split" && node.a.dir === "row") rowChildren.push({ id: node.a.id, ratio: node.a.ratio });
+      if (node.b.type === "split" && node.b.dir === "row") rowChildren.push({ id: node.b.id, ratio: node.b.ratio });
+      if (!rowChildren.length) return groups;
+
+      const byRatio = new Map<number, string[]>();
+      for (const c of rowChildren) {
+        const k = Math.round(c.ratio * 1000);
+        if (!byRatio.has(k)) byRatio.set(k, []);
+        byRatio.get(k)!.push(c.id);
+      }
+      for (const [k, ids] of byRatio) {
+        groups.push({ rowSplitIds: ids, colSplitIds: [node.id], xPct: (k / 1000) * 100, yPct: node.ratio * 100 });
+      }
+    }
+    return groups;
+  });
 
   function startDrag(e: PointerEvent) {
     if (node.type !== "split" || !container) return;
@@ -29,7 +67,7 @@
     window.addEventListener("pointerup", onUp);
   }
 
-  function startCornerDrag(e: PointerEvent, rowSplitId: string, colSplitId: string) {
+  function startCornerDrag(e: PointerEvent, rowSplitIds: string[], colSplitIds: string[]) {
     if (!container) return;
     e.preventDefault();
     e.stopPropagation();
@@ -38,9 +76,9 @@
     function onMove(ev: PointerEvent) {
       const x = (ev.clientX - rect.left) / rect.width;
       const y = (ev.clientY - rect.top) / rect.height;
-      resizeCorner(
-        rowSplitId, Math.min(0.9, Math.max(0.1, x)),
-        colSplitId, Math.min(0.9, Math.max(0.1, y)),
+      resizeCorners(
+        rowSplitIds, Math.min(0.9, Math.max(0.1, x)),
+        colSplitIds, Math.min(0.9, Math.max(0.1, y)),
       );
     }
     function onUp() {
@@ -53,47 +91,34 @@
 </script>
 
 {#if node.type === "pane"}
-  {#if node.kind === "editor"}
-    <EditorPane pane={node} />
-  {:else}
-    <TerminalPane pane={node} />
+  {#if !$maximizedPaneId || $maximizedPaneId === node.id}
+    <!-- Keyed on pane id: without it a tab switch onto a same-shaped grid
+         reuses the pane component (and its host DOM node) for a different
+         pane, bleeding the previous tab's terminal into this slot. -->
+    {#key node.id}
+      {#if node.kind === "editor"}
+        <EditorPane pane={node} />
+      {:else}
+        <TerminalPane pane={node} />
+      {/if}
+    {/key}
   {/if}
 {:else}
+  {#if $maximizedPaneId}
+    <TilingLayout node={node.a} />
+    <TilingLayout node={node.b} />
+  {:else}
   <div
     bind:this={container}
     class="relative flex h-full w-full min-w-0 min-h-0 {node.dir === 'col' ? 'flex-col' : ''}"
   >
-    {#if node.dir === "row"}
-      {#if node.a.type === "split" && node.a.dir === "col"}
-        <div
-          class="absolute z-10 w-3 h-3 -ml-1.5 -mt-1.5 bg-emerald-500/40 hover:bg-emerald-500/60 active:bg-emerald-500/80 rounded-sm cursor-nwse-resize"
-          style="left: {node.ratio * 100}%; top: {node.a.ratio * 100}%"
-          onpointerdown={(e) => startCornerDrag(e, node.id, node.a.id)}
-        ></div>
-      {/if}
-      {#if node.b.type === "split" && node.b.dir === "col"}
-        <div
-          class="absolute z-10 w-3 h-3 -ml-1.5 -mt-1.5 bg-emerald-500/40 hover:bg-emerald-500/60 active:bg-emerald-500/80 rounded-sm cursor-nwse-resize"
-          style="left: {node.ratio * 100}%; top: {node.b.ratio * 100}%"
-          onpointerdown={(e) => startCornerDrag(e, node.id, node.b.id)}
-        ></div>
-      {/if}
-    {:else}
-      {#if node.a.type === "split" && node.a.dir === "row"}
-        <div
-          class="absolute z-10 w-3 h-3 -ml-1.5 -mt-1.5 bg-emerald-500/40 hover:bg-emerald-500/60 active:bg-emerald-500/80 rounded-sm cursor-nwse-resize"
-          style="left: {node.a.ratio * 100}%; top: {node.ratio * 100}%"
-          onpointerdown={(e) => startCornerDrag(e, node.a.id, node.id)}
-        ></div>
-      {/if}
-      {#if node.b.type === "split" && node.b.dir === "row"}
-        <div
-          class="absolute z-10 w-3 h-3 -ml-1.5 -mt-1.5 bg-emerald-500/40 hover:bg-emerald-500/60 active:bg-emerald-500/80 rounded-sm cursor-nwse-resize"
-          style="left: {node.b.ratio * 100}%; top: {node.ratio * 100}%"
-          onpointerdown={(e) => startCornerDrag(e, node.b.id, node.id)}
-        ></div>
-      {/if}
-    {/if}
+    {#each cornerGroups as group (group.rowSplitIds[0] + '-' + group.colSplitIds[0])}
+      <div
+        class="absolute z-10 w-3 h-3 -ml-1.5 -mt-1.5 bg-emerald-500/40 hover:bg-emerald-500/60 active:bg-emerald-500/80 rounded-sm cursor-nwse-resize"
+        style="left: {group.xPct}%; top: {group.yPct}%"
+        onpointerdown={(e) => startCornerDrag(e, group.rowSplitIds, group.colSplitIds)}
+      ></div>
+    {/each}
     <div class="min-w-0 min-h-0" style="flex: {node.ratio} 1 0%">
       <TilingLayout node={node.a} />
     </div>
@@ -107,4 +132,5 @@
       <TilingLayout node={node.b} />
     </div>
   </div>
+  {/if}
 {/if}

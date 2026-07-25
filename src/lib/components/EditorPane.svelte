@@ -12,11 +12,13 @@
     focusedPaneId,
     fsTick,
     lockFlash,
+    maximizedPaneId,
     movePane,
     sessionReady,
     setPaneDiff,
     splitPaneAt,
     draggedPaneId,
+    toggleMaximizedPane,
   } from "../stores";
 
   type DropZone = "top" | "bottom" | "left" | "right" | "center";
@@ -486,6 +488,11 @@
           </div>
         {/if}
       </div>
+      <button
+        class="rounded px-1.5 py-0.5 text-[11px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+        title={$maximizedPaneId === pane.id ? "Restore pane" : "Fullscreen pane"}
+        onclick={(e) => { e.stopPropagation(); toggleMaximizedPane(pane.id); }}
+      >{$maximizedPaneId === pane.id ? '⤡' : '⛶'}</button>
       <button
         class="rounded px-1.5 py-0.5 text-[11px] text-zinc-500 hover:bg-red-900/50 hover:text-red-300"
         title="Close editor"

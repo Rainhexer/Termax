@@ -1,4 +1,4 @@
-import { get, writable } from "svelte/store";
+import { derived, get, writable } from "svelte/store";
 import { ask } from "@tauri-apps/plugin-dialog";
 import type { ChangeEntry, GitStatus, LayoutNode, PaneNode, Project, Tab, VaultCommand, Workspace } from "./types";
 import { ipc } from "./ipc";
@@ -6,6 +6,7 @@ import { launchFor, launcherById } from "./settings";
 import * as layoutOps from "./layout";
 import * as terminals from "./terminals";
 import { loadDir, resetTree } from "./filetree";
+import { attentionPanes, bellPanes, setFocusedPane } from "./bell";
 
 export const projects = writable<Project[]>([]);
 export const activeProject = writable<Project | null>(null);
@@ -48,6 +49,14 @@ export const lockFlash = writable(0);
 /** Pixel size of the tiling area, kept current by App.svelte. Drives automatic
  *  placement of new panes; the zeros are replaced on first layout. */
 export const paneAreaSize = writable<layoutOps.Size>({ w: 0, h: 0 });
+
+/** Id of the pane currently maximized (fills the entire tiling area). */
+export const maximizedPaneId = writable<string | null>(null);
+
+/** Toggle a pane between maximized and normal. */
+export function toggleMaximizedPane(paneId: string) {
+  maximizedPaneId.update((current) => (current === paneId ? null : paneId));
+}
 
 /** Tracks the pane being dragged (WKWebView workaround: dataTransfer.getData
  *  returns empty in drop events on macOS). */
@@ -527,11 +536,12 @@ export function resizeSplit(splitId: string, ratio: number) {
   setLayout(layoutOps.setRatio(tree, splitId, ratio));
 }
 
-export function resizeCorner(splitId1: string, ratio1: number, splitId2: string, ratio2: number) {
+export function resizeCorners(rowSplitIds: string[], rowRatio: number, colSplitIds: string[], colRatio: number) {
   const tree = get(layout);
   if (!tree) return;
-  let newTree = layoutOps.setRatio(tree, splitId1, ratio1);
-  newTree = layoutOps.setRatio(newTree, splitId2, ratio2);
+  let newTree = tree;
+  for (const id of rowSplitIds) newTree = layoutOps.setRatio(newTree, id, rowRatio);
+  for (const id of colSplitIds) newTree = layoutOps.setRatio(newTree, id, colRatio);
   setLayout(newTree);
 }
 
@@ -655,6 +665,48 @@ export async function openBranchOnRemote() {
     gitError.set(String(err));
   }
 }
+
+/** Turn the bell watch on/off for a pane; persisted with the layout. */
+export function togglePaneBell(paneId: string) {
+  const tree = get(layout);
+  if (!tree) return;
+  const pane = layoutOps.findPane(tree, paneId);
+  if (!pane) return;
+  setLayout(layoutOps.setPaneBell(tree, paneId, !pane.bell));
+}
+
+/** Mirror the layout's bell flags into the terminal layer's lookup set. The
+ *  active tab's copy in `tabs` is stale between syncs, so read it from `layout`. */
+function syncBellPanes() {
+  const ids = new Set<string>();
+  const add = (tree: LayoutNode | null) => {
+    for (const p of layoutOps.collectPanes(tree)) if (p.bell) ids.add(p.id);
+  };
+  const activeId = get(activeTabId);
+  for (const t of get(tabs)) if (t.id !== activeId) add(t.layout);
+  add(get(layout));
+  bellPanes.set(ids);
+}
+
+tabs.subscribe(syncBellPanes);
+layout.subscribe(syncBellPanes);
+
+// Focusing a pane acknowledges its bell.
+focusedPaneId.subscribe(setFocusedPane);
+
+/** Tab ids holding at least one ringing pane; drives the tab bar pulse. */
+export const tabsWithAttention = derived(
+  [tabs, layout, activeTabId, attentionPanes],
+  ([$tabs, $layout, $activeTabId, $attention]) => {
+    const out = new Set<string>();
+    if (!$attention.size) return out;
+    for (const t of $tabs) {
+      const tree = t.id === $activeTabId ? $layout : t.layout;
+      if (layoutOps.collectPanes(tree).some((p) => $attention.has(p.id))) out.add(t.id);
+    }
+    return out;
+  },
+);
 
 /** Wire global PTY listeners; pane auto-closes when its process exits. */
 export function initListeners() {

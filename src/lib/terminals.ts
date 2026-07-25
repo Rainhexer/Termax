@@ -7,6 +7,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { get, writable } from "svelte/store";
 import { ipc } from "./ipc";
 import { settings } from "./settings";
+import * as bell from "./bell";
 
 export const loadingPanes = writable<Set<string>>(new Set());
 
@@ -21,6 +22,14 @@ interface Entry {
   opening: boolean;
   spawned: boolean;
   exited: boolean;
+  /** A line was submitted and its command has not been seen finishing yet. */
+  busy: boolean;
+  /** performance.now() of the last submitted line / the last PTY output. */
+  submittedAt: number;
+  lastOutputAt: number;
+  /** Bytes the PTY has produced since that line was submitted. */
+  outputSinceSubmit: number;
+  quietTimer?: ReturnType<typeof setTimeout>;
 }
 
 // Terminals live outside the component tree so panes survive layout re-renders.
@@ -93,6 +102,7 @@ export async function initPtyListeners(onExit: (paneId: string) => void) {
     removeLoading(e.payload.pane_id);
 
     const raw = b64ToBytes(e.payload.data);
+    noteOutput(e.payload.pane_id, raw.length);
     const chunk = new TextDecoder().decode(raw);
 
     let text = oscBuffers.get(e.payload.pane_id) ?? "";
@@ -104,7 +114,11 @@ export async function initPtyListeners(onExit: (paneId: string) => void) {
   });
   await listen<{ pane_id: string }>("pty-exit", (e) => {
     const entry = registry.get(e.payload.pane_id);
-    if (entry) entry.exited = true;
+    if (entry) {
+      entry.exited = true;
+      entry.busy = false;
+      clearTimeout(entry.quietTimer);
+    }
     removeLoading(e.payload.pane_id);
     onExit(e.payload.pane_id);
   });
@@ -202,9 +216,62 @@ function create(paneId: string): Entry {
   const el = document.createElement("div");
   el.className = "h-full w-full";
 
-  const entry: Entry = { term, fit, el, opened: false, opening: false, spawned: false, exited: false };
+  const entry: Entry = {
+    term,
+    fit,
+    el,
+    opened: false,
+    opening: false,
+    spawned: false,
+    exited: false,
+    busy: false,
+    submittedAt: 0,
+    lastOutputAt: 0,
+    outputSinceSubmit: 0,
+  };
+  // A program asking for attention (BEL) rings straight away — no heuristics.
+  term.onBell(() => bell.notifyPane(paneId));
   registry.set(paneId, entry);
   return entry;
+}
+
+// Bell heuristic, for shells and TUIs without shell integration: a pane is
+// "done" once it has been quiet for QUIET_MS after a submitted line.
+//
+// The catch is the echo: pressing Enter makes the program spit back a newline
+// immediately, so a command that then works silently (`sleep 5`) would look
+// finished 800ms later. Real completion is followed by a redrawn prompt (or the
+// command's output) — far more bytes than a bare echo — or, for a command that
+// took a while, by output landing well after the Enter. Requiring either keeps
+// `ls` (instant, lots of bytes) and `sleep 5` (late output) both correct.
+const QUIET_MS = 800;
+const ECHO_BYTES = 32;
+const ECHO_MS = 300;
+
+function noteOutput(paneId: string, bytes: number) {
+  const entry = registry.get(paneId);
+  if (!entry) return;
+  entry.lastOutputAt = performance.now();
+  if (!entry.busy) return;
+  entry.outputSinceSubmit += bytes;
+  clearTimeout(entry.quietTimer);
+  entry.quietTimer = setTimeout(() => {
+    const echoOnly =
+      entry.outputSinceSubmit <= ECHO_BYTES && entry.lastOutputAt - entry.submittedAt < ECHO_MS;
+    if (echoOnly) return;
+    entry.busy = false;
+    bell.notifyPane(paneId);
+  }, QUIET_MS);
+}
+
+function noteInput(paneId: string, data: string) {
+  const entry = registry.get(paneId);
+  if (!entry) return;
+  bell.clearAttention(paneId);
+  if (!data.includes("\r") && !data.includes("\n")) return;
+  entry.busy = true;
+  entry.submittedAt = performance.now();
+  entry.outputSinceSubmit = 0;
 }
 
 /** Mount pane terminal into host element; spawn the PTY on first attach. */
@@ -215,6 +282,12 @@ export function attach(
   launch: string | null,
 ) {
   const entry = registry.get(paneId) ?? create(paneId);
+  // A host can still hold another pane's terminal: a pane component reused for
+  // a different pane id (tab switch onto a same-shaped grid) keeps its host DOM
+  // node. Evict strays first, or both terminals stack in the one pane.
+  for (const child of [...host.children]) {
+    if (child !== entry.el) child.remove();
+  }
   // Idempotent: re-homing into the same host must not re-run open/onData,
   // else each keystroke replays the whole input history.
   if (entry.el.parentElement !== host) host.appendChild(entry.el);
@@ -246,7 +319,10 @@ function openWhenSized(
   entry.opening = false;
   entry.opened = true;
   entry.term.open(entry.el);
-  entry.term.onData((data) => ipc.writePty(paneId, data));
+  entry.term.onData((data) => {
+    noteInput(paneId, data);
+    ipc.writePty(paneId, data);
+  });
   patchWebkitgtkComposition(entry, paneId);
   fitPane(paneId);
   if (!entry.spawned) {
@@ -368,6 +444,13 @@ function flushPending(paneId: string, launch: string | null) {
   const safetyTimer = setTimeout(go, SAFETY_MS);
 }
 
+/** Un-home a pane's terminal from `host`, leaving the terminal itself alive so
+ *  it re-attaches when the pane is shown again. */
+export function detach(paneId: string, host: HTMLElement) {
+  const entry = registry.get(paneId);
+  if (entry && entry.el.parentElement === host) entry.el.remove();
+}
+
 export function isAlive(paneId: string): boolean {
   const entry = registry.get(paneId);
   return !!entry && !entry.exited;
@@ -397,6 +480,7 @@ export function typeInPane(paneId: string, text: string) {
 export function runInPane(paneId: string, command: string) {
   const entry = registry.get(paneId);
   if (!entry || entry.exited) return;
+  noteInput(paneId, "\r");
   ipc.writePty(paneId, command + "\r");
   entry.term.focus();
 }
@@ -408,6 +492,8 @@ export function destroyPane(paneId: string) {
   pendingRun.delete(paneId);
   oscBuffers.delete(paneId);
   removeLoading(paneId);
+  clearTimeout(entry.quietTimer);
+  bell.clearAttention(paneId);
   if (entry.spawned && !entry.exited) ipc.killPty(paneId).catch(() => {});
   entry.term.dispose();
   entry.el.remove();

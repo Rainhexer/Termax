@@ -1,7 +1,8 @@
 <script lang="ts">
   import type { PaneNode } from "../types";
-  import { attach, fitPane, focusTerminal, loadingPanes, fileDropPaneId } from "../terminals";
-  import { activeProject, focusedPaneId, closePane, addPane, movePane, splitPaneAt, draggedPaneId } from "../stores";
+  import { attach, detach, fitPane, focusTerminal, loadingPanes, fileDropPaneId } from "../terminals";
+  import { activeProject, focusedPaneId, closePane, addPane, movePane, splitPaneAt, draggedPaneId, maximizedPaneId, toggleMaximizedPane, togglePaneBell } from "../stores";
+  import { attentionPanes, clearAttention, previewChime } from "../bell";
 
   type DropZone = "top" | "bottom" | "left" | "right" | "center";
 
@@ -13,6 +14,7 @@
   const focused = $derived($focusedPaneId === pane.id);
   const fileDropTarget = $derived($fileDropPaneId === pane.id);
   const loading = $derived(pane.launch && $loadingPanes.has(pane.id));
+  const ringing = $derived($attentionPanes.has(pane.id));
 
   function getDropZone(e: DragEvent): DropZone | null {
     const rect = self.getBoundingClientRect();
@@ -64,6 +66,7 @@
   function focus() {
     focusedPaneId.set(pane.id);
     focusTerminal(pane.id);
+    clearAttention(pane.id);
   }
 
   $effect(() => {
@@ -71,7 +74,12 @@
     attach(id, host, $activeProject?.path ?? ".", pane.launch);
     const ro = new ResizeObserver(() => fitPane(id));
     ro.observe(host);
-    return () => ro.disconnect();
+    return () => {
+      ro.disconnect();
+      // This component may be re-run for a different pane id; leave the host
+      // empty so the old terminal does not linger under the new one.
+      detach(id, host);
+    };
   });
 </script>
 
@@ -80,7 +88,8 @@
   bind:this={self}
   data-pane-id={pane.id}
   class="relative flex h-full w-full min-w-0 min-h-0 flex-col overflow-hidden rounded-lg border bg-[#131316] transition-colors
-    {fileDropTarget || (currentZone && currentZone !== 'center') ? 'border-emerald-400' : focused ? 'border-emerald-500/60' : 'border-zinc-800'}"
+    {fileDropTarget || (currentZone && currentZone !== 'center') ? 'border-emerald-400' : focused ? 'border-emerald-500/60' : 'border-zinc-800'}
+    {ringing ? 'bell-pulse' : ''}"
   onmousedown={focus}
   ondragover={onDragOver}
   ondragleave={onDragLeave}
@@ -112,6 +121,27 @@
     </span>
     <div class="ml-auto flex items-center gap-0.5">
       <button
+        class="rounded px-1.5 py-0.5 hover:bg-zinc-800
+          {ringing ? 'text-amber-400' : pane.bell ? 'text-emerald-400' : 'text-zinc-500 hover:text-zinc-200'}"
+        title={pane.bell ? "Bell on — chime + pulse when this pane finishes or wants input" : "Notify me when this pane finishes or wants input"}
+        onclick={(e) => {
+          e.stopPropagation();
+          // `pane` is refreshed by the toggle, so read the old state first.
+          const wasOn = pane.bell;
+          clearAttention(pane.id);
+          togglePaneBell(pane.id);
+          if (!wasOn) previewChime();
+        }}
+      >
+        <svg viewBox="0 0 24 24" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+          <path d="M13.7 21a2 2 0 0 1-3.4 0" />
+          {#if !pane.bell}
+            <path d="M3 3l18 18" />
+          {/if}
+        </svg>
+      </button>
+      <button
         class="rounded px-1.5 py-0.5 text-[11px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
         title="Split right"
         onclick={(e) => { e.stopPropagation(); focusedPaneId.set(pane.id); addPane(null, "shell", "row"); }}
@@ -121,6 +151,11 @@
         title="Split down"
         onclick={(e) => { e.stopPropagation(); focusedPaneId.set(pane.id); addPane(null, "shell", "col"); }}
       >⬓</button>
+      <button
+        class="rounded px-1.5 py-0.5 text-[11px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+        title={$maximizedPaneId === pane.id ? "Restore pane" : "Fullscreen pane"}
+        onclick={(e) => { e.stopPropagation(); toggleMaximizedPane(pane.id); }}
+      >{$maximizedPaneId === pane.id ? '⤡' : '⛶'}</button>
       <button
         class="rounded px-1.5 py-0.5 text-[11px] text-zinc-500 hover:bg-red-900/50 hover:text-red-300"
         title="Close pane"

@@ -31,6 +31,47 @@ body {
   background: transparent;
 }
 
+/* Bell attention: a pane whose command finished (or wants input) pulses its
+   border; the tab holding it pulses its background. */
+@keyframes termax-bell-pulse {
+  0%,
+  100% {
+    border-color: rgb(251 191 36 / 0.55);
+    box-shadow: 0 0 0 0 rgb(251 191 36 / 0);
+  }
+  50% {
+    border-color: rgb(251 191 36);
+    box-shadow: 0 0 14px 2px rgb(251 191 36 / 0.45);
+  }
+}
+.bell-pulse {
+  animation: termax-bell-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes termax-bell-pulse-tab {
+  0%,
+  100% {
+    background-color: rgb(251 191 36 / 0.06);
+  }
+  50% {
+    background-color: rgb(251 191 36 / 0.22);
+  }
+}
+.bell-pulse-tab {
+  animation: termax-bell-pulse-tab 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bell-pulse {
+    animation: none;
+    border-color: rgb(251 191 36);
+  }
+  .bell-pulse-tab {
+    animation: none;
+    background-color: rgb(251 191 36 / 0.15);
+  }
+}
+
 /* Rendered Markdown preview (EditorPane "Preview" mode). */
 .md-preview {
   color: #d4d4d4;

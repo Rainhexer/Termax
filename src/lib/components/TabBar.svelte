@@ -11,6 +11,7 @@
     movePaneToNewTab,
     draggedPaneId,
     draggedTabId,
+    tabsWithAttention,
   } from "../stores";
   import type { Tab } from "../types";
 
@@ -175,6 +176,7 @@
   <div class="flex h-9 shrink-0 items-stretch overflow-hidden border-b border-zinc-800 bg-zinc-950">
     {#each $tabs as tab, i (tab.id)}
       {@const active = tab.id === $activeTabId}
+      {@const ringing = $tabsWithAttention.has(tab.id)}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -184,7 +186,8 @@
             ? 'bg-zinc-900 text-emerald-400'
             : 'text-zinc-500 hover:bg-zinc-900/50 hover:text-zinc-300'}
           {$draggedTabId === tab.id ? 'opacity-40' : ''}
-          {paneTargetId === tab.id ? 'bg-emerald-500/10 ring-1 ring-inset ring-emerald-400' : ''}"
+          {paneTargetId === tab.id ? 'bg-emerald-500/10 ring-1 ring-inset ring-emerald-400' : ''}
+          {ringing ? 'bell-pulse-tab' : ''}"
         draggable={editingId !== tab.id}
         onclick={() => switchTab(tab.id)}
         ondblclick={() => startRename(tab.id, tab.title)}
@@ -217,6 +220,9 @@
             onkeydown={onKey}
           />
         {:else}
+          {#if ringing}
+            <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.9)]"></span>
+          {/if}
           <span class="min-w-0 flex-1 truncate">{tab.title}</span>
         {/if}
         <button

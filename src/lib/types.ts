@@ -42,6 +42,8 @@ export interface PaneNode {
   file?: string;
   /** Editor panes: open showing the diff (changes) view instead of plain content. */
   diff?: boolean;
+  /** Terminal panes: chime + pulse when the command finishes or wants input. */
+  bell?: boolean;
 }
 
 export interface SplitNode {

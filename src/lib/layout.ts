@@ -96,6 +96,12 @@ export function setPaneDiff(node: LayoutNode, paneId: string, diff: boolean): La
   return { ...node, a: setPaneDiff(node.a, paneId, diff), b: setPaneDiff(node.b, paneId, diff) };
 }
 
+/** Set the bell-watch flag on a terminal pane. Returns new tree. */
+export function setPaneBell(node: LayoutNode, paneId: string, bell: boolean): LayoutNode {
+  if (node.type === "pane") return node.id === paneId ? { ...node, bell } : node;
+  return { ...node, a: setPaneBell(node.a, paneId, bell), b: setPaneBell(node.b, paneId, bell) };
+}
+
 export function setRatio(node: LayoutNode, splitId: string, ratio: number): LayoutNode {
   if (node.type === "pane") return node;
   if (node.id === splitId) return { ...node, ratio };
