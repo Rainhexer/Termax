@@ -2,5 +2,4 @@ Comuniity command store - browse prebuilt commands from a store and publish your
 
 Cloud backup of settings and command vault
 
-theaming
-
+theaming — done: Settings → Appearance (presets, full colour/font control, save/load/import/export)

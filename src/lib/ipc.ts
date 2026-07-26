@@ -66,6 +66,10 @@ export const ipc = {
   detectAgents: () => invoke<DetectedAgent[]>("detect_agents"),
   validateCommand: (command: string) => invoke<boolean>("validate_command", { command }),
   openUrl: (url: string) => invoke<void>("open_url", { url }),
+  writeThemeFile: (path: string, contents: string) =>
+    invoke<void>("write_theme_file", { path, contents }),
+  readThemeFile: (path: string) => invoke<string>("read_theme_file", { path }),
+  listFonts: () => invoke<string[]>("list_fonts"),
 
   // Folder trust
   isTrusted: (path: string) => invoke<boolean>("is_trusted", { path }),

@@ -176,17 +176,3 @@
     {/if}
   </div>
 {/if}
-
-<style>
-  .menu-item {
-    display: block;
-    width: 100%;
-    padding: 0.3rem 0.75rem;
-    text-align: left;
-    font-size: 0.75rem;
-    color: var(--color-zinc-200, #e4e4e7);
-  }
-  .menu-item:hover {
-    background: var(--color-zinc-800, #27272a);
-  }
-</style>

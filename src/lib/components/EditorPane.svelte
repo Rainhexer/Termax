@@ -1,8 +1,9 @@
 <script lang="ts">
   import { get } from "svelte/store";
   import type { ChangeArea, PaneNode } from "../types";
-  import { monaco, languageForPath } from "../monaco";
+  import { monaco, languageForPath, MONACO_THEME } from "../monaco";
   import { hasPreview, previewKindForPath, renderMarkdown } from "../preview";
+  import { fontStack } from "../theme";
   import { ipc } from "../ipc";
   import { settings } from "../settings";
   import {
@@ -127,13 +128,23 @@
   }
 
   const editorOptions = () => ({
-    theme: "vs-dark",
+    theme: MONACO_THEME,
     automaticLayout: true,
     readOnly: get(explorerLocked),
     lineNumbers: "off" as const,
     minimap: { enabled: false },
-    fontSize: get(settings).appearance.editorFontSize,
+    fontSize: get(settings).appearance.theme.fonts.editorSize,
+    fontFamily: fontStack(get(settings).appearance.theme.fonts.editor, "mono"),
     scrollBeyondLastLine: false,
+  });
+
+  // Live-apply editor font changes from the theme (colours come from Monaco's
+  // themeing, which monaco.ts re-defines on every theme change).
+  $effect(() => {
+    const fonts = $settings.appearance.theme.fonts;
+    const opts = { fontSize: fonts.editorSize, fontFamily: fontStack(fonts.editor, "mono") };
+    plainEditor?.updateOptions(opts);
+    diffEditor?.updateOptions(opts);
   });
 
   function createPlainEditor() {
@@ -332,13 +343,6 @@
     diffEditor?.updateOptions({ readOnly });
   });
 
-  // Update font size reactively when editor settings change.
-  $effect(() => {
-    const size = $settings.appearance.editorFontSize;
-    plainEditor?.updateOptions({ fontSize: size });
-    diffEditor?.updateOptions({ fontSize: size });
-  });
-
   // Reload from disk when the watcher reports changes.
   let lastTick = 0;
   $effect(() => {
@@ -359,7 +363,7 @@
 <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
 <div
   bind:this={self}
-  class="relative flex h-full w-full min-w-0 min-h-0 flex-col overflow-hidden rounded-lg border bg-[#1e1e1e] transition-colors
+  class="relative flex h-full w-full min-w-0 min-h-0 flex-col overflow-hidden rounded-lg border pane-editor-bg transition-colors
     {currentZone && currentZone !== 'center' ? 'border-emerald-400' : focused ? 'border-emerald-500/60' : 'border-zinc-800'}"
   onmousedown={() => focusedPaneId.set(pane.id)}
   ondragover={onDragOver}
@@ -369,13 +373,13 @@
   {#if currentZone && currentZone !== "center"}
     <div class="pointer-events-none absolute inset-0 z-10 rounded-lg bg-emerald-500/5"></div>
     {#if currentZone === "top"}
-      <div class="pointer-events-none absolute inset-x-3 top-0 z-10 h-[3px] rounded-t bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.4)]"></div>
+      <div class="pointer-events-none absolute inset-x-3 top-0 z-10 h-[3px] rounded-t glow-accent"></div>
     {:else if currentZone === "bottom"}
-      <div class="pointer-events-none absolute inset-x-3 bottom-0 z-10 h-[3px] rounded-b bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.4)]"></div>
+      <div class="pointer-events-none absolute inset-x-3 bottom-0 z-10 h-[3px] rounded-b glow-accent"></div>
     {:else if currentZone === "left"}
-      <div class="pointer-events-none absolute inset-y-3 left-0 z-10 w-[3px] rounded-l bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.4)]"></div>
+      <div class="pointer-events-none absolute inset-y-3 left-0 z-10 w-[3px] rounded-l glow-accent"></div>
     {:else if currentZone === "right"}
-      <div class="pointer-events-none absolute inset-y-3 right-0 z-10 w-[3px] rounded-r bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.4)]"></div>
+      <div class="pointer-events-none absolute inset-y-3 right-0 z-10 w-[3px] rounded-r glow-accent"></div>
     {/if}
   {/if}
   <div
@@ -513,7 +517,7 @@
       >Retry</button>
     </div>
   {:else if imageOnly}
-    <div class="flex min-h-0 flex-1 items-center justify-center overflow-auto bg-[#1a1a1a] p-4">
+    <div class="flex min-h-0 flex-1 items-center justify-center overflow-auto bg-[var(--tmx-pv-bg)] p-4">
       {#if imageData}
         <img src={imageData} alt={fileName} class="max-h-full max-w-full object-contain" />
       {:else}
@@ -529,12 +533,12 @@
     <div class="min-h-0 flex-1 {viewMode === 'preview' ? 'hidden' : ''}" bind:this={host}></div>
     {#if viewMode === "preview"}
       {#if previewKind === "markdown"}
-        <div class="min-h-0 flex-1 overflow-auto bg-[#1e1e1e]">
+        <div class="min-h-0 flex-1 overflow-auto bg-[var(--tmx-pv-bg)]">
           <div class="md-preview">{@html markdownHtml}</div>
         </div>
       {:else if previewKind === "html" || previewKind === "svg"}
         <iframe
-          class="min-h-0 flex-1 border-0 bg-white"
+          class="min-h-0 flex-1 border-0 bg-[var(--tmx-pv-page)]"
           title="Preview of {fileName}"
           sandbox="allow-scripts allow-forms allow-popups allow-modals"
           srcdoc={frameDoc}

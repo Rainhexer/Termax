@@ -4,6 +4,7 @@
   import { ipc } from "../ipc";
   import { settings, settingsOpen, syncDetected, updateSettings } from "../settings";
   import LauncherSettings from "./LauncherSettings.svelte";
+  import AppearanceSettings from "./AppearanceSettings.svelte";
   import logoUrl from "../assets/termax-logo.svg";
 
   type Section = "launchers" | "appearance" | "terminal" | "about";
@@ -41,10 +42,6 @@
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   });
-
-  function setAppearance<K extends keyof typeof $settings.appearance>(key: K, value: (typeof $settings.appearance)[K]) {
-    updateSettings((s) => ({ ...s, appearance: { ...s.appearance, [key]: value } }));
-  }
 
   function setTerminal<K extends keyof typeof $settings.terminal>(key: K, value: (typeof $settings.terminal)[K]) {
     updateSettings((s) => ({ ...s, terminal: { ...s.terminal, [key]: value } }));
@@ -93,47 +90,7 @@
         <LauncherSettings />
       {:else if section === "appearance"}
         <h2 class="mb-3 text-sm font-semibold text-zinc-100">Appearance</h2>
-        <div class="flex flex-col gap-4">
-          <label class="flex flex-col gap-1">
-            <span class="text-xs text-zinc-400">Font family <span class="text-zinc-600">(terminals; applies to new panes)</span></span>
-            <input
-              class="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-xs text-zinc-200 outline-none focus:border-emerald-500"
-              value={$settings.appearance.fontFamily}
-              onchange={(e) => setAppearance("fontFamily", (e.target as HTMLInputElement).value)}
-            />
-          </label>
-          <label class="flex flex-col gap-1">
-            <span class="text-xs text-zinc-400">Terminal font size — {$settings.appearance.fontSize}px</span>
-            <input type="range" min="10" max="24" class="accent-emerald-500"
-              value={$settings.appearance.fontSize}
-              oninput={(e) => setAppearance("fontSize", num(e))}
-            />
-          </label>
-          <label class="flex flex-col gap-1">
-            <span class="text-xs text-zinc-400">Editor font size — {$settings.appearance.editorFontSize}px</span>
-            <input type="range" min="10" max="24" class="accent-emerald-500"
-              value={$settings.appearance.editorFontSize}
-              oninput={(e) => setAppearance("editorFontSize", num(e))}
-            />
-          </label>
-          <label class="flex flex-col gap-1">
-            <span class="text-xs text-zinc-400">Theme</span>
-            <select
-              class="w-56 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-200 outline-none focus:border-emerald-500"
-              value={$settings.appearance.theme}
-              onchange={(e) => setAppearance("theme", (e.target as HTMLSelectElement).value)}
-            >
-              <option value="dark">Dark (zinc/emerald)</option>
-            </select>
-          </label>
-          <label class="flex flex-col gap-1">
-            <span class="text-xs text-zinc-400">Sidebar width — {$settings.appearance.sidebarWidth}px</span>
-            <input type="range" min="200" max="400" class="accent-emerald-500"
-              value={$settings.appearance.sidebarWidth}
-              oninput={(e) => setAppearance("sidebarWidth", num(e))}
-            />
-          </label>
-        </div>
+        <AppearanceSettings />
       {:else if section === "terminal"}
         <h2 class="mb-3 text-sm font-semibold text-zinc-100">Terminal</h2>
         <div class="flex flex-col gap-4">
@@ -173,15 +130,10 @@
               {/each}
             </select>
           </label>
-          <label class="flex items-center gap-2">
-            <span class="text-xs text-zinc-400">Cursor color</span>
-            <input type="color"
-              class="h-6 w-10 cursor-pointer rounded border border-zinc-700 bg-zinc-900"
-              value={$settings.terminal.cursorColor}
-              oninput={(e) => setTerminal("cursorColor", (e.target as HTMLInputElement).value)}
-            />
-            <span class="font-mono text-[11px] text-zinc-500">{$settings.terminal.cursorColor}</span>
-          </label>
+          <p class="text-xs text-zinc-600">
+            Cursor colour and the rest of the terminal palette live in
+            <button class="text-emerald-400 hover:underline" onclick={() => (section = "appearance")}>Appearance</button>.
+          </p>
           <label class="flex flex-col gap-1">
             <span class="text-xs text-zinc-400">Oversized file limit (KB) <span class="text-zinc-600">— max file size for diff/snapshot tracking</span></span>
             <input type="number" min="64" max="65536" step="64"

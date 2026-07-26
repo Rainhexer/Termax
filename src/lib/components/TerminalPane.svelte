@@ -87,7 +87,7 @@
 <div
   bind:this={self}
   data-pane-id={pane.id}
-  class="relative flex h-full w-full min-w-0 min-h-0 flex-col overflow-hidden rounded-lg border bg-[#131316] transition-colors
+  class="relative flex h-full w-full min-w-0 min-h-0 flex-col overflow-hidden rounded-lg border pane-term-bg transition-colors
     {fileDropTarget || (currentZone && currentZone !== 'center') ? 'border-emerald-400' : focused ? 'border-emerald-500/60' : 'border-zinc-800'}
     {ringing ? 'bell-pulse' : ''}"
   onmousedown={focus}
@@ -101,13 +101,13 @@
   {#if currentZone && currentZone !== "center"}
     <div class="pointer-events-none absolute inset-0 z-10 rounded-lg bg-emerald-500/5"></div>
     {#if currentZone === "top"}
-      <div class="pointer-events-none absolute inset-x-3 top-0 z-10 h-[3px] rounded-t bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.4)]"></div>
+      <div class="pointer-events-none absolute inset-x-3 top-0 z-10 h-[3px] rounded-t glow-accent"></div>
     {:else if currentZone === "bottom"}
-      <div class="pointer-events-none absolute inset-x-3 bottom-0 z-10 h-[3px] rounded-b bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.4)]"></div>
+      <div class="pointer-events-none absolute inset-x-3 bottom-0 z-10 h-[3px] rounded-b glow-accent"></div>
     {:else if currentZone === "left"}
-      <div class="pointer-events-none absolute inset-y-3 left-0 z-10 w-[3px] rounded-l bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.4)]"></div>
+      <div class="pointer-events-none absolute inset-y-3 left-0 z-10 w-[3px] rounded-l glow-accent"></div>
     {:else if currentZone === "right"}
-      <div class="pointer-events-none absolute inset-y-3 right-0 z-10 w-[3px] rounded-r bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.4)]"></div>
+      <div class="pointer-events-none absolute inset-y-3 right-0 z-10 w-[3px] rounded-r glow-accent"></div>
     {/if}
   {/if}
   <div
@@ -166,7 +166,7 @@
   <div class="relative min-h-0 flex-1">
     <div class="h-full w-full p-1.5" bind:this={host}></div>
     {#if loading}
-      <div class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-[#131316]/80">
+      <div class="absolute inset-0 flex flex-col items-center justify-center gap-3 pane-term-veil">
         <div class="h-5 w-5 animate-spin rounded-full border-2 border-zinc-700 border-t-emerald-400"></div>
         <span class="text-xs text-zinc-400">Starting {pane.title}…</span>
       </div>

@@ -1,13 +1,49 @@
 <script lang="ts">
   import { activeProject, addPane, closeProject, sidebarCollapsed, runVaultCommand, newTab } from "../stores";
-  import { enabledLaunchers, launcherById, settings, settingsOpen } from "../settings";
+  import { enabledLaunchers, launcherById, settings, settingsOpen, updateSettings } from "../settings";
   import CommandVault from "./CommandVault.svelte";
   import ChangesPanel from "./ChangesPanel.svelte";
   import FileTree from "./FileTree.svelte";
   import TerminalIcon from "./TerminalIcon.svelte";
 
+  const MIN_WIDTH = 180;
+  const MAX_WIDTH = 600;
+
   const launchers = $derived(enabledLaunchers($settings));
-  const width = $derived($sidebarCollapsed ? 48 : $settings.appearance.sidebarWidth);
+  /** Live width while dragging the edge; null when the stored width applies. */
+  let dragWidth = $state<number | null>(null);
+  const width = $derived(
+    $sidebarCollapsed ? 48 : (dragWidth ?? $settings.appearance.sidebarWidth),
+  );
+
+  // Drag the right edge to resize. The width is only written to settings on
+  // release, so a drag doesn't churn the store (and the debounced disk write)
+  // on every pointer move; panes re-fit via their own ResizeObserver.
+  function startResize(e: PointerEvent) {
+    if ($sidebarCollapsed) return;
+    e.preventDefault();
+    const handle = e.currentTarget as HTMLElement;
+    const startX = e.clientX;
+    const startWidth = $settings.appearance.sidebarWidth;
+    handle.setPointerCapture(e.pointerId);
+    dragWidth = startWidth;
+
+    const onMove = (ev: PointerEvent) => {
+      dragWidth = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, startWidth + ev.clientX - startX));
+    };
+    const onUp = () => {
+      handle.releasePointerCapture(e.pointerId);
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+      handle.removeEventListener("pointercancel", onUp);
+      const final = dragWidth ?? startWidth;
+      dragWidth = null;
+      updateSettings((s) => ({ ...s, appearance: { ...s.appearance, sidebarWidth: final } }));
+    };
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+    handle.addEventListener("pointercancel", onUp);
+  }
 
   let vaultOpen = $state(false);
   let vaultTriggerEl = $state<HTMLElement>();
@@ -28,9 +64,24 @@
 </script>
 
 <aside
-  class="relative flex shrink-0 flex-col border-r border-zinc-800 bg-zinc-950 transition-all duration-200"
+  class="relative flex shrink-0 flex-col border-r border-zinc-800 bg-zinc-950 {dragWidth === null
+    ? 'transition-all duration-200'
+    : ''}"
   style="width: {width}px"
 >
+  {#if !$sidebarCollapsed}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="absolute -right-1 top-0 z-30 h-full w-2 cursor-col-resize hover:bg-emerald-500/40 {dragWidth !==
+      null
+        ? 'bg-emerald-500/60'
+        : ''}"
+      title="Drag to resize sidebar"
+      onpointerdown={startResize}
+      ondblclick={() =>
+        updateSettings((s) => ({ ...s, appearance: { ...s.appearance, sidebarWidth: 256 } }))}
+    ></div>
+  {/if}
   {#if $sidebarCollapsed}
     <div class="flex flex-col items-center gap-2 py-2">
       <button

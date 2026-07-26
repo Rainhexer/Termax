@@ -27,24 +27,26 @@ fn default_true() -> bool {
     true
 }
 
+/// Appearance is owned by the frontend theming system (src/lib/theme.ts): the
+/// backend just round-trips it, so themes gain tokens without a schema change
+/// here. `theme` is a full theme object; older files hold a theme *name* string,
+/// which the frontend migrates on load.
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Appearance {
-    pub font_family: String,
-    pub font_size: u32,
-    pub editor_font_size: u32,
-    pub theme: String,
     pub sidebar_width: u32,
+    pub theme_id: String,
+    pub theme: serde_json::Value,
+    pub custom_themes: Vec<serde_json::Value>,
 }
 
 impl Default for Appearance {
     fn default() -> Self {
         Self {
-            font_family: "'JetBrainsMono Nerd Font', 'JetBrains Mono', monospace".into(),
-            font_size: 13,
-            editor_font_size: 12,
-            theme: "dark".into(),
             sidebar_width: 256,
+            theme_id: "termax-dark".into(),
+            theme: serde_json::Value::Null,
+            custom_themes: Vec::new(),
         }
     }
 }
@@ -58,7 +60,6 @@ pub struct TerminalSettings {
     /// "block" | "underline" | "bar"
     pub cursor_style: String,
     pub cursor_blink: bool,
-    pub cursor_color: String,
     /// Max file size (KB) for diff/snapshot tracking.
     pub oversized_limit_kb: u64,
 }
@@ -70,7 +71,6 @@ impl Default for TerminalSettings {
             scrollback: 10000,
             cursor_style: "underline".into(),
             cursor_blink: true,
-            cursor_color: "#34d399".into(),
             oversized_limit_kb: 1024,
         }
     }
@@ -169,6 +169,64 @@ pub fn save_settings(
     crate::session::set_snapshot_limit(settings.terminal.oversized_limit_kb * 1024);
     *store.settings.lock().unwrap() = settings;
     store.save()
+}
+
+/// Write a theme file to a path the user picked in a save dialog. Restricted to
+/// `.json` so a stray call can't clobber arbitrary files.
+#[tauri::command]
+pub fn write_theme_file(path: String, contents: String) -> Result<(), String> {
+    let p = PathBuf::from(&path);
+    if p.extension().and_then(|e| e.to_str()) != Some("json") {
+        return Err("theme files must end in .json".into());
+    }
+    fs::write(&p, contents).map_err(|e| format!("failed to write {path}: {e}"))
+}
+
+/// Read a theme file the user picked in an open dialog.
+#[tauri::command]
+pub fn read_theme_file(path: String) -> Result<String, String> {
+    let p = PathBuf::from(&path);
+    if p.extension().and_then(|e| e.to_str()) != Some("json") {
+        return Err("theme files must end in .json".into());
+    }
+    fs::read_to_string(&p).map_err(|e| format!("failed to read {path}: {e}"))
+}
+
+/// Font families installed on the system, sorted and de-duplicated. Empty when
+/// the platform's font tool is missing — the UI then falls back to a built-in
+/// list of common families.
+#[tauri::command]
+pub async fn list_fonts() -> Vec<String> {
+    #[cfg(not(windows))]
+    let output = Command::new("fc-list")
+        .arg("--format=%{family}\n")
+        .output();
+
+    #[cfg(windows)]
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "Add-Type -AssemblyName System.Drawing; [System.Drawing.FontFamily]::Families | ForEach-Object { $_.Name }",
+        ])
+        .output();
+
+    let Ok(out) = output else {
+        return Vec::new();
+    };
+
+    let mut families: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        // fc-list reports a family plus its aliases ("JetBrains Mono,JetBrains Mono ExtraBold");
+        // the first entry is the name users recognise.
+        .filter_map(|line| line.split(',').next())
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect();
+
+    families.sort_by_key(|f| f.to_lowercase());
+    families.dedup_by_key(|f| f.to_lowercase());
+    families
 }
 
 /// Known AI coding agents probed on $PATH.

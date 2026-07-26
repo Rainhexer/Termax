@@ -7,6 +7,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { get, writable } from "svelte/store";
 import { ipc } from "./ipc";
 import { settings } from "./settings";
+import { fontStack, xtermTheme } from "./theme";
 import * as bell from "./bell";
 
 export const loadingPanes = writable<Set<string>>(new Set());
@@ -163,50 +164,42 @@ export async function initFileDrop() {
   });
 }
 
-// Reactively update all open terminals when settings change.
+// Reactively update all open terminals when settings (fonts, theme) change.
+let lastFontKey = "";
 settings.subscribe(s => {
-  const fontSize = s.appearance.fontSize;
-  const fontFamily = s.appearance.fontFamily;
+  const { fonts } = s.appearance.theme;
+  const theme = xtermTheme(s.appearance.theme);
+  const family = fontStack(fonts.terminal, "mono");
   for (const entry of registry.values()) {
-    if (entry.opened) {
-      entry.term.options.fontSize = fontSize;
-      entry.term.options.fontFamily = fontFamily;
-    }
+    if (!entry.opened) continue;
+    entry.term.options.fontSize = fonts.terminalSize;
+    entry.term.options.fontFamily = family;
+    entry.term.options.theme = theme;
   }
+
+  // A font change alters the cell size but not the element size, so no
+  // ResizeObserver fires: without an explicit re-fit the grid keeps the old
+  // rows/cols and full-screen TUIs (claude, opencode) stay drawn at the old
+  // geometry until something else resizes them. Fit on the next frame, once
+  // xterm has re-measured the character cell.
+  const fontKey = `${family}|${fonts.terminalSize}`;
+  if (fontKey === lastFontKey) return;
+  lastFontKey = fontKey;
+  requestAnimationFrame(() => {
+    for (const paneId of registry.keys()) fitPane(paneId);
+  });
 });
 
 function create(paneId: string): Entry {
   const s = get(settings);
   const term = new Terminal({
-    fontFamily: s.appearance.fontFamily,
-    fontSize: s.appearance.fontSize,
+    fontFamily: fontStack(s.appearance.theme.fonts.terminal, "mono"),
+    fontSize: s.appearance.theme.fonts.terminalSize,
     cursorBlink: s.terminal.cursorBlink,
     cursorStyle: s.terminal.cursorStyle,
     allowProposedApi: true,
     scrollback: s.terminal.scrollback,
-    theme: {
-      background: "#131316",
-      foreground: "#e4e4e7",
-      cursor: s.terminal.cursorColor,
-      cursorAccent: "#131316",
-      selectionBackground: "#3f3f46",
-      black: "#18181b",
-      red: "#f87171",
-      green: "#34d399",
-      yellow: "#fbbf24",
-      blue: "#60a5fa",
-      magenta: "#c084fc",
-      cyan: "#22d3ee",
-      white: "#e4e4e7",
-      brightBlack: "#52525b",
-      brightRed: "#fca5a5",
-      brightGreen: "#6ee7b7",
-      brightYellow: "#fcd34d",
-      brightBlue: "#93c5fd",
-      brightMagenta: "#d8b4fe",
-      brightCyan: "#67e8f9",
-      brightWhite: "#fafafa",
-    },
+    theme: xtermTheme(s.appearance.theme),
   });
   const fit = new FitAddon();
   term.loadAddon(fit);

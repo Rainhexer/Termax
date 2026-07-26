@@ -39,7 +39,7 @@ dev server alone (no native shell) is `npm run dev`.
 ## Build a release bundle
 
 ```sh
-npm run tauri build
+npm run tauri build && cp src-tauri/target/release/bundle/deb/Termax_0.1.0_amd64/data/usr/share/applications/Termax.desktop ~/.local/share/applications/termax.desktop
 ```
 
 Output lands in `src-tauri/target/release/bundle/`. Configured bundle targets

@@ -221,7 +221,7 @@
           />
         {:else}
           {#if ringing}
-            <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.9)]"></span>
+            <span class="h-1.5 w-1.5 shrink-0 rounded-full glow-warn"></span>
           {/if}
           <span class="min-w-0 flex-1 truncate">{tab.title}</span>
         {/if}
