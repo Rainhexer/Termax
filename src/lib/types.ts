@@ -42,6 +42,9 @@ export interface PaneNode {
   file?: string;
   /** Editor panes: open showing the diff (changes) view instead of plain content. */
   diff?: boolean;
+  /** Editor panes: raw text or rendered preview. Absent means "edit".
+   *  (The scroll position within that view lives in paneScroll.ts.) */
+  view?: "edit" | "preview";
   /** Terminal panes: chime + pulse when the command finishes or wants input. */
   bell?: boolean;
 }

@@ -2,11 +2,12 @@ import { derived, get, writable } from "svelte/store";
 import { ask } from "@tauri-apps/plugin-dialog";
 import type { ChangeEntry, GitStatus, LayoutNode, PaneNode, Project, Tab, VaultCommand, Workspace } from "./types";
 import { ipc } from "./ipc";
-import { launchFor, launcherById } from "./settings";
+import { launchFor, launcherById, settings as appSettings } from "./settings";
 import * as layoutOps from "./layout";
 import * as terminals from "./terminals";
 import { loadDir, resetTree } from "./filetree";
 import { attentionPanes, bellPanes, setFocusedPane } from "./bell";
+import { clearPaneScroll } from "./paneScroll";
 
 export const projects = writable<Project[]>([]);
 export const activeProject = writable<Project | null>(null);
@@ -30,6 +31,8 @@ export const gitError = writable<string | null>(null);
  *  "On main", …), shown in the Changes panel; auto-clears. null when idle. */
 export const gitMessage = writable<string | null>(null);
 export const showUntracked = writable(true);
+export const showStaged = writable(true);
+export const showUnstaged = writable(true);
 /** True when the active folder was opened untrusted: git is disabled until the
  *  user trusts it. Drives the "trust folder" banner in the Changes panel. */
 export const restricted = writable(false);
@@ -65,12 +68,32 @@ export const draggedPaneId = writable<string | null>(null);
 export const draggedTabId = writable<string | null>(null);
 
 const untrackedKey = (projectId: string) => `termax.showUntracked.${projectId}`;
+const stagedKey = (projectId: string) => `termax.showStaged.${projectId}`;
+const unstagedKey = (projectId: string) => `termax.showUnstaged.${projectId}`;
 
 export function toggleUntracked() {
   const project = get(activeProject);
   showUntracked.update((v) => {
     const next = !v;
     if (project) localStorage.setItem(untrackedKey(project.id), String(next));
+    return next;
+  });
+}
+
+export function toggleStaged() {
+  const project = get(activeProject);
+  showStaged.update((v) => {
+    const next = !v;
+    if (project) localStorage.setItem(stagedKey(project.id), String(next));
+    return next;
+  });
+}
+
+export function toggleUnstaged() {
+  const project = get(activeProject);
+  showUnstaged.update((v) => {
+    const next = !v;
+    if (project) localStorage.setItem(unstagedKey(project.id), String(next));
     return next;
   });
 }
@@ -116,7 +139,7 @@ function loadWorkspace(project: Project): Workspace {
     return { tabs: raw.tabs, activeTabId: activeId };
   }
   // Legacy: bare LayoutNode (or null) → wrap in a single tab.
-  const tree = raw && "type" in raw ? (raw as LayoutNode) : layoutOps.newPane(null, "shell");
+  const tree = raw && "type" in raw ? (raw as LayoutNode) : layoutOps.newPane(null, "shell", get(appSettings).behavior.defaultBell);
   const tab: Tab = {
     id: crypto.randomUUID(),
     title: "Tab 1",
@@ -146,7 +169,7 @@ export function switchTab(id: string) {
 /** Open a fresh tab with one shell and switch to it. */
 export function newTab() {
   syncActiveTab();
-  const pane = layoutOps.newPane(null, "shell");
+  const pane = layoutOps.newPane(null, "shell", get(appSettings).behavior.defaultBell);
   const tab: Tab = {
     id: crypto.randomUUID(),
     title: `Tab ${get(tabs).length + 1}`,
@@ -334,6 +357,8 @@ export async function openProject(project: Project) {
   activateTab(ws.tabs.find((t) => t.id === ws.activeTabId)!);
 
   showUntracked.set(localStorage.getItem(untrackedKey(project.id)) !== "false");
+  showStaged.set(localStorage.getItem(stagedKey(project.id)) !== "false");
+  showUnstaged.set(localStorage.getItem(unstagedKey(project.id)) !== "false");
 
   resetTree();
 
@@ -413,7 +438,7 @@ function autoPlacement(tree: LayoutNode): { target: string; dir: "row" | "col" }
  *  biggest pane that stays above the minimum size); passing `dir` forces a
  *  split of the focused pane along that axis. */
 export function addPane(launch: string | null, title: string, dir?: "row" | "col"): string {
-  const pane = layoutOps.newPane(launch, title);
+  const pane = layoutOps.newPane(launch, title, get(appSettings).behavior.defaultBell);
   const tree = get(layout);
   if (!tree) {
     setLayout(pane);
@@ -488,7 +513,15 @@ export function setPaneDiff(paneId: string, diff: boolean) {
   setLayout(layoutOps.setPaneDiff(tree, paneId, diff));
 }
 
+/** Persist an editor pane's edit/preview mode so it survives reloads/restarts. */
+export function setPaneView(paneId: string, view: "edit" | "preview") {
+  const tree = get(layout);
+  if (!tree) return;
+  setLayout(layoutOps.setPaneView(tree, paneId, view));
+}
+
 export function closePane(paneId: string) {
+  clearPaneScroll(paneId);
   for (const [cmdId, linked] of commandPanes) {
     if (linked === paneId) commandPanes.delete(cmdId);
   }

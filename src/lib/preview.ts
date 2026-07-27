@@ -46,19 +46,25 @@ function inline(text: string): string {
     .replace(/(^|\s)_([^_]+)_/g, "$1<em>$2</em>");
 }
 
-/** Minimal block-level Markdown -> HTML. Input is escaped first (safe). */
+/** Minimal block-level Markdown -> HTML. Input is escaped first (safe).
+ *
+ *  Every block carries `data-line` with the 1-based source line it came from.
+ *  EditorPane uses those to map a scroll position in the preview back to a
+ *  line in the raw text, so both views can be scrolled to the same place. */
 export function renderMarkdown(src: string): string {
   const lines = src.replace(/\r\n?/g, "\n").split("\n");
   const out: string[] = [];
   let i = 0;
   let inCode = false;
+  let codeStart = 0;
   let codeBuf: string[] = [];
   let listType: "ul" | "ol" | null = null;
   let para: string[] = [];
+  let paraStart = 0;
 
   const flushPara = () => {
     if (para.length) {
-      out.push(`<p>${inline(escapeHtml(para.join(" ")))}</p>`);
+      out.push(`<p data-line="${paraStart + 1}">${inline(escapeHtml(para.join(" ")))}</p>`);
       para = [];
     }
   };
@@ -76,13 +82,14 @@ export function renderMarkdown(src: string): string {
     const fence = line.match(/^\s*```(.*)$/);
     if (fence) {
       if (inCode) {
-        out.push(`<pre><code>${escapeHtml(codeBuf.join("\n"))}</code></pre>`);
+        out.push(`<pre data-line="${codeStart + 1}"><code>${escapeHtml(codeBuf.join("\n"))}</code></pre>`);
         codeBuf = [];
         inCode = false;
       } else {
         flushPara();
         closeList();
         inCode = true;
+        codeStart = i;
       }
       i++;
       continue;
@@ -107,7 +114,7 @@ export function renderMarkdown(src: string): string {
       flushPara();
       closeList();
       const level = h[1].length;
-      out.push(`<h${level}>${inline(escapeHtml(h[2].trim()))}</h${level}>`);
+      out.push(`<h${level} data-line="${i + 1}">${inline(escapeHtml(h[2].trim()))}</h${level}>`);
       i++;
       continue;
     }
@@ -116,7 +123,7 @@ export function renderMarkdown(src: string): string {
     if (/^\s*([-*_])\s*(\1\s*){2,}$/.test(line)) {
       flushPara();
       closeList();
-      out.push("<hr>");
+      out.push(`<hr data-line="${i + 1}">`);
       i++;
       continue;
     }
@@ -125,7 +132,7 @@ export function renderMarkdown(src: string): string {
     if (/^\s*>\s?/.test(line)) {
       flushPara();
       closeList();
-      out.push(`<blockquote>${inline(escapeHtml(line.replace(/^\s*>\s?/, "")))}</blockquote>`);
+      out.push(`<blockquote data-line="${i + 1}">${inline(escapeHtml(line.replace(/^\s*>\s?/, "")))}</blockquote>`);
       i++;
       continue;
     }
@@ -139,21 +146,51 @@ export function renderMarkdown(src: string): string {
       if (listType && listType !== want) closeList();
       if (!listType) {
         listType = want;
-        out.push(`<${want}>`);
+        out.push(`<${want} data-line="${i + 1}">`);
       }
-      out.push(`<li>${inline(escapeHtml((ul ?? ol)![1]))}</li>`);
+      out.push(`<li data-line="${i + 1}">${inline(escapeHtml((ul ?? ol)![1]))}</li>`);
       i++;
       continue;
     }
 
     // paragraph text
     closeList();
+    if (!para.length) paraStart = i;
     para.push(line.trim());
     i++;
   }
 
-  if (inCode) out.push(`<pre><code>${escapeHtml(codeBuf.join("\n"))}</code></pre>`);
+  if (inCode) out.push(`<pre data-line="${codeStart + 1}"><code>${escapeHtml(codeBuf.join("\n"))}</code></pre>`);
   flushPara();
   closeList();
   return out.join("\n");
+}
+
+// Scroll bridge for html/svg previews.
+//
+// Those render in a sandboxed iframe without `allow-same-origin`, so its
+// document lives in an opaque origin and the parent cannot touch
+// `contentWindow.scrollY` at all — reading it throws. This script is appended
+// to the srcdoc so the frame reports its own scroll position and accepts a
+// position back, over postMessage.
+const SCROLL_BRIDGE = `<script>(function(){
+  function max(){return Math.max(0,document.documentElement.scrollHeight-window.innerHeight);}
+  var pending=null;
+  window.addEventListener("scroll",function(){
+    if(pending)return;
+    pending=setTimeout(function(){
+      pending=null;
+      parent.postMessage({__tmx:"scroll",pct:max()>0?window.scrollY/max():0},"*");
+    },80);
+  },{passive:true});
+  window.addEventListener("message",function(e){
+    var d=e.data;
+    if(d&&d.__tmx==="scrollTo")window.scrollTo(0,d.pct*max());
+  });
+  parent.postMessage({__tmx:"ready"},"*");
+})();</script>`;
+
+/** Build the srcdoc for an html/svg preview: the file plus the scroll bridge. */
+export function previewDocument(src: string): string {
+  return src + SCROLL_BRIDGE;
 }

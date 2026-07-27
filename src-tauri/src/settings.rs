@@ -53,6 +53,20 @@ impl Default for Appearance {
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase", default)]
+pub struct Behavior {
+    /// Enable bell notification on command done for new panes.
+    #[serde(default)]
+    pub default_bell: bool,
+}
+
+impl Default for Behavior {
+    fn default() -> Self {
+        Self { default_bell: false }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", default)]
 pub struct TerminalSettings {
     /// Empty string means auto-detect ($SHELL / COMSPEC).
     pub default_shell: String,
@@ -82,6 +96,7 @@ pub struct Settings {
     pub launchers: Vec<Launcher>,
     pub appearance: Appearance,
     pub terminal: TerminalSettings,
+    pub behavior: Behavior,
 }
 
 impl Default for Settings {
@@ -112,6 +127,7 @@ impl Default for Settings {
             ],
             appearance: Appearance::default(),
             terminal: TerminalSettings::default(),
+            behavior: Behavior::default(),
         }
     }
 }

@@ -16,7 +16,11 @@
     refreshChanges,
     restricted,
     showUntracked,
+    showStaged,
+    showUnstaged,
     toggleUntracked,
+    toggleStaged,
+    toggleUnstaged,
     trustCurrentFolder,
   } from "../stores";
   import type { ChangeEntry } from "../types";
@@ -115,7 +119,12 @@
   }
 
   let visible = $derived(
-    $showUntracked ? $changes : $changes.filter((c) => c.area !== "untracked"),
+    $changes.filter((c) => {
+      if (c.area === "staged" && !$showStaged) return false;
+      if (c.area === "unstaged" && !$showUnstaged) return false;
+      if (c.area === "untracked" && !$showUntracked) return false;
+      return true;
+    }),
   );
 </script>
 
@@ -243,6 +252,20 @@
     </h2>
     <div class="flex items-center gap-1">
       {#if $gitMode}
+        <button
+          class="rounded px-1.5 font-mono text-[10px] font-bold {$showStaged
+            ? 'text-emerald-400 hover:bg-zinc-800'
+            : 'text-zinc-600 hover:bg-zinc-800 hover:text-zinc-400'}"
+          title={$showStaged ? "Hide staged files" : "Show staged files"}
+          onclick={toggleStaged}
+        >S</button>
+        <button
+          class="rounded px-1.5 font-mono text-[10px] font-bold {$showUnstaged
+            ? 'text-amber-400 hover:bg-zinc-800'
+            : 'text-zinc-600 hover:bg-zinc-800 hover:text-zinc-400'}"
+          title={$showUnstaged ? "Hide unstaged files" : "Show unstaged files"}
+          onclick={toggleUnstaged}
+        >M</button>
         <button
           class="rounded px-1.5 font-mono text-[10px] font-bold {$showUntracked
             ? 'text-blue-400 hover:bg-zinc-800'

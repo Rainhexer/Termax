@@ -1,8 +1,20 @@
+<script module lang="ts">
+  // Cursor, selection and folding survive the remounts caused by tab switches
+  // and fullscreen toggles. This is session-only on purpose; the two things
+  // that must survive a restart — view mode and scroll position — are
+  // persisted in the layout (`PaneNode.view`) and in paneScroll.ts.
+  type CodeViewState = import("monaco-editor").editor.ICodeEditorViewState;
+  type DiffViewState = import("monaco-editor").editor.IDiffEditorViewState;
+  const editorViewStateMap = new Map<string, CodeViewState | DiffViewState>();
+</script>
+
 <script lang="ts">
+  import { untrack } from "svelte";
   import { get } from "svelte/store";
   import type { ChangeArea, PaneNode } from "../types";
-  import { monaco, languageForPath, MONACO_THEME } from "../monaco";
-  import { hasPreview, previewKindForPath, renderMarkdown } from "../preview";
+  import { getMonaco, languageForPath, MONACO_THEME } from "../monaco";
+  import { hasPreview, previewDocument, previewKindForPath, renderMarkdown } from "../preview";
+  import { flushPaneScroll, getPaneScroll, setPaneScroll, type PaneScroll } from "../paneScroll";
   import { fontStack } from "../theme";
   import { ipc } from "../ipc";
   import { settings } from "../settings";
@@ -17,14 +29,22 @@
     movePane,
     sessionReady,
     setPaneDiff,
+    setPaneView,
     splitPaneAt,
     draggedPaneId,
     toggleMaximizedPane,
   } from "../stores";
 
+  type CodeEditor = import("monaco-editor").editor.ICodeEditor;
+
   type DropZone = "top" | "bottom" | "left" | "right" | "center";
 
   let { pane }: { pane: PaneNode } = $props();
+  // TilingLayout keys panes by id, so this instance is bound to one id for its
+  // whole life. Read it once: touching `pane` inside an $effect subscribes that
+  // effect to the entire layout store, and every unrelated layout write (a
+  // split drag, another pane opening) would then re-run it.
+  const paneId = untrack(() => pane.id);
   let host: HTMLDivElement;
   let self: HTMLDivElement;
   let currentZone = $state<DropZone | null>(null);
@@ -42,15 +62,38 @@
   /** Bumped once the buffer model exists, so the diff-reconcile effect can run. */
   let modelReady = $state(0);
   /** "edit" = raw text (Monaco), "preview" = interpret the file. */
-  let viewMode = $state<"edit" | "preview">("edit");
+  let viewMode = $state<"edit" | "preview">(initialView());
   /** Live buffer text mirrored for markdown/html/svg previews. */
   let previewText = $state("");
+  /** Debounced copy of `previewText` feeding the iframe: rebuilding srcdoc
+   *  reloads the frame, so it must not happen on every keystroke. */
+  let previewSrc = $state("");
+  let previewSrcTimer: ReturnType<typeof setTimeout> | undefined;
   /** data: URL for raster-image previews. */
   let imageData = $state<string | null>(null);
   /** Kebab (⋯) menu open state. */
   let menuOpen = $state(false);
+  /** Scroll containers of the preview views. */
+  let previewEl: HTMLDivElement | undefined;
+  let previewFrame: HTMLIFrameElement | undefined;
+  let imageEl: HTMLDivElement | undefined;
 
-  const focused = $derived($focusedPaneId === pane.id);
+  /** The one scroll position of this pane, shared by the edit and preview
+   *  views and persisted across restarts. Plain, not `$state`: it is rewritten
+   *  on every scroll frame and nothing renders from it. */
+  let anchor: PaneScroll = {}; // loaded from storage by the (re)load effect
+  /** Scroll events before this timestamp are our own doing — ignore them, or a
+   *  restore would immediately overwrite the position it just restored. */
+  let suppressUntil = 0;
+
+  /** Image files have no edit view, so they always open in preview. */
+  function initialView(): "edit" | "preview" {
+    return untrack(() =>
+      previewKindForPath(pane.file ?? "") === "image" ? "preview" : (pane.view ?? "edit"),
+    );
+  }
+
+  const focused = $derived($focusedPaneId === paneId);
   const path = $derived(pane.file ?? "");
   const fileName = $derived(path.split("/").pop() ?? path);
   const dirName = $derived(path.slice(0, path.length - fileName.length).replace(/\/$/, ""));
@@ -62,10 +105,12 @@
   const markdownHtml = $derived(
     viewMode === "preview" && previewKind === "markdown" ? renderMarkdown(previewText) : "",
   );
-  /** srcdoc for html/svg preview (rendered live in a sandboxed iframe). */
+  /** srcdoc for html/svg preview (rendered live in a sandboxed iframe). Built
+   *  from the debounced text and kept mounted while editing, so the frame is
+   *  not reloaded — and its scroll position lost — on every mode switch. */
   const frameDoc = $derived(
-    viewMode === "preview" && (previewKind === "html" || previewKind === "svg")
-      ? previewText
+    (previewKind === "html" || previewKind === "svg") && previewSrc
+      ? previewDocument(previewSrc)
       : "",
   );
 
@@ -115,15 +160,15 @@
     if (!fromId) return;
 
     if (zone === "center") {
-      movePane(fromId, pane.id);
+      movePane(fromId, paneId);
     } else if (zone === "left") {
-      splitPaneAt(fromId, pane.id, "row", true);
+      splitPaneAt(fromId, paneId, "row", true);
     } else if (zone === "right") {
-      splitPaneAt(fromId, pane.id, "row", false);
+      splitPaneAt(fromId, paneId, "row", false);
     } else if (zone === "top") {
-      splitPaneAt(fromId, pane.id, "col", true);
+      splitPaneAt(fromId, paneId, "col", true);
     } else if (zone === "bottom") {
-      splitPaneAt(fromId, pane.id, "col", false);
+      splitPaneAt(fromId, paneId, "col", false);
     }
   }
 
@@ -147,16 +192,236 @@
     diffEditor?.updateOptions(opts);
   });
 
-  function createPlainEditor() {
+  function saveEditorState() {
+    // Only persist state when the editor is visible — a hidden editor
+    // (preview mode) has zero dimensions and its view state is garbage.
+    if (viewMode !== "edit") return;
+    const state = plainEditor?.saveViewState() ?? diffEditor?.saveViewState();
+    if (state) editorViewStateMap.set(paneId, state);
+  }
+
+  function restoreEditorState() {
+    const saved = editorViewStateMap.get(paneId);
+    if (!saved) return;
+    // The plain and diff views store different shapes; a mismatch after a diff
+    // toggle is harmless — Monaco ignores state it cannot read.
+    if (plainEditor) plainEditor.restoreViewState(saved as CodeViewState);
+    else if (diffEditor) diffEditor.restoreViewState(saved as DiffViewState);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Scroll position.
+  //
+  // Both views agree on a single `anchor` instead of each keeping its own
+  // offset: capture it from whichever view is on screen, apply it to whichever
+  // view becomes visible. Switching modes, remounting (tab switch, fullscreen),
+  // resizing and restarting are then all the same operation, and edit/preview
+  // stay on the same part of the document for free.
+  //
+  // A pixel offset would not survive any of that, so the anchor is a source
+  // line where the content can be mapped back to one (Monaco, and Markdown via
+  // the `data-line` attributes the renderer emits) and a fraction otherwise
+  // (html/svg/image, which have no relationship to source lines).
+  // ---------------------------------------------------------------------------
+
+  /** The code editor on screen: plain, or the diff's editable right-hand side. */
+  function codeEditor(): CodeEditor | undefined {
+    return plainEditor ?? diffEditor?.getModifiedEditor();
+  }
+
+  /** Linear interpolation through a list of points sorted by `x`. */
+  function interpolate(points: [number, number][], x: number): number {
+    if (!points.length) return 0;
+    if (x <= points[0][0]) return points[0][1];
+    for (let i = 1; i < points.length; i++) {
+      const [ax, ay] = points[i - 1];
+      const [bx, by] = points[i];
+      if (x <= bx) return bx === ax ? by : ay + ((x - ax) / (bx - ax)) * (by - ay);
+    }
+    return points[points.length - 1][1];
+  }
+
+  /** Fractional source line shown at pixel offset `top` of the editor. */
+  function editorLineAt(ed: CodeEditor, top: number): number {
+    const count = ed.getModel()?.getLineCount() ?? 1;
+    let lo = 1;
+    let hi = count;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (ed.getTopForLineNumber(mid) <= top) lo = mid;
+      else hi = mid - 1;
+    }
+    const a = ed.getTopForLineNumber(lo);
+    const b = lo < count ? ed.getTopForLineNumber(lo + 1) : ed.getContentHeight();
+    return b > a ? lo + Math.min(0.999, (top - a) / (b - a)) : lo;
+  }
+
+  /** Pixel offset that puts fractional source `line` at the top of the editor. */
+  function editorOffsetFor(ed: CodeEditor, line: number): number {
+    const count = ed.getModel()?.getLineCount() ?? 1;
+    const l = Math.max(1, Math.min(count, Math.floor(line)));
+    const a = ed.getTopForLineNumber(l);
+    const b = l < count ? ed.getTopForLineNumber(l + 1) : ed.getContentHeight();
+    return a + Math.max(0, Math.min(1, line - l)) * (b - a);
+  }
+
+  /** (source line, pixel offset) points for the rendered Markdown blocks. */
+  function markdownPoints(): [number, number][] {
+    if (!previewEl) return [];
+    const base = previewEl.getBoundingClientRect().top - previewEl.scrollTop;
+    const points: [number, number][] = [];
+    for (const el of previewEl.querySelectorAll<HTMLElement>("[data-line]")) {
+      const line = Number(el.dataset.line);
+      if (Number.isFinite(line)) points.push([line, el.getBoundingClientRect().top - base]);
+    }
+    points.sort((p, q) => p[0] - q[0] || p[1] - q[1]);
+    // Sentinel so a position past the last block maps to the end of the file
+    // rather than clamping to the last block's line.
+    const lines = model?.getLineCount() ?? 0;
+    if (lines) points.push([lines + 1, previewEl.scrollHeight]);
+    return points;
+  }
+
+  /** Read the scroll position out of the visible view, or null if it has none
+   *  to give (hidden, still loading, or too short to scroll). */
+  function readScroll(): PaneScroll | null {
+    if (viewMode === "edit") {
+      const ed = codeEditor();
+      const height = ed?.getLayoutInfo().height ?? 0;
+      if (!ed || height <= 0) return null;
+      const max = ed.getScrollHeight() - height;
+      if (max <= 0) return null;
+      const top = ed.getScrollTop();
+      return { line: editorLineAt(ed, top), pct: top / max };
+    }
+    if (previewKind === "markdown") {
+      if (!previewEl?.clientHeight) return null;
+      const max = previewEl.scrollHeight - previewEl.clientHeight;
+      if (max <= 0) return null;
+      const top = previewEl.scrollTop;
+      const points = markdownPoints();
+      return {
+        line: interpolate(points.map(([l, t]) => [t, l]), top),
+        pct: top / max,
+      };
+    }
+    if (previewKind === "image") {
+      if (!imageEl?.clientHeight) return null;
+      const max = imageEl.scrollHeight - imageEl.clientHeight;
+      return max > 0 ? { pct: imageEl.scrollTop / max } : null;
+    }
+    // html/svg report their own position over postMessage (see onFrameMessage).
+    return null;
+  }
+
+  /** Store a position read from the visible view. Keeps the previous anchor
+   *  when the view has nothing to say, so a short preview never resets a
+   *  carefully scrolled editor. */
+  function captureScroll() {
+    if (performance.now() < suppressUntil) return;
+    const next = readScroll();
+    if (!next) return;
+    anchor = next;
+    setPaneScroll(paneId, next);
+  }
+
+  /** Scroll the visible view to the anchor. False when the view was not ready
+   *  to take it (still hidden, not yet laid out, content not rendered). */
+  function applyScroll(): boolean {
+    if (anchor.line === undefined && anchor.pct === undefined) return true;
+    suppressUntil = performance.now() + 250;
+    if (viewMode === "edit") {
+      const ed = codeEditor();
+      const height = ed?.getLayoutInfo().height ?? 0;
+      if (!ed || height <= 0) return false;
+      const max = Math.max(0, ed.getScrollHeight() - height);
+      ed.setScrollTop(
+        anchor.line !== undefined ? editorOffsetFor(ed, anchor.line) : (anchor.pct ?? 0) * max,
+      );
+      return true;
+    }
+    if (previewKind === "markdown") {
+      if (!previewEl?.clientHeight) return false;
+      const max = previewEl.scrollHeight - previewEl.clientHeight;
+      previewEl.scrollTop =
+        anchor.line !== undefined
+          ? interpolate(markdownPoints(), anchor.line)
+          : (anchor.pct ?? 0) * max;
+      return true;
+    }
+    if (previewKind === "image") {
+      if (!imageEl?.clientHeight) return false;
+      imageEl.scrollTop = (anchor.pct ?? 0) * Math.max(0, imageEl.scrollHeight - imageEl.clientHeight);
+      return true;
+    }
+    const frame = previewFrame?.contentWindow;
+    if (!frame) return false;
+    frame.postMessage({ __tmx: "scrollTo", pct: anchor.pct ?? 0 }, "*");
+    return true;
+  }
+
+  /** Apply over the next few frames. A view that was just unhidden has not been
+   *  measured yet, and Monaco relayouts asynchronously, so the first attempt
+   *  often lands before there is anything to scroll. */
+  function applyScrollSoon(tries = 4) {
+    requestAnimationFrame(() => {
+      if (!applyScroll() && tries > 1) applyScrollSoon(tries - 1);
+    });
+  }
+
+  /** Switch views, carrying the scroll position over. */
+  function setViewMode(next: "edit" | "preview") {
+    if (next === viewMode) return;
+    captureScroll(); // from the view that is still on screen
+    viewMode = next;
+    setPaneView(paneId, next);
+    if (next === "edit") {
+      requestAnimationFrame(() => {
+        codeEditor()?.layout();
+        restoreEditorState();
+        applyScrollSoon();
+      });
+    } else {
+      applyScrollSoon();
+    }
+  }
+
+  function onFrameMessage(e: MessageEvent) {
+    if (!previewFrame || e.source !== previewFrame.contentWindow) return;
+    const data = e.data as { __tmx?: string; pct?: number } | null;
+    if (!data?.__tmx) return;
+    if (data.__tmx === "ready") {
+      // The frame stays mounted while editing, so only restore it when it is
+      // the visible view; otherwise this would move the editor instead.
+      if (viewMode === "preview") applyScroll();
+    } else if (data.__tmx === "scroll" && viewMode === "preview") {
+      if (performance.now() < suppressUntil) return;
+      // No line mapping exists for a rendered page, so drop any stale line:
+      // switching back to the editor must fall back to the fraction.
+      anchor = { pct: data.pct ?? 0 };
+      setPaneScroll(paneId, anchor);
+    }
+  }
+
+  function createPlainEditor(m: typeof import("monaco-editor")) {
     if (!model) return;
-    plainEditor = monaco.editor.create(host, { ...editorOptions(), model });
-    plainEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, save);
+    // A fresh editor fires scroll events while it lays out; none of them
+    // describe where the user was, so keep them out of the anchor.
+    suppressUntil = performance.now() + 300;
+    plainEditor = m.editor.create(host, { ...editorOptions(), model });
+    plainEditor.onDidScrollChange(() => {
+      saveEditorState();
+      captureScroll();
+    });
+    plainEditor.onDidChangeCursorPosition(() => saveEditorState());
+    restoreEditorState();
+    applyScrollSoon();
+    plainEditor.addCommand(m.KeyMod.CtrlCmd | m.KeyCode.KeyS, save);
     plainEditor.onDidAttemptReadOnlyEdit(() => lockFlash.update((n) => n + 1));
   }
 
   async function load(filePath: string) {
     const gen = generation;
-    // Image files have no text buffer — load a data URL and show the preview.
     if (previewKindForPath(filePath) === "image") {
       viewMode = "preview";
       try {
@@ -176,13 +441,18 @@
       }
       loadedContent = file.content;
       previewText = file.content;
-      model = monaco.editor.createModel(file.content, languageForPath(filePath));
+      previewSrc = file.content;
+      const [m, lang] = await Promise.all([getMonaco(), languageForPath(filePath)]);
+      if (gen !== generation) return;
+      model = m.editor.createModel(file.content, lang);
       model.onDidChangeContent(() => {
         dirty = model!.getValue() !== loadedContent;
         previewText = model!.getValue();
+        clearTimeout(previewSrcTimer);
+        previewSrcTimer = setTimeout(() => (previewSrc = previewText), 300);
       });
-      createPlainEditor();
-      modelReady++; // let the diff-reconcile effect run now the model exists
+      createPlainEditor(m);
+      modelReady++;
     } catch (err) {
       if (gen === generation) error = String(err);
     }
@@ -197,7 +467,23 @@
     return list[0]?.area; // snapshot mode: undefined
   }
 
+  /** Set while toggleDiff is mid-flight. The reconcile effect below re-runs on
+   *  every layout write, and `showDiff` only flips once the diff has loaded —
+   *  without this, a write landing in that window starts a second toggle and
+   *  two editors end up fighting over the same host element. */
+  let diffBusy = false;
+
   async function toggleDiff() {
+    if (!model || diffBusy) return;
+    diffBusy = true;
+    try {
+      await runToggleDiff();
+    } finally {
+      diffBusy = false;
+    }
+  }
+
+  async function runToggleDiff() {
     if (!model) return;
     if (showDiff) {
       diffEditor?.dispose();
@@ -205,27 +491,34 @@
       originalModel?.dispose();
       originalModel = undefined;
       showDiff = false;
-      setPaneDiff(pane.id, false);
-      createPlainEditor();
+      setPaneDiff(paneId, false);
+      const m = await getMonaco();
+      createPlainEditor(m); // re-applies the scroll anchor to the new editor
       return;
     }
     const gen = generation;
     try {
-      const diff = await ipc.getDiff(path, pickArea());
+      const [diff, m] = await Promise.all([ipc.getDiff(path, pickArea()), getMonaco()]);
       if (gen !== generation || !model) return;
-      originalModel = monaco.editor.createModel(diff.original, model.getLanguageId());
+      originalModel = m.editor.createModel(diff.original, model.getLanguageId());
       plainEditor?.dispose();
       plainEditor = undefined;
-      diffEditor = monaco.editor.createDiffEditor(host, {
+      diffEditor = m.editor.createDiffEditor(host, {
         ...editorOptions(),
         originalEditable: false,
         renderSideBySide: true,
       });
       diffEditor.setModel({ original: originalModel, modified: model });
-      diffEditor.getModifiedEditor().addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, save);
+      diffEditor.getModifiedEditor().addCommand(m.KeyMod.CtrlCmd | m.KeyCode.KeyS, save);
       diffEditor.getModifiedEditor().onDidAttemptReadOnlyEdit(() => lockFlash.update((n) => n + 1));
+      diffEditor.getModifiedEditor().onDidScrollChange(() => {
+        saveEditorState();
+        captureScroll();
+      });
+      diffEditor.getModifiedEditor().onDidChangeCursorPosition(() => saveEditorState());
       showDiff = true;
-      setPaneDiff(pane.id, true);
+      setPaneDiff(paneId, true);
+      applyScrollSoon();
     } catch (err) {
       saveError = null;
       error = String(err);
@@ -260,6 +553,8 @@
           model.setValue(file.content);
           dirty = false;
           externallyChanged = true;
+          // setValue scrolls Monaco back to the top — put it back.
+          applyScrollSoon();
         }
       }
       if (showDiff && originalModel) {
@@ -292,6 +587,7 @@
     binary = false;
     error = null;
     imageData = null;
+    previewSrc = "";
     load(path);
   }
 
@@ -308,13 +604,19 @@
     conflict = false;
     showDiff = false;
     saveError = null;
-    viewMode = "edit";
+    viewMode = initialView();
+    anchor = getPaneScroll(paneId);
     previewText = "";
+    previewSrc = "";
     imageData = null;
     menuOpen = false;
     if (ready) load(p);
     return () => {
       generation++;
+      clearTimeout(previewSrcTimer);
+      saveEditorState();
+      captureScroll();
+      flushPaneScroll();
       plainEditor?.dispose();
       plainEditor = undefined;
       diffEditor?.dispose();
@@ -343,6 +645,36 @@
     diffEditor?.updateOptions({ readOnly });
   });
 
+  // Scroll the preview to the anchor once its content is actually laid out —
+  // on mount, and again whenever a re-render moves the blocks around.
+  $effect(() => {
+    if (viewMode !== "preview") return;
+    markdownHtml;
+    imageData;
+    applyScrollSoon();
+  });
+
+  // html/svg previews live in a cross-origin sandbox and talk over postMessage.
+  $effect(() => {
+    window.addEventListener("message", onFrameMessage);
+    return () => window.removeEventListener("message", onFrameMessage);
+  });
+
+  // Resizing a pane reflows the preview and re-clamps the editor's scroll, so
+  // re-anchor instead of letting a now-meaningless pixel offset stand.
+  $effect(() => {
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => applyScroll());
+    });
+    observer.observe(self);
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  });
+
   // Reload from disk when the watcher reports changes.
   let lastTick = 0;
   $effect(() => {
@@ -365,7 +697,7 @@
   bind:this={self}
   class="relative flex h-full w-full min-w-0 min-h-0 flex-col overflow-hidden rounded-lg border pane-editor-bg transition-colors
     {currentZone && currentZone !== 'center' ? 'border-emerald-400' : focused ? 'border-emerald-500/60' : 'border-zinc-800'}"
-  onmousedown={() => focusedPaneId.set(pane.id)}
+  onmousedown={() => focusedPaneId.set(paneId)}
   ondragover={onDragOver}
   ondragleave={onDragLeave}
   ondrop={onDrop}
@@ -385,7 +717,7 @@
   <div
     class="flex h-7 shrink-0 cursor-grab items-center gap-1.5 border-b border-zinc-800 bg-zinc-950 px-2 active:cursor-grabbing"
     draggable="true"
-    ondragstart={(e) => { e.dataTransfer?.setData("text/pane", pane.id); draggedPaneId.set(pane.id); }}
+    ondragstart={(e) => { e.dataTransfer?.setData("text/pane", paneId); draggedPaneId.set(paneId); }}
     ondragend={() => draggedPaneId.set(null)}
   >
     <svg
@@ -440,7 +772,7 @@
                 ? 'bg-zinc-700 text-zinc-100'
                 : 'text-zinc-500 hover:text-zinc-200'}"
               title="Edit raw text"
-              onclick={(e) => { e.stopPropagation(); viewMode = 'edit'; }}
+              onclick={(e) => { e.stopPropagation(); setViewMode("edit"); }}
             >Edit</button>
           {/if}
           <button
@@ -448,7 +780,7 @@
               ? 'bg-zinc-700 text-zinc-100'
               : 'text-zinc-500 hover:text-zinc-200'}"
             title="Rendered preview"
-            onclick={(e) => { e.stopPropagation(); viewMode = 'preview'; }}
+            onclick={(e) => { e.stopPropagation(); setViewMode("preview"); }}
           >Preview</button>
         </div>
       {/if}
@@ -494,13 +826,13 @@
       </div>
       <button
         class="rounded px-1.5 py-0.5 text-[11px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
-        title={$maximizedPaneId === pane.id ? "Restore pane" : "Fullscreen pane"}
-        onclick={(e) => { e.stopPropagation(); toggleMaximizedPane(pane.id); }}
-      >{$maximizedPaneId === pane.id ? '⤡' : '⛶'}</button>
+        title={$maximizedPaneId === paneId ? "Restore pane" : "Fullscreen pane"}
+        onclick={(e) => { e.stopPropagation(); toggleMaximizedPane(paneId); }}
+      >{$maximizedPaneId === paneId ? '⤡' : '⛶'}</button>
       <button
         class="rounded px-1.5 py-0.5 text-[11px] text-zinc-500 hover:bg-red-900/50 hover:text-red-300"
         title="Close editor"
-        onclick={(e) => { e.stopPropagation(); closePane(pane.id); }}
+        onclick={(e) => { e.stopPropagation(); closePane(paneId); }}
       >✕</button>
     </div>
   </div>
@@ -517,7 +849,7 @@
       >Retry</button>
     </div>
   {:else if imageOnly}
-    <div class="flex min-h-0 flex-1 items-center justify-center overflow-auto bg-[var(--tmx-pv-bg)] p-4">
+    <div bind:this={imageEl} class="flex min-h-0 flex-1 items-center justify-center overflow-auto bg-[var(--tmx-pv-bg)] p-4" onscroll={captureScroll}>
       {#if imageData}
         <img src={imageData} alt={fileName} class="max-h-full max-w-full object-contain" />
       {:else}
@@ -531,19 +863,23 @@
   {:else}
     <!-- Monaco host stays mounted so the buffer/undo survive mode switches. -->
     <div class="min-h-0 flex-1 {viewMode === 'preview' ? 'hidden' : ''}" bind:this={host}></div>
-    {#if viewMode === "preview"}
-      {#if previewKind === "markdown"}
-        <div class="min-h-0 flex-1 overflow-auto bg-[var(--tmx-pv-bg)]">
-          <div class="md-preview">{@html markdownHtml}</div>
-        </div>
-      {:else if previewKind === "html" || previewKind === "svg"}
-        <iframe
-          class="min-h-0 flex-1 border-0 bg-[var(--tmx-pv-page)]"
-          title="Preview of {fileName}"
-          sandbox="allow-scripts allow-forms allow-popups allow-modals"
-          srcdoc={frameDoc}
-        ></iframe>
-      {/if}
+    <!-- Preview container stays in the DOM across view-mode toggles so the
+         browser preserves its scroll position naturally. Only hidden via CSS. -->
+    {#if previewKind === "markdown"}
+      <div bind:this={previewEl} class:hidden={viewMode !== "preview"} class="min-h-0 flex-1 overflow-auto bg-[var(--tmx-pv-bg)]" onscroll={captureScroll}>
+        <div class="md-preview">{@html markdownHtml}</div>
+      </div>
+    {:else if previewKind === "html" || previewKind === "svg"}
+      <!-- The frame reports and restores its own scroll over postMessage; the
+           sandbox has no allow-same-origin, so the parent cannot read it. -->
+      <iframe
+        bind:this={previewFrame}
+        class:hidden={viewMode !== "preview"}
+        class="min-h-0 flex-1 border-0 bg-[var(--tmx-pv-page)]"
+        title="Preview of {fileName}"
+        sandbox="allow-scripts allow-forms allow-popups allow-modals"
+        srcdoc={frameDoc}
+      ></iframe>
     {/if}
   {/if}
 </div>

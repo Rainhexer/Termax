@@ -17,8 +17,8 @@ export interface Size {
   h: number;
 }
 
-export function newPane(launch: string | null, title: string): PaneNode {
-  return { type: "pane", id: crypto.randomUUID(), title, launch };
+export function newPane(launch: string | null, title: string, bell?: boolean): PaneNode {
+  return { type: "pane", id: crypto.randomUUID(), title, launch, bell };
 }
 
 export function collectPanes(node: LayoutNode | null): PaneNode[] {
@@ -94,6 +94,12 @@ export function swapPanes(node: LayoutNode, idA: string, idB: string): LayoutNod
 export function setPaneDiff(node: LayoutNode, paneId: string, diff: boolean): LayoutNode {
   if (node.type === "pane") return node.id === paneId ? { ...node, diff } : node;
   return { ...node, a: setPaneDiff(node.a, paneId, diff), b: setPaneDiff(node.b, paneId, diff) };
+}
+
+/** Set the edit/preview view mode on an editor pane. Returns new tree. */
+export function setPaneView(node: LayoutNode, paneId: string, view: "edit" | "preview"): LayoutNode {
+  if (node.type === "pane") return node.id === paneId ? { ...node, view } : node;
+  return { ...node, a: setPaneView(node.a, paneId, view), b: setPaneView(node.b, paneId, view) };
 }
 
 /** Set the bell-watch flag on a terminal pane. Returns new tree. */

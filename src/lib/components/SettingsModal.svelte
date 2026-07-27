@@ -7,7 +7,7 @@
   import AppearanceSettings from "./AppearanceSettings.svelte";
   import logoUrl from "../assets/termax-logo.svg";
 
-  type Section = "launchers" | "appearance" | "terminal" | "about";
+  type Section = "launchers" | "appearance" | "terminal" | "behavior" | "about";
   let section = $state<Section>("launchers");
   let appVersion = $state("");
 
@@ -15,6 +15,7 @@
     { id: "launchers", label: "Agents & Launchers" },
     { id: "appearance", label: "Appearance" },
     { id: "terminal", label: "Terminal" },
+    { id: "behavior", label: "Behavior" },
     { id: "about", label: "About" },
   ];
 
@@ -141,6 +142,22 @@
               value={$settings.terminal.oversizedLimitKb}
               onchange={(e) => setTerminal("oversizedLimitKb", Math.max(1, num(e)))}
             />
+          </label>
+        </div>
+      {:else if section === "behavior"}
+        <h2 class="mb-3 text-sm font-semibold text-zinc-100">Behavior</h2>
+        <div class="flex flex-col gap-4">
+          <label class="flex items-center gap-2">
+            <input type="checkbox"
+              class="h-4 w-4 rounded border-zinc-700 bg-zinc-900 text-emerald-500 focus:ring-emerald-500"
+              checked={$settings.behavior.defaultBell}
+              onchange={(e) => updateSettings((s) => ({ ...s, behavior: { ...s.behavior, defaultBell: (e.target as HTMLInputElement).checked } }))}
+            />
+            <svg viewBox="0 0 24 24" class="h-3.5 w-3.5 shrink-0 text-zinc-400" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+              <path d="M13.7 21a2 2 0 0 1-3.4 0" />
+            </svg>
+            <span class="text-xs text-zinc-400">Command complete notification on new windows</span>
           </label>
         </div>
       {:else}

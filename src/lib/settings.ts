@@ -31,6 +31,11 @@ export interface Appearance {
   customThemes: Theme[];
 }
 
+export interface Behavior {
+  /** Enable bell notification on command done for new panes. */
+  defaultBell: boolean;
+}
+
 export interface TerminalSettings {
   /** Empty string = auto-detect ($SHELL). */
   defaultShell: string;
@@ -44,6 +49,7 @@ export interface AppSettings {
   launchers: Launcher[];
   appearance: Appearance;
   terminal: TerminalSettings;
+  behavior: Behavior;
 }
 
 export interface DetectedAgent {
@@ -71,6 +77,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
     cursorStyle: "underline",
     cursorBlink: true,
     oversizedLimitKb: 1024,
+  },
+  behavior: {
+    defaultBell: false,
   },
 };
 
