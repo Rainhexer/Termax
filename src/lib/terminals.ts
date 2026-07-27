@@ -29,6 +29,18 @@ export interface PaneRun {
 /** Per-pane run state. Panes with nothing ever run are absent. */
 export const paneRuns = writable<Map<string, PaneRun>>(new Map());
 
+/** Pane id → the title the program set via OSC 0/1/2. Coding CLIs put the task
+ *  they are working on here, which is the only structured "what is it doing"
+ *  signal a terminal gets; see cliStatus.ts. */
+export const paneTitles = writable<Map<string, string>>(new Map());
+
+function setTitle(paneId: string, title: string) {
+  paneTitles.update((m) => {
+    if (m.get(paneId) === title) return m;
+    return new Map(m).set(paneId, title);
+  });
+}
+
 function setRun(paneId: string, state: PaneRunState, exitCode: number | null = null) {
   paneRuns.update((m) => new Map(m).set(paneId, { state, exitCode }));
 }
@@ -299,6 +311,7 @@ function create(paneId: string): Entry {
   };
   // A program asking for attention (BEL) rings straight away — no heuristics.
   term.onBell(() => bell.notifyPane(paneId));
+  term.onTitleChange((title) => setTitle(paneId, title));
   registry.set(paneId, entry);
   return entry;
 }
@@ -527,6 +540,20 @@ export function isAlive(paneId: string): boolean {
   return !!entry && !entry.exited;
 }
 
+/** Last `rows` lines of what the pane currently shows, as plain text.
+ *  For a full-screen TUI (claude/opencode) the active buffer is the alternate
+ *  screen, so this is exactly the live UI — no stale scrollback mixed in. */
+export function readPaneTail(paneId: string, rows = 24): string {
+  const entry = registry.get(paneId);
+  if (!entry?.opened) return "";
+  const buf = entry.term.buffer.active;
+  const end = buf.baseY + entry.term.rows;
+  const start = Math.max(0, end - rows);
+  const lines: string[] = [];
+  for (let i = start; i < end; i++) lines.push(buf.getLine(i)?.translateToString(true) ?? "");
+  return lines.join("\n");
+}
+
 export function fitPane(paneId: string) {
   const entry = registry.get(paneId);
   if (!entry || !entry.opened || !entry.el.isConnected) return;
@@ -564,6 +591,12 @@ export function destroyPane(paneId: string) {
   oscBuffers.delete(paneId);
   statusTails.delete(paneId);
   clearRun(paneId);
+  paneTitles.update((m) => {
+    if (!m.has(paneId)) return m;
+    const next = new Map(m);
+    next.delete(paneId);
+    return next;
+  });
   removeLoading(paneId);
   clearTimeout(entry.quietTimer);
   bell.clearAttention(paneId);

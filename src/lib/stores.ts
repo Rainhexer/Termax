@@ -806,6 +806,35 @@ layout.subscribe(syncBellPanes);
 // Focusing a pane acknowledges its bell.
 focusedPaneId.subscribe(setFocusedPane);
 
+/** One open terminal pane, wherever in the workspace it lives. */
+export interface PaneInstance {
+  paneId: string;
+  /** Pane title (the launcher name it was opened with, or a rename). */
+  title: string;
+  /** Program the pane was launched with; null for a plain shell. */
+  launch: string | null;
+  tabId: string;
+  tabTitle: string;
+}
+
+/** Every terminal pane across all tabs, in tab order. Drives the sidebar's
+ *  per-launcher instance lists. Editor panes are not terminals, so they're out. */
+export const paneInstances = derived(
+  [tabs, layout, activeTabId],
+  ([$tabs, $layout, $activeTabId]) => {
+    const out: PaneInstance[] = [];
+    for (const t of $tabs) {
+      // The active tab's copy in `tabs` is stale between syncs — read the live grid.
+      const tree = t.id === $activeTabId ? $layout : t.layout;
+      for (const p of layoutOps.collectPanes(tree)) {
+        if (p.kind === "editor") continue;
+        out.push({ paneId: p.id, title: p.title, launch: p.launch, tabId: t.id, tabTitle: t.title });
+      }
+    }
+    return out;
+  },
+);
+
 /** Tab ids holding at least one ringing pane; drives the tab bar pulse. */
 export const tabsWithAttention = derived(
   [tabs, layout, activeTabId, attentionPanes],

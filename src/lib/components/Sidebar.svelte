@@ -1,6 +1,20 @@
 <script lang="ts">
-  import { activeProject, addPane, closeProject, sidebarCollapsed, runVaultCommand, newTab } from "../stores";
+  import {
+    activeProject,
+    addPane,
+    closeProject,
+    focusedPaneId,
+    newTab,
+    paneInstances,
+    revealPane,
+    runVaultCommand,
+    sidebarCollapsed,
+  } from "../stores";
+  import type { PaneInstance } from "../stores";
   import { enabledLaunchers, launcherById, settings, settingsOpen, updateSettings } from "../settings";
+  import type { Launcher } from "../settings";
+  import { activityLabel, activityTitle, cliStatus, loudest, statusFor } from "../cliStatus";
+  import type { CliActivity } from "../cliStatus";
   import CommandVault from "./CommandVault.svelte";
   import ChangesPanel from "./ChangesPanel.svelte";
   import FileTree from "./FileTree.svelte";
@@ -43,6 +57,46 @@
     handle.addEventListener("pointermove", onMove);
     handle.addEventListener("pointerup", onUp);
     handle.addEventListener("pointercancel", onUp);
+  }
+
+  // Open panes grouped under the launcher that opened them (matched on the
+  // launch command, so a pane keeps its group across restarts and renames).
+  const instancesOf = (launcher: Launcher): PaneInstance[] =>
+    $paneInstances.filter((p) => p.launch === launcher.command);
+
+  /** Collapsed groups, by launcher id. Groups start expanded. */
+  let collapsedGroups = $state<Record<string, boolean>>({});
+  const groupOpen = (id: string) => !collapsedGroups[id];
+  const toggleGroup = (id: string) => (collapsedGroups[id] = !collapsedGroups[id]);
+
+  /** Loudest state among a launcher's panes, for its badge. */
+  const groupActivity = (instances: PaneInstance[]): CliActivity =>
+    loudest(instances.map((i) => statusFor($cliStatus, i.paneId).activity));
+
+  function dotClass(activity: CliActivity): string {
+    switch (activity) {
+      case "awaiting":
+        return "bg-amber-400 animate-pulse";
+      case "failed":
+        return "bg-red-400";
+      case "working":
+        return "bg-emerald-400";
+      default:
+        return "bg-zinc-600";
+    }
+  }
+
+  function textClass(activity: CliActivity): string {
+    switch (activity) {
+      case "awaiting":
+        return "text-amber-400";
+      case "failed":
+        return "text-red-400";
+      case "working":
+        return "text-emerald-400";
+      default:
+        return "text-zinc-600";
+    }
   }
 
   let vaultOpen = $state(false);
@@ -111,13 +165,23 @@
 
       <div class="flex flex-col items-center gap-2 overflow-y-auto">
         {#each launchers as launcher (launcher.id)}
-          <button
-            class="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-emerald-400 hover:bg-zinc-800"
-            title={launcher.name}
-            onclick={() => addPane(launcher.command, launcher.name)}
-          >
-            <TerminalIcon type={launcher.icon} className="h-4 w-4" />
-          </button>
+          {@const instances = instancesOf(launcher)}
+          <div class="relative shrink-0">
+            <button
+              class="flex h-7 w-7 items-center justify-center rounded-md text-emerald-400 hover:bg-zinc-800"
+              title={instances.length
+                ? `${launcher.name} — ${instances.length} open (${activityLabel(groupActivity(instances))})`
+                : launcher.name}
+              onclick={() => addPane(launcher.command, launcher.name)}
+            >
+              <TerminalIcon type={launcher.icon} className="h-4 w-4" />
+            </button>
+            {#if instances.length}
+              <span
+                class="pointer-events-none absolute -right-0.5 -top-0.5 flex h-3 min-w-3 items-center justify-center rounded-full px-0.5 text-[8px] font-semibold text-zinc-950 {dotClass(groupActivity(instances))}"
+              >{instances.length}</span>
+            {/if}
+          </div>
         {/each}
       </div>
 
@@ -193,14 +257,66 @@
       <div class="flex flex-col gap-1">
         <h2 class="px-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Launch</h2>
         {#each launchers as launcher (launcher.id)}
-          <button
-            class="flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-left text-xs text-zinc-200 hover:border-emerald-600/50 hover:bg-zinc-800"
-            onclick={() => addPane(launcher.command, launcher.name)}
-          >
-            <span class="inline-flex w-5 items-center justify-center text-emerald-400"><TerminalIcon type={launcher.icon} className="h-4 w-4" /></span>
-            {launcher.name}
-            <span class="ml-auto text-[10px] text-zinc-600">new pane</span>
-          </button>
+          {@const instances = instancesOf(launcher)}
+          <div class="overflow-hidden rounded-md border border-zinc-800 bg-zinc-900/60">
+            <div class="flex items-stretch">
+              <button
+                class="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left text-xs text-zinc-200 hover:bg-zinc-800"
+                onclick={() => addPane(launcher.command, launcher.name)}
+              >
+                <span class="inline-flex w-5 shrink-0 items-center justify-center text-emerald-400"><TerminalIcon type={launcher.icon} className="h-4 w-4" /></span>
+                <span class="truncate">{launcher.name}</span>
+                <span class="ml-auto shrink-0 text-[10px] text-zinc-600">new pane</span>
+              </button>
+              {#if instances.length}
+                <button
+                  class="flex shrink-0 items-center gap-1 border-l border-zinc-800 px-1.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
+                  title="{instances.length} open — {groupOpen(launcher.id) ? 'hide' : 'show'} instances"
+                  onclick={() => toggleGroup(launcher.id)}
+                >
+                  <span class="h-1.5 w-1.5 rounded-full {dotClass(groupActivity(instances))}"></span>
+                  {instances.length}
+                  <span class="text-zinc-600">{groupOpen(launcher.id) ? "▾" : "▸"}</span>
+                </button>
+              {/if}
+            </div>
+
+            {#if instances.length && groupOpen(launcher.id)}
+              <ul class="border-t border-zinc-800">
+                {#each instances as inst (inst.paneId)}
+                  {@const status = statusFor($cliStatus, inst.paneId)}
+                  <li>
+                    <button
+                      class="flex w-full flex-col gap-0.5 px-2 py-1 text-left hover:bg-zinc-800/70"
+                      class:bg-zinc-800={$focusedPaneId === inst.paneId}
+                      title={`${inst.title} — ${activityTitle(status.activity)}\n↳ ${inst.tabTitle}${status.model ? `\n↳ ${status.model}` : ""}`}
+                      onclick={() => revealPane(inst.paneId)}
+                    >
+                      <span class="flex w-full items-center gap-1.5">
+                        {#if status.activity === "working"}
+                          <span class="h-2.5 w-2.5 shrink-0 animate-spin rounded-full border-[1.5px] border-zinc-700 border-t-emerald-400"></span>
+                        {:else}
+                          <span class="ml-0.5 h-1.5 w-1.5 shrink-0 rounded-full {dotClass(status.activity)}"></span>
+                        {/if}
+                        <span class="min-w-0 flex-1 truncate text-[11px] text-zinc-300">{inst.title}</span>
+                        <span class="shrink-0 text-[10px] {textClass(status.activity)}">{activityLabel(status.activity)}</span>
+                      </span>
+                      <span class="flex w-full items-baseline gap-1.5 pl-4">
+                        <span class="min-w-0 flex-1 truncate text-[10px] text-zinc-500">
+                          {status.task ?? inst.tabTitle}
+                        </span>
+                        {#if status.model}
+                          <span class="shrink-0 rounded bg-zinc-800 px-1 font-mono text-[9px] text-zinc-400" title="Model in use">
+                            {status.model}
+                          </span>
+                        {/if}
+                      </span>
+                    </button>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+          </div>
         {/each}
       </div>
 
