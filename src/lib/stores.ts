@@ -188,9 +188,7 @@ export function closeTab(id: string) {
   const tab = list.find((t) => t.id === id);
   if (!tab) return;
   for (const p of layoutOps.collectPanes(tab.layout)) {
-    for (const [cmdId, linked] of commandPanes) {
-      if (linked === p.id) commandPanes.delete(cmdId);
-    }
+    unlinkPane(p.id);
     terminals.destroyPane(p.id);
   }
   const idx = list.findIndex((t) => t.id === id);
@@ -402,6 +400,7 @@ export async function closeProject() {
   const workspace: Workspace = { tabs: get(tabs), activeTabId: get(activeTabId)! };
   await ipc.saveLayout(current.id, workspace).catch(() => {});
   terminals.destroyAll();
+  vaultRuns.set(new Map());
   await ipc.stopSession().catch(() => {});
   sessionReady.set(false);
   activeProject.set(null);
@@ -453,20 +452,102 @@ export function addPane(launch: string | null, title: string, dir?: "row" | "col
   return pane.id;
 }
 
-// Links a vault command to the pane it last opened. Reuse that pane while it
-// lives; once it closes, the next run opens a fresh terminal.
-const commandPanes = new Map<string, string>();
+/** Execution state of a vault command's last run.
+ *  Mirrors the pane's {@link terminals.PaneRunState}, plus `stopped` for a run
+ *  whose pane was closed (or whose process died) mid-command, and `idle` for a
+ *  finished run the user has already seen (no marker shown). */
+export type VaultRunState = terminals.PaneRunState | "stopped" | "idle";
+
+export interface VaultRun {
+  /** Pane the command last ran in; null once that pane is gone. */
+  paneId: string | null;
+  state: VaultRunState;
+  /** Exit code when the shell reported one (OSC 133); null when unknown. */
+  exitCode: number | null;
+}
+
+/** Vault command id → its last run. Commands never run are absent.
+ *  Also the command→pane link: while the pane lives, re-running reuses it. */
+export const vaultRuns = writable<Map<string, VaultRun>>(new Map());
+
+function updateRun(cmdId: string, patch: Partial<VaultRun>) {
+  vaultRuns.update((m) => {
+    const prev = m.get(cmdId) ?? { paneId: null, state: "done" as VaultRunState, exitCode: null };
+    return new Map(m).set(cmdId, { ...prev, ...patch });
+  });
+}
+
+/** Command ids whose run lives in `paneId`. */
+function runsInPane(paneId: string): string[] {
+  return [...get(vaultRuns)].filter(([, r]) => r.paneId === paneId).map(([id]) => id);
+}
+
+/** Drop the pane link. A run still going when its pane disappears is `stopped`;
+ *  a finished one keeps its done/failed result. */
+function unlinkPane(paneId: string) {
+  for (const cmdId of runsInPane(paneId)) {
+    const run = get(vaultRuns).get(cmdId)!;
+    const ended = run.state === "done" || run.state === "failed" || run.state === "idle";
+    updateRun(cmdId, { paneId: null, state: ended ? run.state : "stopped" });
+  }
+}
+
+// Mirror pane run state onto the commands running there.
+terminals.paneRuns.subscribe((runs) => {
+  for (const [cmdId, run] of get(vaultRuns)) {
+    if (!run.paneId) continue;
+    const paneRun = runs.get(run.paneId);
+    if (paneRun && (paneRun.state !== run.state || paneRun.exitCode !== run.exitCode)) {
+      updateRun(cmdId, { state: paneRun.state, exitCode: paneRun.exitCode });
+    }
+  }
+});
 
 export function runVaultCommand(cmd: VaultCommand) {
-  const linked = commandPanes.get(cmd.id);
+  const linked = get(vaultRuns).get(cmd.id)?.paneId;
   if (linked && terminals.isAlive(linked)) {
     focusedPaneId.set(linked);
     terminals.runInPane(linked, cmd.command);
     return;
   }
   const paneId = addPane(launchFor(cmd.terminalType), launcherById(cmd.terminalType).name);
-  commandPanes.set(cmd.id, paneId);
+  updateRun(cmd.id, { paneId, state: "starting", exitCode: null });
   terminals.queueRun(paneId, cmd.command);
+}
+
+/** Reveal a pane: switch to its tab, un-maximize whatever covers it, focus it.
+ *  Returns false when the pane no longer exists anywhere. */
+export function revealPane(paneId: string): boolean {
+  if (!layoutOps.findPane(get(layout), paneId)) {
+    const owner = get(tabs).find((t) => layoutOps.findPane(t.layout, paneId));
+    if (!owner) return false;
+    switchTab(owner.id);
+  }
+  if (get(maximizedPaneId) && get(maximizedPaneId) !== paneId) maximizedPaneId.set(null);
+  focusedPaneId.set(paneId);
+  // The pane may have just been mounted by the tab switch; focus once it's up.
+  requestAnimationFrame(() => terminals.focusTerminal(paneId));
+  return true;
+}
+
+// Selecting a pane acknowledges a finished run there: the "done" marker clears
+// (the pane link stays, so the jump button remains). Failures stay visible.
+focusedPaneId.subscribe((id) => {
+  if (!id) return;
+  terminals.acknowledgeRun(id);
+  for (const cmdId of runsInPane(id)) {
+    if (get(vaultRuns).get(cmdId)!.state === "done") updateRun(cmdId, { state: "idle" });
+  }
+});
+
+/** Jump to the terminal a vault command is running in. */
+export function revealVaultCommand(cmdId: string): boolean {
+  const paneId = get(vaultRuns).get(cmdId)?.paneId;
+  if (!paneId) return false;
+  if (revealPane(paneId)) return true;
+  // Pane vanished without us seeing it close: drop the stale link.
+  unlinkPane(paneId);
+  return false;
 }
 
 export function splitFocused(dir: "row" | "col") {
@@ -522,9 +603,7 @@ export function setPaneView(paneId: string, view: "edit" | "preview") {
 
 export function closePane(paneId: string) {
   clearPaneScroll(paneId);
-  for (const [cmdId, linked] of commandPanes) {
-    if (linked === paneId) commandPanes.delete(cmdId);
-  }
+  unlinkPane(paneId);
   terminals.destroyPane(paneId);
   const tree = get(layout);
   if (!tree) return;

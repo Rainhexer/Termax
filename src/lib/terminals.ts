@@ -12,6 +12,36 @@ import * as bell from "./bell";
 
 export const loadingPanes = writable<Set<string>>(new Set());
 
+/** Execution state of the last command line submitted in a pane.
+ *  - `starting`: queued, waiting for the pane's program to accept input
+ *  - `running`:  submitted, not seen finishing yet
+ *  - `done`:     finished; exit code 0, or unknown (no shell integration)
+ *  - `failed`:   finished with a non-zero exit code (needs OSC 133 shell
+ *                integration — see {@link scanShellStatus}) */
+export type PaneRunState = "starting" | "running" | "done" | "failed";
+
+export interface PaneRun {
+  state: PaneRunState;
+  /** Exit code when the shell reported one; null when unknown. */
+  exitCode: number | null;
+}
+
+/** Per-pane run state. Panes with nothing ever run are absent. */
+export const paneRuns = writable<Map<string, PaneRun>>(new Map());
+
+function setRun(paneId: string, state: PaneRunState, exitCode: number | null = null) {
+  paneRuns.update((m) => new Map(m).set(paneId, { state, exitCode }));
+}
+
+function clearRun(paneId: string) {
+  paneRuns.update((m) => {
+    if (!m.has(paneId)) return m;
+    const next = new Map(m);
+    next.delete(paneId);
+    return next;
+  });
+}
+
 // Pane currently under an OS file drag (for drop-target highlight).
 export const fileDropPaneId = writable<string | null>(null);
 
@@ -43,6 +73,10 @@ const pendingRun = new Map<string, string>();
 
 // Per-pane buffer for OSC sequences split across PTY read chunks.
 const oscBuffers = new Map<string, string>();
+
+// Same, for the OSC 133 status scan (kept separate: it reads the raw chunk
+// before the OSC 52 pass rewrites it).
+const statusTails = new Map<string, string>();
 
 function addLoading(paneId: string) {
   loadingPanes.update(s => new Set(s).add(paneId));
@@ -91,6 +125,46 @@ function processOsc52(paneId: string, text: string): string {
   return parts.join("");
 }
 
+// Shell integration (OSC 133 "semantic prompts"): a shell configured for it
+// emits `ESC ] 133 ; D ; <exit-code> BEL` when a command finishes. That is the
+// only exit code we can observe — a vault command is typed into an already
+// running shell, so the PTY's own exit status says nothing about it. Shells
+// without the integration fall back to the quiet-settle heuristic below, which
+// can tell "finished" from "still running" but never "failed".
+const OSC133_DONE = /\x1b\]133;D(?:;(-?\d+))?(?:\x07|\x1b\\)/g;
+
+function scanShellStatus(paneId: string, chunk: string) {
+  const text = (statusTails.get(paneId) ?? "") + chunk;
+  let code: number | null = null;
+  let end = 0;
+  let m: RegExpExecArray | null;
+  OSC133_DONE.lastIndex = 0;
+  while ((m = OSC133_DONE.exec(text)) !== null) {
+    code = m[1] ? Number(m[1]) : 0;
+    end = m.index + m[0].length;
+  }
+  // Keep only what follows the last match, so a sequence sitting in the tail
+  // cannot be counted twice; the slice is long enough to hold a split marker.
+  statusTails.set(paneId, text.slice(Math.max(end, text.length - 24)));
+  if (code !== null) finishRun(paneId, code);
+}
+
+/** Focusing a pane acknowledges a run that finished cleanly there, clearing its
+ *  marker (same idea as the bell). Failed and in-flight runs are left alone. */
+export function acknowledgeRun(paneId: string) {
+  if (get(paneRuns).get(paneId)?.state === "done") clearRun(paneId);
+}
+
+/** Mark the pane's running command finished. `exitCode` null = unknown. */
+function finishRun(paneId: string, exitCode: number | null) {
+  const entry = registry.get(paneId);
+  if (!entry?.busy) return;
+  clearTimeout(entry.quietTimer);
+  entry.busy = false;
+  setRun(paneId, exitCode !== null && exitCode !== 0 ? "failed" : "done", exitCode);
+  bell.notifyPane(paneId);
+}
+
 let listenersReady = false;
 
 export async function initPtyListeners(onExit: (paneId: string) => void) {
@@ -105,6 +179,7 @@ export async function initPtyListeners(onExit: (paneId: string) => void) {
     const raw = b64ToBytes(e.payload.data);
     noteOutput(e.payload.pane_id, raw.length);
     const chunk = new TextDecoder().decode(raw);
+    scanShellStatus(e.payload.pane_id, chunk);
 
     let text = oscBuffers.get(e.payload.pane_id) ?? "";
     oscBuffers.delete(e.payload.pane_id);
@@ -252,8 +327,9 @@ function noteOutput(paneId: string, bytes: number) {
     const echoOnly =
       entry.outputSinceSubmit <= ECHO_BYTES && entry.lastOutputAt - entry.submittedAt < ECHO_MS;
     if (echoOnly) return;
-    entry.busy = false;
-    bell.notifyPane(paneId);
+    // No shell integration on this pane (or the marker never arrived): the
+    // command finished, but with an exit code we cannot know.
+    finishRun(paneId, null);
   }, QUIET_MS);
 }
 
@@ -265,6 +341,7 @@ function noteInput(paneId: string, data: string) {
   entry.busy = true;
   entry.submittedAt = performance.now();
   entry.outputSinceSubmit = 0;
+  setRun(paneId, "running");
 }
 
 /** Mount pane terminal into host element; spawn the PTY on first attach. */
@@ -326,7 +403,7 @@ function openWhenSized(
       .catch((err) => {
         removeLoading(paneId);
         entry.term.writeln(`\x1b[31mfailed to spawn: ${err}\x1b[0m`);
-        pendingRun.delete(paneId);
+        if (pendingRun.delete(paneId)) setRun(paneId, "failed");
       });
   }
 }
@@ -364,6 +441,7 @@ function patchWebkitgtkComposition(entry: Entry, paneId: string) {
 /** Queue a command to run once the pane's PTY has spawned. */
 export function queueRun(paneId: string, command: string) {
   pendingRun.set(paneId, command);
+  setRun(paneId, "starting");
 }
 
 // A TUI (claude/opencode) is NOT ready for input the moment it enters the
@@ -484,6 +562,8 @@ export function destroyPane(paneId: string) {
   registry.delete(paneId);
   pendingRun.delete(paneId);
   oscBuffers.delete(paneId);
+  statusTails.delete(paneId);
+  clearRun(paneId);
   removeLoading(paneId);
   clearTimeout(entry.quietTimer);
   bell.clearAttention(paneId);
