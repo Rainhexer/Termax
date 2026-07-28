@@ -10,6 +10,10 @@ struct PtyInstance {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
+    /// Pid of the program spawned into the pty (the shell). It is its own
+    /// process group leader, so the tty's foreground pgid equals this exactly
+    /// when the shell itself is in front — i.e. no command is running.
+    shell_pid: Option<u32>,
 }
 
 #[derive(Default)]
@@ -106,15 +110,43 @@ impl PtyManager {
             let _ = app.emit("pty-exit", PtyExit { pane_id: &reader_pane });
         });
 
+        let shell_pid = child.process_id();
         self.ptys.lock().unwrap().insert(
             pane_id,
             PtyInstance {
                 master: pair.master,
                 writer,
                 child,
+                shell_pid,
             },
         );
         Ok(())
+    }
+
+    /// Whether a foreground command is running in the pane, from the tty's
+    /// foreground process group. `None` when it cannot be determined (Windows,
+    /// no such pane, or the pty does not expose the pgid), so callers can fall
+    /// back to their own heuristics.
+    ///
+    /// This is what makes long silent commands (a crate compiling for minutes)
+    /// distinguishable from a finished one without shell integration.
+    pub fn foreground_busy(&self, pane_id: &str) -> Option<bool> {
+        #[cfg(unix)]
+        {
+            let ptys = self.ptys.lock().unwrap();
+            let pty = ptys.get(pane_id)?;
+            let shell_pid = pty.shell_pid?;
+            let fg = pty.master.process_group_leader()?;
+            if fg <= 0 {
+                return None;
+            }
+            Some(fg as u32 != shell_pid)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = pane_id;
+            None
+        }
     }
 
     pub fn write(&self, pane_id: &str, data: &str) -> Result<(), String> {
@@ -190,4 +222,9 @@ pub fn resize_pty(
 #[tauri::command]
 pub fn kill_pty(manager: tauri::State<PtyManager>, pane_id: String) {
     manager.kill(&pane_id)
+}
+
+#[tauri::command]
+pub fn pty_foreground_busy(manager: tauri::State<PtyManager>, pane_id: String) -> Option<bool> {
+    manager.foreground_busy(&pane_id)
 }

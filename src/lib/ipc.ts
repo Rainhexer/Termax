@@ -22,6 +22,9 @@ export const ipc = {
   resizePty: (paneId: string, rows: number, cols: number) =>
     invoke<void>("resize_pty", { paneId, rows, cols }),
   killPty: (paneId: string) => invoke<void>("kill_pty", { paneId }),
+  /** True/false when the pane's tty reports whether a foreground command is
+   *  running; null when the platform cannot tell. */
+  ptyForegroundBusy: (paneId: string) => invoke<boolean | null>("pty_foreground_busy", { paneId }),
 
   // Projects
   listProjects: () => invoke<Project[]>("list_projects"),

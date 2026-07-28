@@ -72,6 +72,13 @@ interface Entry {
   lastOutputAt: number;
   /** Bytes the PTY has produced since that line was submitted. */
   outputSinceSubmit: number;
+  /** The pane's program has emitted OSC 133 at least once, so its "finished"
+   *  markers are authoritative and the quiet heuristic is only a safety net. */
+  shellIntegration: boolean;
+  /** The tty's foreground process group has been seen matching the shell, so
+   *  the check tracks this pane's commands and can veto a "finished" verdict. */
+  foregroundKnown: boolean;
+  foregroundProbing: boolean;
   quietTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -145,8 +152,16 @@ function processOsc52(paneId: string, text: string): string {
 // can tell "finished" from "still running" but never "failed".
 const OSC133_DONE = /\x1b\]133;D(?:;(-?\d+))?(?:\x07|\x1b\\)/g;
 
+// Any 133 marker (A/B/C/D) proves the shell is instrumented, which is what
+// lets us stop guessing from output silence on that pane.
+const OSC133_ANY = /\x1b\]133;[A-D]/;
+
 function scanShellStatus(paneId: string, chunk: string) {
   const text = (statusTails.get(paneId) ?? "") + chunk;
+  const entry = registry.get(paneId);
+  if (entry && !entry.shellIntegration && OSC133_ANY.test(text)) {
+    entry.shellIntegration = true;
+  }
   let code: number | null = null;
   let end = 0;
   let m: RegExpExecArray | null;
@@ -308,6 +323,9 @@ function create(paneId: string): Entry {
     submittedAt: 0,
     lastOutputAt: 0,
     outputSinceSubmit: 0,
+    shellIntegration: false,
+    foregroundKnown: false,
+    foregroundProbing: false,
   };
   // A program asking for attention (BEL) rings straight away — no heuristics.
   term.onBell(() => bell.notifyPane(paneId));
@@ -317,7 +335,7 @@ function create(paneId: string): Entry {
 }
 
 // Bell heuristic, for shells and TUIs without shell integration: a pane is
-// "done" once it has been quiet for QUIET_MS after a submitted line.
+// "done" once it has been quiet for a while after a submitted line.
 //
 // The catch is the echo: pressing Enter makes the program spit back a newline
 // immediately, so a command that then works silently (`sleep 5`) would look
@@ -329,21 +347,96 @@ const QUIET_MS = 800;
 const ECHO_BYTES = 32;
 const ECHO_MS = 300;
 
+// Silence alone cannot answer the question, though: `cargo tauri build` prints
+// nothing for minutes while one crate compiles, which looks exactly like a
+// finished command. So before the quiet window is allowed to end a run, ask the
+// tty who is in the foreground — the shell itself (idle) or a command it
+// launched. That is exact, and needs no shell integration.
+const BUSY_POLL_MS = 1500;
+
+// Panes where the foreground check is uninformative (Windows, or a launcher
+// whose program replaced the shell so the pgid never changes) still ride on
+// silence alone. There, scale the window with how long the command has run: a
+// command already minutes in has earned a longer silence before we call it
+// done, capped so a genuinely finished one still reports promptly.
+const QUIET_RATIO = 0.5;
+const QUIET_MAX_MS = 10_000;
+// When the shell emits OSC 133 the D marker is what ends a run; this is only a
+// backstop for the case where the marker never arrives (e.g. the pane's shell
+// was replaced by a program that does not speak it).
+const INTEGRATED_QUIET_MS = 60_000;
+
+function quietWindow(entry: Entry): number {
+  if (entry.shellIntegration) return INTEGRATED_QUIET_MS;
+  // The foreground check has proven meaningful on this pane, so it — not the
+  // clock — decides when the run ends; no need to stretch the window.
+  if (entry.foregroundKnown) return QUIET_MS;
+  const elapsed = performance.now() - entry.submittedAt;
+  return Math.min(QUIET_MAX_MS, Math.max(QUIET_MS, elapsed * QUIET_RATIO));
+}
+
+// Settle the run once the pane has gone quiet: confirm against the tty's
+// foreground process group, and keep polling for as long as it says a command
+// is still running.
+async function settleRun(paneId: string) {
+  const entry = registry.get(paneId);
+  if (!entry?.busy) return;
+  const echoOnly =
+    entry.outputSinceSubmit <= ECHO_BYTES && entry.lastOutputAt - entry.submittedAt < ECHO_MS;
+  if (echoOnly) return;
+
+  let busy: boolean | null = null;
+  try {
+    busy = await ipc.ptyForegroundBusy(paneId);
+  } catch {
+    // Pane died mid-check; fall through to the silence verdict.
+  }
+  // The pane may have been destroyed, or new output arrived, while awaiting.
+  if (registry.get(paneId) !== entry || !entry.busy) return;
+
+  if (busy === false) entry.foregroundKnown = true;
+  if (busy === true && entry.foregroundKnown) {
+    // A command really is still running (a silent compile, a build stage).
+    // Keep waiting rather than declaring the run finished.
+    clearTimeout(entry.quietTimer);
+    entry.quietTimer = setTimeout(() => settleRun(paneId), BUSY_POLL_MS);
+    return;
+  }
+  // No shell integration on this pane (or the marker never arrived): the
+  // command finished, but with an exit code we cannot know.
+  finishRun(paneId, null);
+}
+
+// The foreground check can only be trusted once we have seen it report the
+// shell as idle at least once — a pane whose launcher program replaced the
+// shell never changes pgid, and there "busy" would be a permanent false alarm.
+// Output arriving while nothing is running means a prompt is being drawn, which
+// is exactly the moment the shell should be in the foreground: probe there.
+function probeForeground(paneId: string, entry: Entry) {
+  if (entry.foregroundKnown || entry.foregroundProbing) return;
+  entry.foregroundProbing = true;
+  ipc
+    .ptyForegroundBusy(paneId)
+    .then((busy) => {
+      if (busy === false) entry.foregroundKnown = true;
+    })
+    .catch(() => {})
+    .finally(() => {
+      entry.foregroundProbing = false;
+    });
+}
+
 function noteOutput(paneId: string, bytes: number) {
   const entry = registry.get(paneId);
   if (!entry) return;
   entry.lastOutputAt = performance.now();
-  if (!entry.busy) return;
+  if (!entry.busy) {
+    probeForeground(paneId, entry);
+    return;
+  }
   entry.outputSinceSubmit += bytes;
   clearTimeout(entry.quietTimer);
-  entry.quietTimer = setTimeout(() => {
-    const echoOnly =
-      entry.outputSinceSubmit <= ECHO_BYTES && entry.lastOutputAt - entry.submittedAt < ECHO_MS;
-    if (echoOnly) return;
-    // No shell integration on this pane (or the marker never arrived): the
-    // command finished, but with an exit code we cannot know.
-    finishRun(paneId, null);
-  }, QUIET_MS);
+  entry.quietTimer = setTimeout(() => settleRun(paneId), quietWindow(entry));
 }
 
 function noteInput(paneId: string, data: string) {

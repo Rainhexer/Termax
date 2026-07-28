@@ -34,6 +34,7 @@ pub fn run() {
             pty::write_pty,
             pty::resize_pty,
             pty::kill_pty,
+            pty::pty_foreground_busy,
             projects::list_projects,
             projects::add_project,
             projects::remove_project,
