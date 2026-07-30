@@ -19,6 +19,7 @@
   import TabBar from "./lib/components/TabBar.svelte";
   import TilingLayout from "./lib/components/TilingLayout.svelte";
   import SettingsModal from "./lib/components/SettingsModal.svelte";
+  import ErrorBoundary from "./lib/components/ErrorBoundary.svelte";
 
   // Measured size of the tiling area; feeds automatic new-pane placement.
   let areaW = $state(0);
@@ -62,15 +63,26 @@
 </script>
 
 <div class="h-screen w-screen overflow-hidden bg-zinc-950 text-zinc-200">
+  <!-- Outermost net. The per-region boundaries below contain crashes to their
+       own panel; this one only catches what falls through them (a throwing
+       store read in this template, a broken region boundary) so the window
+       still shows something instead of going white. -->
+  <ErrorBoundary label="Termax">
   {#if $activeProject}
     <div class="flex h-full">
-      <Sidebar />
+      <ErrorBoundary label="Sidebar">
+        <Sidebar />
+      </ErrorBoundary>
       <main class="flex min-w-0 flex-1 flex-col">
-        <TabBar />
+        <ErrorBoundary label="Tab bar" compact>
+          <TabBar />
+        </ErrorBoundary>
         <div class="min-h-0 flex-1 p-2">
           {#if $layout}
             <div class="h-full w-full" bind:clientWidth={areaW} bind:clientHeight={areaH}>
-              <TilingLayout node={$layout} />
+              <ErrorBoundary label="Pane layout">
+                <TilingLayout node={$layout} />
+              </ErrorBoundary>
             </div>
           {:else}
             <div class="flex h-full flex-col items-center justify-center gap-3 text-zinc-600">
@@ -85,10 +97,15 @@
       </main>
     </div>
   {:else}
-    <ProjectPicker />
+    <ErrorBoundary label="Project picker">
+      <ProjectPicker />
+    </ErrorBoundary>
   {/if}
 
   {#if $settingsOpen}
-    <SettingsModal />
+    <ErrorBoundary label="Settings">
+      <SettingsModal />
+    </ErrorBoundary>
   {/if}
+  </ErrorBoundary>
 </div>

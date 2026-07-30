@@ -58,11 +58,51 @@ that platform (or in CI with per-OS runners). To build a subset:
 npm run tauri build -- --bundles deb,appimage
 ```
 
+## Code signing
+
+Releases are signed without any paid certificate. Full details, including the
+limits of each mechanism, are in [docs/SIGNING.md](docs/SIGNING.md).
+
+| Platform | How | Needs secrets? |
+|----------|-----|----------------|
+| **macOS** | Ad-hoc `codesign` + hardened runtime, configured in `tauri.conf.json` | no |
+| **Windows** | Authenticode with a self-signed certificate, applied by `signtool` during bundling | yes |
+| **Linux** | GPG: RPM header signatures plus detached `.asc` per artifact | yes |
+| **All** | Signed `SHA256SUMS` manifest | yes |
+
+Local `npm run tauri build` on macOS ad-hoc signs automatically (Xcode command
+line tools provide `codesign`). Windows and Linux signing happens only in the
+release workflow, where the certificate and GPG key live as repository secrets;
+local builds on those platforms are unsigned, which is fine for development.
+
+Two caveats worth stating plainly, since they are what users actually hit:
+
+- macOS builds are ad-hoc signed but **not notarized**, so a downloaded `.dmg`
+  still shows a Gatekeeper prompt on first launch. Notarization requires a paid
+  Apple Developer identity.
+- Windows builds signed with a self-signed certificate still trip SmartScreen.
+  Removing that needs a CA-issued certificate — see the SignPath Foundation note
+  in [docs/SIGNING.md](docs/SIGNING.md#the-free-path-to-a-real-certificate).
+
+One-time setup for a fork:
+
+```sh
+./scripts/gen-signing-key.sh "Termax Releases" "you@example.com"  # GPG (Linux)
+```
+
+```powershell
+./scripts/gen-windows-cert.ps1 -Subject "Your Name"               # Authenticode
+```
+
+Both scripts print the exact `gh secret set` commands to run.
+
+To verify a signed release:
+
+```sh
+./scripts/verify-release.sh ~/Downloads
+```
+
 ## Notes
 
-- **Code signing / notarization** is not configured. Unsigned macOS and Windows
-  builds trigger Gatekeeper / SmartScreen warnings on first launch. Configure
-  signing before wide distribution — see
-  <https://v2.tauri.app/distribute/sign/>.
 - **Type-check** the frontend without building: `npx svelte-check`.
 - **Check** the backend without a full build: `cargo check` in `src-tauri/`.

@@ -27,6 +27,18 @@
   "bundle": {
     "active": true,
     "targets": ["deb", "rpm", "appimage", "dmg", "msi"],
-    "icon": ["icons/icon.icns", "icons/icon.png", "icons/icon.ico", "icons/32x32.png", "icons/128x128.png"]
+    "icon": ["icons/icon.icns", "icons/icon.png", "icons/icon.ico", "icons/32x32.png", "icons/128x128.png"],
+    "publisher": "Ravn",
+    "macOS": {
+      "signingIdentity": "-",
+      "hardenedRuntime": true,
+      "entitlements": "entitlements.plist",
+      "minimumSystemVersion": "10.15"
+    },
+    "windows": {
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "http://timestamp.digicert.com",
+      "tsp": true
+    }
   }
 }

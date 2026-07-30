@@ -2,6 +2,7 @@
   import TilingLayout from "./TilingLayout.svelte";
   import TerminalPane from "./TerminalPane.svelte";
   import EditorPane from "./EditorPane.svelte";
+  import ErrorBoundary from "./ErrorBoundary.svelte";
   import type { LayoutNode } from "../types";
   import { maximizedPaneId, resizeSplit, resizeCorners } from "../stores";
 
@@ -96,10 +97,16 @@
          reuses the pane component (and its host DOM node) for a different
          pane, bleeding the previous tab's terminal into this slot. -->
     {#key node.id}
+      <!-- Per-pane boundary: one pane blowing up leaves the sibling panes,
+           and their live PTYs, untouched. -->
       {#if node.kind === "editor"}
-        <EditorPane pane={node} />
+        <ErrorBoundary label="Editor pane">
+          <EditorPane pane={node} />
+        </ErrorBoundary>
       {:else}
-        <TerminalPane pane={node} />
+        <ErrorBoundary label="Terminal pane">
+          <TerminalPane pane={node} />
+        </ErrorBoundary>
       {/if}
     {/key}
   {/if}

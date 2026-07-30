@@ -91,6 +91,11 @@ Termax auto-detects installed agents on `$PATH` and adds them to the sidebar. La
 ## Get Termax
 
 Pre-built binaries are available on the [Releases page](https://github.com/Rainhexer/Termax/releases).
+Per-platform install commands and first-launch notes are in [INSTALL.md](INSTALL.md).
+
+Releases are code signed and ship a GPG-signed `SHA256SUMS` manifest — see
+[docs/SIGNING.md](docs/SIGNING.md) for how to verify a download, and for what the
+signatures do and do not cover.
 
 To build from source, see [BUILD.md](BUILD.md). The build produces a `.deb`, `.rpm`, or `.AppImage` on Linux; a `.dmg` on macOS; an `.msi` on Windows.
 
@@ -102,5 +107,7 @@ To build from source, see [BUILD.md](BUILD.md). The build produces a `.deb`, `.r
 
 ## Documentation
 
+- **[INSTALL.md](INSTALL.md)** — installing a release on each platform
 - **[BUILD.md](BUILD.md)** — building and packaging for each platform
+- **[docs/SIGNING.md](docs/SIGNING.md)** — code signing, release verification
 - **[TERMAX.md](TERMAX.md)** — product specification and architecture

@@ -6,7 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { get, writable } from "svelte/store";
 import { ipc } from "./ipc";
-import { settings } from "./settings";
+import { settings, type AppSettings } from "./settings";
 import { fontStack, xtermTheme } from "./theme";
 import * as bell from "./bell";
 
@@ -269,14 +269,30 @@ export async function initFileDrop() {
 // Reactively update all open terminals when settings (fonts, theme) change.
 let lastFontKey = "";
 settings.subscribe(s => {
+  // A store subscriber runs synchronously inside whatever called settings.set,
+  // which may be a component render or effect — so a throw here escapes as that
+  // component's error and can take the app down. Contain it: bad settings or one
+  // torn-down terminal must not stop the other panes from restyling.
+  try {
+    applyAppearance(s);
+  } catch (err) {
+    console.error("[terminals] failed to apply appearance settings:", err);
+  }
+});
+
+function applyAppearance(s: AppSettings) {
   const { fonts } = s.appearance.theme;
   const theme = xtermTheme(s.appearance.theme);
   const family = fontStack(fonts.terminal, "mono");
   for (const entry of registry.values()) {
-    if (!entry.opened) continue;
-    entry.term.options.fontSize = fonts.terminalSize;
-    entry.term.options.fontFamily = family;
-    entry.term.options.theme = theme;
+    if (!entry.opened || !entry.term) continue;
+    try {
+      entry.term.options.fontSize = fonts.terminalSize;
+      entry.term.options.fontFamily = family;
+      entry.term.options.theme = theme;
+    } catch (err) {
+      console.error("[terminals] failed to restyle a pane:", err);
+    }
   }
 
   // A font change alters the cell size but not the element size, so no
@@ -290,7 +306,7 @@ settings.subscribe(s => {
   requestAnimationFrame(() => {
     for (const paneId of registry.keys()) fitPane(paneId);
   });
-});
+}
 
 function create(paneId: string): Entry {
   const s = get(settings);
@@ -496,7 +512,13 @@ function openWhenSized(
   entry.opened = true;
   entry.term.open(entry.el);
   entry.term.onData((data) => {
-    noteInput(paneId, data);
+    // Keystrokes must reach the PTY even if the run-state bookkeeping trips
+    // over an entry that was torn down between keypress and handler.
+    try {
+      noteInput(paneId, data);
+    } catch (err) {
+      console.error(`[terminals] noteInput failed for pane ${paneId}:`, err);
+    }
     ipc.writePty(paneId, data);
   });
   patchWebkitgtkComposition(entry, paneId);
@@ -650,7 +672,15 @@ export function readPaneTail(paneId: string, rows = 24): string {
 export function fitPane(paneId: string) {
   const entry = registry.get(paneId);
   if (!entry || !entry.opened || !entry.el.isConnected) return;
-  entry.fit.fit();
+  // fit() throws if xterm's renderer was disposed under us (pane closed during
+  // a pending rAF or ResizeObserver callback). fitPane is called from effects,
+  // so an escaping throw would unmount the pane's boundary for no good reason.
+  try {
+    entry.fit.fit();
+  } catch (err) {
+    console.error(`[terminals] fit failed for pane ${paneId}:`, err);
+    return;
+  }
   if (entry.spawned && !entry.exited) {
     ipc.resizePty(paneId, entry.term.rows, entry.term.cols).catch(() => {});
   }

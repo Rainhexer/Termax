@@ -5,6 +5,7 @@
   import { settings, settingsOpen, syncDetected, updateSettings } from "../settings";
   import LauncherSettings from "./LauncherSettings.svelte";
   import AppearanceSettings from "./AppearanceSettings.svelte";
+  import ErrorBoundary from "./ErrorBoundary.svelte";
   import logoUrl from "../assets/termax-logo.svg";
 
   type Section = "launchers" | "appearance" | "terminal" | "behavior" | "about";
@@ -88,10 +89,14 @@
 
       {#if section === "launchers"}
         <h2 class="mb-3 text-sm font-semibold text-zinc-100">Agents & Launchers</h2>
-        <LauncherSettings />
+        <ErrorBoundary label="Launcher settings">
+          <LauncherSettings />
+        </ErrorBoundary>
       {:else if section === "appearance"}
         <h2 class="mb-3 text-sm font-semibold text-zinc-100">Appearance</h2>
-        <AppearanceSettings />
+        <ErrorBoundary label="Appearance settings">
+          <AppearanceSettings />
+        </ErrorBoundary>
       {:else if section === "terminal"}
         <h2 class="mb-3 text-sm font-semibold text-zinc-100">Terminal</h2>
         <div class="flex flex-col gap-4">

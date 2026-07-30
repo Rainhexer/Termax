@@ -88,15 +88,60 @@ manually if the app fails to launch:
 ## macOS
 
 Download the `.dmg` from [Releases](https://github.com/Rainhexer/Termax/releases/latest),
-open it, and drag **Termax** to Applications. The build is currently unsigned,
-so on first launch: right-click the app → **Open** → **Open** (bypasses
-Gatekeeper).
+open it, and drag **Termax** to Applications.
+
+The app is code signed (ad-hoc), but notarizing it requires a paid Apple
+Developer account, so macOS still asks for confirmation the first time. Either:
+
+- right-click **Termax** in Applications → **Open** → **Open**, or
+- clear the download quarantine flag once:
+
+  ```sh
+  xattr -dr com.apple.quarantine /Applications/Termax.app
+  ```
+
+After that it launches normally. To confirm the signature is intact:
+
+```sh
+codesign --verify --deep --strict /Applications/Termax.app && echo OK
+```
 
 ## Windows
 
 Download the `.msi` from [Releases](https://github.com/Rainhexer/Termax/releases/latest)
-and run it. The installer is currently unsigned, so SmartScreen may warn: click
-**More info → Run anyway**.
+and run it.
+
+The installer is Authenticode signed, but with a self-signed certificate rather
+than one from a commercial CA, so SmartScreen may still warn on first run: click
+**More info → Run anyway**. Right-click the `.msi` → **Properties → Digital
+Signatures** to see the publisher before installing.
+
+---
+
+## Verifying your download
+
+Every release ships a `SHA256SUMS` manifest with a detached GPG signature, plus
+a `.asc` signature for each individual artifact. Download `SHA256SUMS`,
+`SHA256SUMS.asc`, and `termax-signing-key.asc` alongside your installer, then:
+
+```sh
+gpg --import termax-signing-key.asc
+gpg --verify SHA256SUMS.asc SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+```
+
+A "key is not certified with a trusted signature" warning is expected — the line
+that matters is `Good signature from "Termax Releases"`.
+
+`.rpm` packages also carry an embedded signature:
+
+```sh
+sudo rpm --import termax-signing-key.asc
+rpm -K Termax-*.rpm
+```
+
+See [docs/SIGNING.md](docs/SIGNING.md) for what each signature does and does not
+guarantee.
 
 ---
 

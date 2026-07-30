@@ -18,6 +18,7 @@
   import CommandVault from "./CommandVault.svelte";
   import ChangesPanel from "./ChangesPanel.svelte";
   import FileTree from "./FileTree.svelte";
+  import ErrorBoundary from "./ErrorBoundary.svelte";
   import TerminalIcon from "./TerminalIcon.svelte";
 
   const MIN_WIDTH = 180;
@@ -320,9 +321,15 @@
         {/each}
       </div>
 
-      <CommandVault />
-      <FileTree />
-      <ChangesPanel />
+      <ErrorBoundary label="Command vault" compact>
+        <CommandVault />
+      </ErrorBoundary>
+      <ErrorBoundary label="File tree" compact>
+        <FileTree />
+      </ErrorBoundary>
+      <ErrorBoundary label="Changes" compact>
+        <ChangesPanel />
+      </ErrorBoundary>
     </div>
   {/if}
 </aside>
