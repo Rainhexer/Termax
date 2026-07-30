@@ -12,9 +12,25 @@ export function resetTree() {
   expandedDirs.set(new Set());
 }
 
+/** Root the tree is currently showing.
+ *
+ *  Held here rather than imported from stores.ts, which imports *this* module —
+ *  taking it as state set by the owner keeps the dependency one-directional. The
+ *  tree only ever shows the active tab's root, so there is one value, not a map. */
+let treeRoot: string | undefined;
+
+/** Point the tree at a root, clearing anything cached from the previous one.
+ *  A no-op when the root is unchanged, so it is safe to call on every update. */
+export function setTreeRoot(root: string | null) {
+  const next = root ?? undefined;
+  if (next === treeRoot) return;
+  treeRoot = next;
+  resetTree();
+}
+
 export async function loadDir(path: string) {
   try {
-    const entries = await ipc.listDir(path);
+    const entries = await ipc.listDir(path, treeRoot);
     treeChildren.update((m) => {
       const next = new Map(m);
       next.set(path, entries);
@@ -58,7 +74,9 @@ export function collapseAllUnder(path: string) {
 /** Re-fetch the root and every expanded directory (filesystem changed). */
 export async function refreshTree() {
   const dirs = ["", ...get(expandedDirs)];
-  await Promise.all(dirs.map(loadDir));
+  // Wrapped rather than passed directly to `map`: `map` supplies the index as a
+  // second argument, which loadDir would otherwise take as a root.
+  await Promise.all(dirs.map((dir) => loadDir(dir)));
 }
 
 export type TreeBadge = { char: string; color: string };

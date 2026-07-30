@@ -34,6 +34,14 @@ export interface Appearance {
 export interface Behavior {
   /** Enable bell notification on command done for new panes. */
   defaultBell: boolean;
+  /** Launcher id opened in a new pull-request tab; "" = first enabled non-shell
+   *  launcher. Deliberately a setting rather than "whatever pane is focused":
+   *  predictable beats clever when one click spawns an agent. */
+  prLauncherId: string;
+  /** Command offered (never run automatically) to set a fresh worktree up,
+   *  typically `npm ci`. Worktrees share git objects but not build output, so a
+   *  new tree of a JS project is broken until something like this runs. */
+  worktreeSetupCommand: string;
 }
 
 export interface TerminalSettings {
@@ -80,6 +88,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   },
   behavior: {
     defaultBell: false,
+    prLauncherId: "",
+    worktreeSetupCommand: "",
   },
 };
 

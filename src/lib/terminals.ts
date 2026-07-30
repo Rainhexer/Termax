@@ -34,6 +34,23 @@ export const paneRuns = writable<Map<string, PaneRun>>(new Map());
  *  signal a terminal gets; see cliStatus.ts. */
 export const paneTitles = writable<Map<string, string>>(new Map());
 
+/** Pane id → the directory its process was actually spawned in.
+ *
+ *  This cannot be derived from the pane's current tab, which is the subtle part.
+ *  `attach` returns early once `entry.opened` is set and `spawnPty` is guarded by
+ *  `entry.spawned`, so a pane's working directory is fixed at first spawn and
+ *  never revisited. Dragging a pane into a tab bound to a different worktree does
+ *  not move its running shell — so any label saying "this agent is working on
+ *  PR #123" has to follow the *process*, not the tab, or it lies. */
+export const paneRoots = writable<Map<string, string>>(new Map());
+
+function setPaneRoot(paneId: string, root: string) {
+  paneRoots.update((m) => {
+    if (m.get(paneId) === root) return m;
+    return new Map(m).set(paneId, root);
+  });
+}
+
 function setTitle(paneId: string, title: string) {
   paneTitles.update((m) => {
     if (m.get(paneId) === title) return m;
@@ -88,7 +105,17 @@ const registry = new Map<string, Entry>();
 // Commands to run once a pane's PTY finishes spawning. The launched program
 // (shell/claude/opencode) may not be reading input yet at runtime, so we
 // buffer here and flush once the program's output settles.
-const pendingRun = new Map<string, string>();
+const pendingRun = new Map<string, PendingInput>();
+
+/** Text queued for a pane, plus whether to press Enter for it.
+ *
+ *  `execute: false` is the "send to pane" affordance: destructive git and gh
+ *  commands are composed for the user and left on the prompt unexecuted, so they
+ *  read and confirm the exact invocation rather than trusting a dialog. */
+interface PendingInput {
+  text: string;
+  execute: boolean;
+}
 
 // Per-pane buffer for OSC sequences split across PTY read chunks.
 const oscBuffers = new Map<string, string>();
@@ -525,6 +552,7 @@ function openWhenSized(
   fitPane(paneId);
   if (!entry.spawned) {
     entry.spawned = true;
+    setPaneRoot(paneId, cwd);
     ipc
       .spawnPty(paneId, cwd, launch, entry.term.rows, entry.term.cols)
       .then(() => flushPending(paneId, launch))
@@ -568,8 +596,16 @@ function patchWebkitgtkComposition(entry: Entry, paneId: string) {
 
 /** Queue a command to run once the pane's PTY has spawned. */
 export function queueRun(paneId: string, command: string) {
-  pendingRun.set(paneId, command);
+  pendingRun.set(paneId, { text: command, execute: true });
   setRun(paneId, "starting");
+}
+
+/** Queue text to be typed — not executed — once the pane's PTY has spawned.
+ *
+ *  Deliberately does not set a run state: nothing is running, the user is being
+ *  handed a command to inspect. */
+export function queueType(paneId: string, text: string) {
+  pendingRun.set(paneId, { text, execute: false });
 }
 
 // A TUI (claude/opencode) is NOT ready for input the moment it enters the
@@ -587,8 +623,8 @@ export function queueRun(paneId: string, command: string) {
 const READY_FRAME = /\x1b\[\?2026h/;
 
 function flushPending(paneId: string, launch: string | null) {
-  const command = pendingRun.get(paneId);
-  if (command === undefined) return;
+  const queued = pendingRun.get(paneId);
+  if (queued === undefined) return;
   pendingRun.delete(paneId);
 
   // Once the program is "ready" (alt screen entered, or shell), wait for output
@@ -610,7 +646,8 @@ function flushPending(paneId: string, launch: string | null) {
     clearTimeout(settleTimer);
     clearTimeout(safetyTimer);
     unlistenOutput?.();
-    runInPane(paneId, command);
+    if (queued.execute) runInPane(paneId, queued.text);
+    else typeInPane(paneId, queued.text);
   };
 
   const arm = () => {
@@ -715,6 +752,12 @@ export function destroyPane(paneId: string) {
   statusTails.delete(paneId);
   clearRun(paneId);
   paneTitles.update((m) => {
+    if (!m.has(paneId)) return m;
+    const next = new Map(m);
+    next.delete(paneId);
+    return next;
+  });
+  paneRoots.update((m) => {
     if (!m.has(paneId)) return m;
     const next = new Map(m);
     next.delete(paneId);

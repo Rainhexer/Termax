@@ -16,18 +16,40 @@ export interface Project {
   layout: Workspace | LayoutNode | null;
 }
 
+/** A git worktree this project's tabs can run in.
+ *
+ *  Only the id and the path are persisted. Branch and pull-request number are
+ *  deliberately *not*: both go stale the moment someone runs `git switch` or the
+ *  PR merges, and git can always be asked. Persist what git cannot tell you.
+ *
+ *  `path` is machine-specific, exactly like `Project.path` — any future sync must
+ *  redact it (see SYNC-PLAN.md on absolute paths). */
+export interface Worktree {
+  id: string;
+  /** Absolute path on this machine. */
+  path: string;
+}
+
 /** One tab: a full terminal/editor grid plus its focused pane. */
 export interface Tab {
   id: string;
   title: string;
   layout: LayoutNode | null;
   focusedPaneId: string | null;
+  /** Worktree this tab's panes run in; absent means the project root. Two tabs
+   *  may share one worktree (an agent tab plus a "run the tests" tab), which is
+   *  why the session for it is reference-counted. */
+  worktreeId?: string;
 }
 
 /** Persisted per-project tab set. Distinguished from a bare LayoutNode by `tabs`. */
 export interface Workspace {
   tabs: Tab[];
   activeTabId: string;
+  /** Worktrees referenced by `tabs`. Absent in workspaces saved before worktree
+   *  support, which is the whole migration: no worktrees means every tab uses the
+   *  project root, which is what they already did. */
+  worktrees?: Worktree[];
 }
 
 export interface PaneNode {
@@ -89,6 +111,98 @@ export interface SessionInfo {
   fileCount: number;
   /** True when the folder was opened untrusted: git disabled, snapshot only. */
   restricted: boolean;
+  /** Canonicalized root this session is keyed by. Always store this rather than
+   *  the path that was sent — on platforms that rewrite paths (macOS
+   *  /var → /private/var) the two differ, and the backend keys by the canonical
+   *  form. */
+  root: string;
+}
+
+/** One entry of `git worktree list`. */
+export interface WorktreeEntry {
+  /** Absolute path, as git reports it. */
+  path: string;
+  /** Short branch name; null when detached. */
+  branch: string | null;
+  head: string;
+  detached: boolean;
+  /** `git worktree lock`ed — removal refuses without force. */
+  locked: boolean;
+  /** The main working tree (the one holding the real .git directory). */
+  isMain: boolean;
+}
+
+export interface GhProbe {
+  installed: boolean;
+  /** First line of `gh --version`; null when gh is missing. */
+  version: string | null;
+}
+
+/** Why a PR list is unavailable. Classified in Rust (github.rs) so the UI
+ *  switches on `kind` instead of matching gh's stderr prose. */
+export interface GhProblem {
+  kind: "notInstalled" | "notAuthenticated" | "notGitHub" | "noRemote" | "other";
+  /** gh's stderr, shown verbatim for "other". */
+  message: string;
+}
+
+export type PrState = "OPEN" | "CLOSED" | "MERGED";
+
+/** "REVIEW_REQUIRED" | "APPROVED" | "CHANGES_REQUESTED"; null when the repo
+ *  requires no review. */
+export type ReviewDecision = string | null;
+
+export interface PullRequest {
+  number: number;
+  title: string;
+  state: PrState;
+  isDraft: boolean;
+  headRefName: string;
+  baseRefName: string;
+  url: string;
+  author: { login: string };
+  updatedAt: string;
+  reviewDecision: ReviewDecision;
+  /** Head branch lives in a fork: not pushable from a plain worktree. */
+  isCrossRepository: boolean;
+  headRepositoryOwner: { login: string };
+  labels: { name: string; color: string }[];
+}
+
+export interface PrListResult {
+  prs: PullRequest[];
+  /** null on success. A problem is a panel state, not a failed call. */
+  problem: GhProblem | null;
+}
+
+export interface ChecksRollup {
+  passed: number;
+  failed: number;
+  pending: number;
+  /** Skipped/neutral/cancelled — must not read as failures. */
+  skipped: number;
+  failing: string[];
+}
+
+/** The fields too expensive to fetch for every PR in the list. */
+export interface PrDetail {
+  number: number;
+  isDraft: boolean;
+  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+  /** Not `mergeable` — this is what catches branch protection. A PR can be
+   *  MERGEABLE and BLOCKED at once. */
+  mergeStateStatus:
+    | "CLEAN"
+    | "BLOCKED"
+    | "BEHIND"
+    | "DIRTY"
+    | "DRAFT"
+    | "HAS_HOOKS"
+    | "UNSTABLE"
+    | "UNKNOWN";
+  reviewDecision: ReviewDecision;
+  checks: ChecksRollup;
+  body: string;
 }
 
 export interface FileDiff {

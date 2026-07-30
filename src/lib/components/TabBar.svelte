@@ -12,7 +12,14 @@
     draggedPaneId,
     draggedTabId,
     tabsWithAttention,
+    collectTabPanes,
+    primaryRoot,
+    worktrees,
   } from "../stores";
+  import { ask } from "@tauri-apps/plugin-dialog";
+  import { isAlive } from "../terminals";
+  import { branchByRoot, rootForTab } from "../worktrees";
+  import WorktreeChip from "./WorktreeChip.svelte";
   import type { Tab } from "../types";
 
   let editingId = $state<string | null>(null);
@@ -30,8 +37,21 @@
   let springTimer: ReturnType<typeof setTimeout> | undefined;
 
   // The bar hides itself for a single tab, but must appear while a pane is in
-  // flight so it can be dropped onto another tab (or torn off into a new one).
-  const visible = $derived($tabs.length > 1 || !!$draggedPaneId);
+  // flight so it can be dropped onto another tab (or torn off into a new one) —
+  // and whenever any tab is bound to a worktree, because "which tree am I typing
+  // in" must never be invisible. One tab and no worktrees keeps the minimal look.
+  const visible = $derived(
+    $tabs.length > 1 || !!$draggedPaneId || $tabs.some((t) => !!t.worktreeId),
+  );
+
+  const rootFor = (tab: Tab) => rootForTab(tab, $worktrees, $primaryRoot);
+
+  function tabHint(tab: Tab): string {
+    const root = rootFor(tab);
+    if (!root || root === $primaryRoot) return tab.title;
+    const branch = $branchByRoot.get(root);
+    return [tab.title, branch ? `on ${branch}` : null, root].filter(Boolean).join("\n");
+  }
 
   function startRename(id: string, title: string) {
     menu = null;
@@ -62,9 +82,35 @@
     menu = { id, x: e.clientX, y: e.clientY };
   }
 
-  function closeOthers(id: string) {
+  /** Panes still running across the given tabs. Closing a tab kills its
+   *  terminals outright, and an agent mid-task is exactly what must not vanish
+   *  without a word. */
+  function runningIn(tabList: Tab[]): number {
+    return tabList.flatMap((t) => collectTabPanes(t)).filter((id) => isAlive(id)).length;
+  }
+
+  async function confirmClosing(tabList: Tab[], what: string): Promise<boolean> {
+    const running = runningIn(tabList);
+    if (running === 0) return true;
+    return await ask(
+      `${what} will stop ${running} running pane${running === 1 ? "" : "s"}.\n\nAnything they haven't saved is lost.`,
+      { title: "Close tabs?", kind: "warning", okLabel: "Close anyway", cancelLabel: "Keep open" },
+    );
+  }
+
+  async function closeOthers(id: string) {
     menu = null;
-    for (const t of $tabs) if (t.id !== id) closeTab(t.id);
+    const others = $tabs.filter((t) => t.id !== id);
+    if (!(await confirmClosing(others, `Closing ${others.length} other tab${others.length === 1 ? "" : "s"}`))) return;
+    for (const t of others) closeTab(t.id);
+  }
+
+  async function closeOne(id: string) {
+    menu = null;
+    const tab = $tabs.find((t) => t.id === id);
+    if (!tab) return;
+    if (!(await confirmClosing([tab], "Closing this tab"))) return;
+    closeTab(id);
   }
 
   function springLoad(id: string) {
@@ -140,8 +186,19 @@
     }
   }
 
+  /** A pane that is alone in its tab is already a tab of its own, so tearing it
+   *  off is a no-op that `movePaneToNewTab` silently ignores. The drop target used
+   *  to accept it anyway and do nothing, which reads as a bug. */
+  const loneDraggedPane = $derived.by(() => {
+    const paneId = $draggedPaneId;
+    if (!paneId) return false;
+    const owner = $tabs.find((t) => collectTabPanes(t).includes(paneId));
+    return !!owner && collectTabPanes(owner).length === 1;
+  });
+
   function onPlusDragOver(e: DragEvent) {
     if (!$draggedPaneId && !$draggedTabId) return;
+    if ($draggedPaneId && loneDraggedPane) return; // no drop, no highlight
     e.preventDefault();
     if ($draggedTabId) dropIndex = $tabs.length;
     else paneToNewTab = true;
@@ -198,7 +255,7 @@
         ondragover={(e) => onTabDragOver(e, tab, i)}
         ondragleave={(e) => onTabDragLeave(e, tab)}
         ondrop={(e) => onTabDrop(e, tab, i)}
-        title={tab.title}
+        title={tabHint(tab)}
       >
         {#if active}
           <span class="absolute inset-x-0 bottom-0 h-0.5 bg-emerald-400"></span>
@@ -223,6 +280,9 @@
           {#if ringing}
             <span class="h-1.5 w-1.5 shrink-0 rounded-full glow-warn"></span>
           {/if}
+          <!-- Before the title, so it survives truncation: which tree a tab acts
+               on matters more than the rest of a long name. -->
+          <WorktreeChip root={rootFor(tab)} showBranch={false} compact />
           <span class="min-w-0 flex-1 truncate">{tab.title}</span>
         {/if}
         <button
@@ -235,8 +295,12 @@
     <button
       class="relative flex w-9 shrink-0 items-center justify-center text-lg text-zinc-600 hover:bg-zinc-900 hover:text-emerald-400
         {paneToNewTab ? 'bg-emerald-500/10 text-emerald-400 ring-1 ring-inset ring-emerald-400' : ''}"
-      title={$draggedPaneId ? "Move pane to a new tab" : "New tab"}
-      onclick={newTab}
+      title={$draggedPaneId
+        ? loneDraggedPane
+          ? "This pane is already alone in its tab"
+          : "Move pane to a new tab"
+        : "New tab"}
+      onclick={() => newTab()}
       ondragover={onPlusDragOver}
       ondragleave={() => (paneToNewTab = false)}
       ondrop={onPlusDrop}
@@ -262,12 +326,14 @@
     <button
       class="block w-full px-3 py-1.5 text-left text-zinc-300 hover:bg-zinc-800 hover:text-emerald-400 disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-zinc-300"
       disabled={$tabs.length <= 1}
+      title={$tabs.length <= 1 ? "There are no other tabs" : "Close every tab except this one"}
       onclick={() => closeOthers(target.id)}
-    >Close other tabs</button>
+    >Close {$tabs.length - 1} other tab{$tabs.length === 2 ? "" : "s"}</button>
     <button
       class="block w-full px-3 py-1.5 text-left text-zinc-300 hover:bg-red-900/50 hover:text-red-300 disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-zinc-300"
       disabled={$tabs.length <= 1}
-      onclick={() => { const id = target.id; menu = null; closeTab(id); }}
+      title={$tabs.length <= 1 ? "The last tab can't be closed" : "Close this tab"}
+      onclick={() => closeOne(target.id)}
     >Close tab</button>
   </div>
 {/if}

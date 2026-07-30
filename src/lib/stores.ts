@@ -1,6 +1,6 @@
 import { derived, get, writable } from "svelte/store";
 import { ask } from "@tauri-apps/plugin-dialog";
-import type { ChangeEntry, GitStatus, LayoutNode, PaneNode, Project, Tab, VaultCommand, Workspace } from "./types";
+import type { ChangeEntry, GitStatus, LayoutNode, PaneNode, Project, Tab, VaultCommand, Workspace, Worktree } from "./types";
 import { ipc } from "./ipc";
 import { launchFor, launcherById, settings as appSettings } from "./settings";
 import * as layoutOps from "./layout";
@@ -15,18 +15,76 @@ export const activeProject = writable<Project | null>(null);
 export const tabs = writable<Tab[]>([]);
 /** Id of the tab whose grid is currently shown. */
 export const activeTabId = writable<string | null>(null);
+/** Worktrees referenced by this project's tabs, persisted with the workspace.
+ *
+ *  Lives here rather than in worktrees.ts because `loadWorkspace` and
+ *  `persistLayout` both need it; worktrees.ts re-exports it and owns all the
+ *  behaviour. */
+export const worktrees = writable<Worktree[]>([]);
 /** Working grid of the active tab. Pane ops mutate this; tab switches swap it. */
 export const layout = writable<LayoutNode | null>(null);
 export const focusedPaneId = writable<string | null>(null);
-export const changes = writable<ChangeEntry[]>([]);
 export const sidebarCollapsed = writable(false);
-/** null = no git repo (snapshot mode). */
-export const gitStatus = writable<GitStatus | null>(null);
+
+/** Change tracking for one root. */
+export interface RootGit {
+  status: GitStatus | null;
+  changes: ChangeEntry[];
+}
+
+const EMPTY_ROOT_GIT: RootGit = { status: null, changes: [] };
+
+/** Change tracking per root: the project plus any open worktrees.
+ *
+ *  Several roots can be live at once (one per worktree-bound tab), and each has
+ *  its own watcher and its own state. Keeping them in one map rather than in
+ *  separate stores is what lets a background worktree stay up to date while you
+ *  look at another one. */
+export const gitByRoot = writable<Map<string, RootGit>>(new Map());
+
+/** Canonical path of the project root, as the backend reported it.
+ *
+ *  Distinct from `activeProject.path`, which is the raw string the user picked.
+ *  Every root that reaches `gitByRoot` must be canonical or lookups silently miss
+ *  — on macOS `/var` and `/private/var` are the same directory but not the same
+ *  key. Sessions are keyed canonically, so this is the form to compare against. */
+export const primaryRoot = writable<string | null>(null);
+
+/** Root the sidebar, file tree, and editor panes currently describe: the active
+ *  tab's worktree, else the project root. Set by worktrees.ts, which owns the
+ *  tab→worktree resolution; it lives here so `changes`/`gitStatus` can derive
+ *  from it without stores.ts depending on that module. */
+export const activeRoot = writable<string | null>(null);
+
+/** Changes for the active root.
+ *
+ *  Derived rather than written, which is the move that keeps this refactor
+ *  small: ChangesPanel, FileTree, and filetree.ts all read `$changes` and needed
+ *  no edits at all when tracking became per-root. */
+export const changes = derived([gitByRoot, activeRoot], ([byRoot, root]) =>
+  root ? (byRoot.get(root) ?? EMPTY_ROOT_GIT).changes : [],
+);
+
+/** Git status for the active root; null = no git repo (snapshot mode). */
+export const gitStatus = derived([gitByRoot, activeRoot], ([byRoot, root]) =>
+  root ? (byRoot.get(root) ?? EMPTY_ROOT_GIT).status : null,
+);
+
 export const gitMode = writable(false);
 /** True while a fetch or pull is running; disables the remote buttons. */
 export const gitBusy = writable(false);
-/** Last fetch/pull error message, shown in the Changes panel; null when clear. */
+/** Last fetch/pull/checkout error message, shown in the Changes panel; null when
+ *  clear. Cleared when the user dismisses it or the next action starts. */
 export const gitError = writable<string | null>(null);
+/** Error from reading the change list itself, as opposed to a git *action*
+ *  failing. Kept separate because the two mean different things to the user:
+ *  "your pull failed" is recoverable, "change tracking is broken" means every
+ *  number on screen is untrustworthy. */
+export const changesError = writable<string | null>(null);
+/** Why the backend session failed to start, if it did. Non-null means the whole
+ *  project view is inert — panes cannot read files — so the UI must say so
+ *  instead of showing an eternal "Opening session…". */
+export const sessionError = writable<string | null>(null);
 /** Transient status line for the last git action ("Fetching…", "Up to date",
  *  "On main", …), shown in the Changes panel; auto-clears. null when idle. */
 export const gitMessage = writable<string | null>(null);
@@ -114,7 +172,11 @@ function persistLayout() {
   const project = get(activeProject);
   if (!project) return;
   syncActiveTab();
-  const workspace: Workspace = { tabs: get(tabs), activeTabId: get(activeTabId)! };
+  const workspace: Workspace = {
+    tabs: get(tabs),
+    activeTabId: get(activeTabId)!,
+    worktrees: get(worktrees),
+  };
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     ipc.saveLayout(project.id, workspace).catch(() => {});
@@ -136,7 +198,14 @@ function loadWorkspace(project: Project): Workspace {
     const activeId = raw.tabs.some((t) => t.id === raw.activeTabId)
       ? raw.activeTabId
       : raw.tabs[0].id;
-    return { tabs: raw.tabs, activeTabId: activeId };
+    // A workspace saved before worktree support has no `worktrees` key, and no
+    // tab carries a `worktreeId` — so every tab resolves to the project root,
+    // exactly as it did before. That is the entire migration.
+    return {
+      tabs: raw.tabs,
+      activeTabId: activeId,
+      worktrees: Array.isArray(raw.worktrees) ? raw.worktrees : [],
+    };
   }
   // Legacy: bare LayoutNode (or null) → wrap in a single tab.
   const tree = raw && "type" in raw ? (raw as LayoutNode) : layoutOps.newPane(null, "shell", get(appSettings).behavior.defaultBell);
@@ -147,6 +216,13 @@ function loadWorkspace(project: Project): Workspace {
     focusedPaneId: layoutOps.collectPanes(tree)[0]?.id ?? null,
   };
   return { tabs: [tab], activeTabId: tab.id };
+}
+
+/** Pane ids in a tab, reading the live grid for the active one (its copy inside
+ *  `tabs` is stale between syncs). */
+export function collectTabPanes(tab: Tab): string[] {
+  const tree = tab.id === get(activeTabId) ? get(layout) : tab.layout;
+  return layoutOps.collectPanes(tree).map((p) => p.id);
 }
 
 /** Load a tab's grid into the live stores (does not touch other tabs). */
@@ -166,19 +242,55 @@ export function switchTab(id: string) {
   persistLayout();
 }
 
-/** Open a fresh tab with one shell and switch to it. */
-export function newTab() {
+/** Next unused "Tab N" name.
+ *
+ *  Counting existing tabs produced duplicates: close Tab 2 of 3 and the next new
+ *  tab is also "Tab 3". Scan for the lowest free number instead. */
+function nextTabTitle(list: Tab[]): string {
+  const taken = new Set(list.map((t) => t.title));
+  for (let n = 1; ; n++) {
+    const candidate = `Tab ${n}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
+/** Open a fresh tab and switch to it.
+ *
+ *  `worktreeId` binds the tab to a worktree so its panes spawn there instead of
+ *  in the project root; pass `null` to force the project root. Omitting it
+ *  *inherits the active tab's worktree*, because the alternative is worse: "+"
+ *  while working on a PR would silently open a shell on a different branch's
+ *  files than the tab you were just looking at.
+ *
+ *  `launch`/`title` seed the first pane, which is how "start work on this PR"
+ *  opens an agent in a new worktree in one step. */
+export function newTab(
+  opts: {
+    worktreeId?: string | null;
+    launch?: string | null;
+    title?: string;
+    tabTitle?: string;
+  } = {},
+): Tab {
   syncActiveTab();
-  const pane = layoutOps.newPane(null, "shell", get(appSettings).behavior.defaultBell);
+  const pane = layoutOps.newPane(
+    opts.launch ?? null,
+    opts.title ?? "shell",
+    get(appSettings).behavior.defaultBell,
+  );
+  const inherited = get(tabs).find((t) => t.id === get(activeTabId))?.worktreeId;
+  const worktreeId = opts.worktreeId === undefined ? inherited : (opts.worktreeId ?? undefined);
   const tab: Tab = {
     id: crypto.randomUUID(),
-    title: `Tab ${get(tabs).length + 1}`,
+    title: opts.tabTitle ?? nextTabTitle(get(tabs)),
     layout: pane,
     focusedPaneId: pane.id,
+    ...(worktreeId ? { worktreeId } : {}),
   };
   tabs.update((list) => [...list, tab]);
   activateTab(tab);
   persistLayout();
+  return tab;
 }
 
 /** Close a tab, destroying its terminals. Never removes the last tab. */
@@ -348,9 +460,15 @@ export async function openProject(project: Project) {
   await closeProject();
   sessionReady.set(false);
   activeProject.set(project);
-  changes.set([]);
+  gitByRoot.set(new Map());
+  activeRoot.set(null);
+  primaryRoot.set(null);
 
   const ws = loadWorkspace(project);
+  // Worktrees before tabs: a tab with a `worktreeId` needs its record present, or
+  // the reconciler in worktrees.ts sees a dangling reference and falls back to
+  // the project root for a pane that should have spawned in a worktree.
+  worktrees.set(ws.worktrees ?? []);
   tabs.set(ws.tabs);
   activateTab(ws.tabs.find((t) => t.id === ws.activeTabId)!);
 
@@ -374,13 +492,23 @@ export async function openProject(project: Project) {
 
   try {
     const info = await ipc.startSession(project.path, trusted);
+    // Store the root the backend reports, not `project.path`: it is
+    // canonicalized, and it is the key every subsequent call must use.
+    // Setting `primaryRoot` (not `activeRoot`) is what propagates it — activeRoot
+    // is derived from the active tab, and writing it directly here would be
+    // overwritten the next time that recomputes.
+    primaryRoot.set(info.root);
     gitMode.set(info.git);
     restricted.set(info.restricted);
     sessionReady.set(true);
-    if (info.git) await refreshChanges();
+    if (info.git) await refreshChanges(info.root);
     await loadDir("");
   } catch (err) {
+    // Previously swallowed, which left a fully-rendered UI wired to no session:
+    // every editor pane sat on "Opening session…" forever with nothing said. A
+    // deleted or unmounted project folder is the common cause.
     console.error("start_session failed", err);
+    sessionError.set(String(err));
   }
 }
 
@@ -388,7 +516,38 @@ export async function openProject(project: Project) {
 export async function trustCurrentFolder() {
   const project = get(activeProject);
   if (!project) return;
-  await ipc.trustFolder(project.path).catch(() => {});
+  try {
+    await ipc.trustFolder(project.path);
+  } catch (err) {
+    // Swallowing this re-prompted the same dialog on the next open with no
+    // explanation for why trusting appeared not to stick.
+    sessionError.set(`Could not record trust for this folder: ${err}`);
+    return;
+  }
+  await openProject(project);
+}
+
+/** Withdraw trust from the open folder and reopen it without git.
+ *
+ *  Trust is a standing grant to run git — and therefore to read an
+ *  attacker-controlled `.git/config` — in a directory. The backend has always
+ *  supported revoking it, but nothing in the UI could reach it, so the grant was
+ *  effectively permanent. Worktrees widen its blast radius, which makes an exit
+ *  worth having. */
+export async function revokeCurrentFolderTrust() {
+  const project = get(activeProject);
+  if (!project) return;
+  const ok = await ask(
+    `Stop letting Termax run git in this folder?\n\n${project.path}\n\nThe project stays open and your files are untouched, but branches, diffs and pull requests will be unavailable until you trust it again.`,
+    { title: "Withdraw trust?", kind: "warning", okLabel: "Withdraw trust", cancelLabel: "Cancel" },
+  );
+  if (!ok) return;
+  try {
+    await ipc.revokeTrust(project.path);
+  } catch (err) {
+    sessionError.set(`Could not withdraw trust: ${err}`);
+    return;
+  }
   await openProject(project);
 }
 
@@ -408,11 +567,17 @@ export async function closeProject() {
   activeTabId.set(null);
   layout.set(null);
   focusedPaneId.set(null);
-  changes.set([]);
-  gitStatus.set(null);
+  gitByRoot.set(new Map());
+  activeRoot.set(null);
+  primaryRoot.set(null);
+  // The backend drops every session when the project closes, so the worktree
+  // records go with it rather than being closed one at a time.
+  worktrees.set([]);
   gitMode.set(false);
   gitBusy.set(false);
   gitError.set(null);
+  changesError.set(null);
+  sessionError.set(null);
   gitMessage.set(null);
   restricted.set(false);
   highlightedChange.set(null);
@@ -657,24 +822,52 @@ export function resizeCorners(rowSplitIds: string[], rowRatio: number, colSplitI
   setLayout(newTree);
 }
 
-export async function refreshChanges() {
+/** Replace one root's tracked state, leaving every other root untouched. */
+function setRootGit(root: string, next: RootGit) {
+  gitByRoot.update((map) => {
+    const copy = new Map(map);
+    copy.set(root, next);
+    return copy;
+  });
+}
+
+/** Merge a partial update into one root's state. */
+function patchRootGit(root: string, patch: Partial<RootGit>) {
+  gitByRoot.update((map) => {
+    const copy = new Map(map);
+    copy.set(root, { ...(copy.get(root) ?? EMPTY_ROOT_GIT), ...patch });
+    return copy;
+  });
+}
+
+/** Re-read changes and status for `root` (the active root when omitted).
+ *
+ *  Errors used to be swallowed here, which rendered a broken git as a clean
+ *  working tree with the whole git toolbar missing — the most misleading state in
+ *  the app, and worse with several roots since the panel could be describing a
+ *  root that failed. A failure now clears the entries *and* sets `gitError`. */
+export async function refreshChanges(root?: string) {
+  const target = root ?? get(activeRoot);
+  if (!target) return;
   try {
     const [entries, status] = await Promise.all([
-      ipc.getChanges(),
-      get(gitMode) ? ipc.getGitStatus() : Promise.resolve(null),
+      ipc.getChanges(target),
+      get(gitMode) ? ipc.getGitStatus(target) : Promise.resolve(null),
     ]);
-    changes.set(entries);
-    gitStatus.set(status);
-  } catch {
-    changes.set([]);
-    gitStatus.set(null);
+    setRootGit(target, { changes: entries, status });
+    // Only clear an error we could have raised here; a fetch/pull error stays
+    // visible until its own next attempt.
+    if (get(changesError)) changesError.set(null);
+  } catch (err) {
+    setRootGit(target, EMPTY_ROOT_GIT);
+    changesError.set(String(err));
   }
 }
 
 /** Show a transient status line, auto-clearing after a delay unless another
  *  message replaces it first (guarded by a monotonic token). */
 let gitMsgToken = 0;
-function flashGitMessage(msg: string, ms = 4000) {
+export function flashGitMessage(msg: string, ms = 4000) {
   const token = ++gitMsgToken;
   gitMessage.set(msg);
   setTimeout(() => {
@@ -690,9 +883,10 @@ export async function fetchRemote() {
   gitError.set(null);
   gitMessage.set("Fetching…");
   gitMsgToken++;
+  const root = get(activeRoot);
   try {
-    const after = await ipc.gitFetch();
-    gitStatus.set(after);
+    const after = await ipc.gitFetch(root ?? undefined);
+    if (root) patchRootGit(root, { status: after });
     const target = after.upstream ?? "upstream";
     if (after.behind === 0) {
       flashGitMessage(`Up to date with ${target}`);
@@ -716,7 +910,7 @@ export async function pullRemote() {
   gitMessage.set("Pulling…");
   gitMsgToken++;
   try {
-    const out = await ipc.gitPull();
+    const out = await ipc.gitPull(get(activeRoot) ?? undefined);
     await refreshChanges();
     flashGitMessage(/already up to date/i.test(out) ? "Already up to date" : "Pulled — fast-forwarded");
   } catch (err) {
@@ -727,14 +921,14 @@ export async function pullRemote() {
   }
 }
 
-/** Local branch names for the switcher; empty on failure. */
+/** Local branch names for the switcher.
+ *
+ *  Throws on failure rather than returning `[]`: an empty array made a git
+ *  failure render as "No matching branches", so a broken repo looked like a repo
+ *  with no branches. The caller distinguishes the two. */
 export async function loadBranches(): Promise<string[]> {
   if (!get(gitMode)) return [];
-  try {
-    return await ipc.gitBranches();
-  } catch {
-    return [];
-  }
+  return await ipc.gitBranches(get(activeRoot) ?? undefined);
 }
 
 /** Switch branches, then refresh the panel. Git's error (e.g. dirty worktree)
@@ -742,12 +936,25 @@ export async function loadBranches(): Promise<string[]> {
 export async function checkoutBranch(branch: string) {
   if (!get(gitMode) || get(gitBusy)) return;
   if (get(gitStatus)?.branch === branch) return;
+  // Switching branches rewrites the working tree and invalidates every open
+  // editor pane. That is fine on a clean tree and worth a warning on a dirty one,
+  // where git may refuse or carry changes across.
+  const dirty = get(changes).filter((c) => c.area !== "untracked").length;
+  if (dirty > 0) {
+    const ok = await ask(
+      `Switch to ${branch} with ${dirty} uncommitted change${dirty === 1 ? "" : "s"}?\n\nGit will refuse if the switch would overwrite them, and any it can carry across will follow you to the new branch.`,
+      { title: "Switch branch?", kind: "warning", okLabel: "Switch", cancelLabel: "Cancel" },
+    );
+    if (!ok) return;
+  }
   gitBusy.set(true);
   gitError.set(null);
   gitMessage.set(`Switching to ${branch}…`);
   gitMsgToken++;
+  const root = get(activeRoot);
   try {
-    gitStatus.set(await ipc.gitCheckout(branch));
+    const after = await ipc.gitCheckout(branch, root ?? undefined);
+    if (root) patchRootGit(root, { status: after });
     await refreshChanges();
     flashGitMessage(`On ${branch}`);
   } catch (err) {
@@ -756,6 +963,15 @@ export async function checkoutBranch(branch: string) {
   } finally {
     gitBusy.set(false);
   }
+}
+
+/** Create a branch at HEAD and switch to it. Uncommitted work follows along. */
+export async function createBranch(branch: string) {
+  const root = get(activeRoot);
+  const after = await ipc.gitCreateBranch(branch, root ?? undefined);
+  if (root) patchRootGit(root, { status: after });
+  await refreshChanges();
+  flashGitMessage(`On ${branch}`);
 }
 
 /** Open the current branch on the remote host (GitHub-style /tree/ URL).
@@ -776,6 +992,22 @@ export async function openBranchOnRemote() {
   } catch (err) {
     gitError.set(String(err));
   }
+}
+
+/** Put a command on a terminal prompt without running it.
+ *
+ *  The escape hatch behind every destructive git/gh action: the user sees the
+ *  exact invocation, can edit it, and presses Enter themselves. Reuses the
+ *  focused pane when there is one; otherwise opens a shell and queues the text
+ *  until its program is ready to accept input. */
+export function sendToPane(command: string) {
+  const focused = get(focusedPaneId);
+  if (focused && terminals.isAlive(focused)) {
+    terminals.typeInPane(focused, command);
+    return;
+  }
+  const paneId = addPane(null, "Shell");
+  terminals.queueType(paneId, command);
 }
 
 /** Turn the bell watch on/off for a pane; persisted with the layout. */
@@ -815,20 +1047,32 @@ export interface PaneInstance {
   launch: string | null;
   tabId: string;
   tabTitle: string;
+  /** Directory this pane's process is really running in, or null before it has
+   *  spawned. Deliberately taken from `paneRoots` and not from the tab: a pane
+   *  dragged into another tab keeps the shell it already has, so a label derived
+   *  from the tab would claim the agent moved branches when it did not. */
+  root: string | null;
 }
 
 /** Every terminal pane across all tabs, in tab order. Drives the sidebar's
  *  per-launcher instance lists. Editor panes are not terminals, so they're out. */
 export const paneInstances = derived(
-  [tabs, layout, activeTabId],
-  ([$tabs, $layout, $activeTabId]) => {
+  [tabs, layout, activeTabId, terminals.paneRoots],
+  ([$tabs, $layout, $activeTabId, $paneRoots]) => {
     const out: PaneInstance[] = [];
     for (const t of $tabs) {
       // The active tab's copy in `tabs` is stale between syncs — read the live grid.
       const tree = t.id === $activeTabId ? $layout : t.layout;
       for (const p of layoutOps.collectPanes(tree)) {
         if (p.kind === "editor") continue;
-        out.push({ paneId: p.id, title: p.title, launch: p.launch, tabId: t.id, tabTitle: t.title });
+        out.push({
+          paneId: p.id,
+          title: p.title,
+          launch: p.launch,
+          tabId: t.id,
+          tabTitle: t.title,
+          root: $paneRoots.get(p.id) ?? null,
+        });
       }
     }
     return out;

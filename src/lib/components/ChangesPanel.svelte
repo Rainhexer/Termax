@@ -1,6 +1,7 @@
 <script lang="ts">
   import {
     changes,
+    changesError,
     checkoutBranch,
     fetchRemote,
     gitBusy,
@@ -15,6 +16,8 @@
     pullRemote,
     refreshChanges,
     restricted,
+    revokeCurrentFolderTrust,
+    sendToPane,
     showUntracked,
     showStaged,
     showUnstaged,
@@ -33,6 +36,9 @@
   let branchList = $state<string[]>([]);
   let branchFilter = $state("");
   let branchAnchor = $state<HTMLElement>();
+  /** Set when listing branches failed, so the menu can distinguish "this repo has
+   *  no other branches" from "git could not be asked". */
+  let branchError = $state<string | null>(null);
 
   async function toggleBranchMenu() {
     if (branchMenuOpen) {
@@ -40,8 +46,14 @@
       return;
     }
     branchFilter = "";
-    branchList = await loadBranches();
+    branchError = null;
     branchMenuOpen = true;
+    try {
+      branchList = await loadBranches();
+    } catch (err) {
+      branchList = [];
+      branchError = String(err);
+    }
   }
 
   async function pickBranch(name: string) {
@@ -97,25 +109,50 @@
     deleted: "D",
   };
 
-  // Git-mode unstaged status letters
+  // Git-mode status letters. "U" is unmerged (a conflict) — git's porcelain uses
+  // "C" for *copied*, and reusing that letter here made a merge conflict render
+  // in the palette's "copied/renamed" colour with no hint that it was a conflict.
   const gitColor: Record<string, string> = {
     A: "text-emerald-400",
     M: "text-amber-400",
     D: "text-red-400",
     R: "text-amber-400",
     C: "text-purple-400",
+    U: "text-red-400",
+  };
+
+  const statusWord: Record<string, string> = {
+    A: "added",
+    M: "modified",
+    D: "deleted",
+    R: "renamed",
+    C: "copied",
+    U: "conflict",
   };
 
   function badge(change: ChangeEntry): { char: string; color: string } {
-    if (change.area === "staged") return { char: "S", color: "text-emerald-400" };
-    if (change.area === "untracked") return { char: "U", color: "text-blue-400" };
-    if (change.area === "unstaged") {
-      return { char: change.status, color: gitColor[change.status] ?? "text-amber-400" };
+    if (change.area === "untracked") return { char: "?", color: "text-blue-400" };
+    if (change.area === "staged" || change.area === "unstaged") {
+      // Staged entries used to collapse to a single "S", which hid whether the
+      // staged change was an add or a *delete*, and made the same file staged vs
+      // unstaged look like two unrelated kinds of change. Show the real letter and
+      // let the colour carry the staged/unstaged distinction instead.
+      const color =
+        change.area === "staged" ? "text-emerald-400" : (gitColor[change.status] ?? "text-amber-400");
+      return { char: change.status, color };
     }
     return {
       char: statusChar[change.status] ?? "M",
       color: statusColor[change.status] ?? "text-amber-400",
     };
+  }
+
+  /** Human wording for a change row's tooltip. */
+  function describeChange(change: ChangeEntry): string {
+    if (!change.area) return `${change.path} — ${change.status}`;
+    if (change.area === "untracked") return `${change.path} — untracked (not in git yet)`;
+    const word = statusWord[change.status] ?? change.status;
+    return `${change.path} — ${word}, ${change.area}\nClick to open the diff`;
   }
 
   let visible = $derived(
@@ -128,15 +165,19 @@
   );
 </script>
 
-<div class="flex min-h-0 flex-1 flex-col gap-1">
+<div class="flex flex-col gap-1">
   {#if $restricted}
     <div class="mx-1 mb-1 flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-950/40 px-2 py-1.5">
+      <!-- "session snapshot tracking" was jargon defined nowhere. Say what the
+           user actually gets and what they lose. -->
       <span class="min-w-0 flex-1 text-[11px] text-amber-300">
-        Folder not trusted — git is disabled. Only session snapshot tracking is active.
+        This folder isn't trusted, so Termax won't run git here. It's still
+        tracking which files you change, but only since you opened the project —
+        no branches, no diffs against your last commit.
       </span>
       <button
         class="shrink-0 rounded bg-amber-500/20 px-2 py-0.5 text-[11px] font-semibold text-amber-200 hover:bg-amber-500/30"
-        title="Trust this folder and enable git"
+        title="Allow Termax to run git in this folder"
         onclick={trustCurrentFolder}
       >Trust folder</button>
     </div>
@@ -146,12 +187,19 @@
       {#if $gitStatus}
         <div class="relative" bind:this={branchAnchor}>
           <button
-            class="flex max-w-full items-center gap-1 rounded bg-emerald-950/60 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-400 hover:bg-emerald-900/60 disabled:opacity-50"
-            title="Switch branch"
+            class="flex max-w-full items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold hover:bg-emerald-900/60 disabled:opacity-50 {$gitStatus.detached
+              ? 'bg-amber-950/60 text-amber-400'
+              : 'bg-emerald-950/60 text-emerald-400'}"
+            title={$gitStatus.detached
+              ? `Not on a branch — HEAD is detached at ${$gitStatus.branch}. Commits made here belong to no branch until you create one. Click to switch to a branch.`
+              : "Switch branch"}
             disabled={$gitBusy}
             onclick={toggleBranchMenu}
           >
-            <span class="truncate">{$gitStatus.detached ? `HEAD (${$gitStatus.branch})` : $gitStatus.branch}</span>
+            <!-- In detached state git.rs puts the short SHA in `branch`, so the
+                 old label read "HEAD (a1b2c3d)" — which looks like a branch named
+                 HEAD. Say what it actually is. -->
+            <span class="truncate">{$gitStatus.detached ? `detached @ ${$gitStatus.branch}` : $gitStatus.branch}</span>
             <span class="text-[8px] text-emerald-500/70">▾</span>
           </button>
 
@@ -191,7 +239,14 @@
                     <span class="min-w-0 flex-1 truncate">{b}</span>
                   </button>
                 {:else}
-                  <p class="px-2 py-1.5 text-[11px] text-zinc-600">No matching branches</p>
+                  {#if branchError}
+                    <p class="px-2 py-1.5 text-[11px] text-red-400">Couldn't list branches.</p>
+                    <p class="px-2 pb-1.5 font-mono text-[10px] text-red-300/80">{branchError}</p>
+                  {:else}
+                    <p class="px-2 py-1.5 text-[11px] text-zinc-600">
+                      {branchFilter.trim() ? "No matching branches" : "No other branches"}
+                    </p>
+                  {/if}
                 {/each}
               </div>
             </div>
@@ -226,20 +281,34 @@
           Behind {$gitStatus.upstream ?? "upstream"} by {n} commit{n === 1 ? "" : "s"}.
           {#if $gitStatus.ahead > 0}Local branch has diverged.{:else}Pull to update.{/if}
         </span>
-        <button
-          class="shrink-0 rounded bg-amber-500/20 px-2 py-0.5 text-[11px] font-semibold text-amber-200 hover:bg-amber-500/30 disabled:opacity-50"
-          title={$gitStatus.ahead > 0
-            ? "git pull --ff-only (will fail on a diverged branch; resolve in a terminal)"
-            : "git pull --ff-only"}
-          disabled={$gitBusy}
-          onclick={pullRemote}
-        >{$gitBusy ? "Pulling…" : "Pull"}</button>
+        <!-- Offering a button whose own tooltip predicted its failure was worse
+             than not offering it: a fast-forward cannot work once the branch has
+             diverged, so say what to do instead. -->
+        {#if $gitStatus.ahead > 0}
+          <button
+            class="shrink-0 rounded bg-amber-500/20 px-2 py-0.5 text-[11px] font-semibold text-amber-200 hover:bg-amber-500/30"
+            title="Types `git pull --rebase` into a pane — you press Enter"
+            onclick={() => sendToPane("git pull --rebase")}
+          >Rebase in terminal</button>
+        {:else}
+          <button
+            class="shrink-0 rounded bg-amber-500/20 px-2 py-0.5 text-[11px] font-semibold text-amber-200 hover:bg-amber-500/30 disabled:opacity-50"
+            title="git pull --ff-only"
+            disabled={$gitBusy}
+            onclick={pullRemote}
+          >{$gitBusy ? "Pulling…" : "Pull"}</button>
+        {/if}
       </div>
     {/if}
 
     {#if $gitError}
-      <div class="mx-1 mb-1 rounded-md border border-red-500/40 bg-red-950/40 px-2 py-1">
-        <p class="whitespace-pre-wrap break-words font-mono text-[10px] text-red-300">{$gitError}</p>
+      <div class="mx-1 mb-1 flex items-start gap-1 rounded-md border border-red-500/40 bg-red-950/40 px-2 py-1">
+        <p class="min-w-0 flex-1 whitespace-pre-wrap break-words font-mono text-[10px] text-red-300">{$gitError}</p>
+        <button
+          class="shrink-0 rounded px-1 text-[10px] text-red-300/70 hover:bg-red-500/20 hover:text-red-200"
+          title="Dismiss"
+          onclick={() => gitError.set(null)}
+        >✕</button>
       </div>
     {/if}
   {:else if !$restricted}
@@ -274,28 +343,51 @@
           onclick={toggleUntracked}
         >U</button>
       {/if}
+      {#if $gitMode}
+        <button
+          class="rounded px-1 text-[10px] text-zinc-600 hover:bg-zinc-800 hover:text-amber-400"
+          title="Withdraw trust: stop Termax running git in this folder"
+          onclick={revokeCurrentFolderTrust}
+        >🔓</button>
+      {/if}
       <button
         class="rounded px-1.5 text-xs text-zinc-500 hover:bg-zinc-800 hover:text-emerald-400"
         title="Refresh"
-        onclick={refreshChanges}
+        onclick={() => refreshChanges()}
       >⟳</button>
     </div>
   </div>
 
-  {#if visible.length === 0}
+  {#if $changesError}
+    <!-- Must come before the "clean" message: a failed read used to render as a
+         clean working tree, which told the user everything was fine when the app
+         had in fact lost track of their changes entirely. -->
+    <div class="mx-1 mb-1 rounded-md border border-red-500/40 bg-red-950/40 px-2 py-1.5">
+      <p class="text-[11px] font-semibold text-red-300">Couldn't read changes.</p>
+      <p class="mt-0.5 whitespace-pre-wrap break-words font-mono text-[10px] text-red-300/80">{$changesError}</p>
+      <button
+        class="mt-1 text-[11px] font-semibold text-red-200 hover:underline"
+        onclick={() => refreshChanges()}
+      >Try again</button>
+    </div>
+  {:else if visible.length === 0}
     <p class="px-1 text-[11px] text-zinc-600">
-      {$gitMode ? "Working tree clean." : "No changes this session."}
+      {#if $gitMode}
+        Working tree clean.
+      {:else}
+        No tracked changes since this project was opened.
+      {/if}
     </p>
   {/if}
 
-  <div class="min-h-0 flex-1 overflow-y-auto" bind:this={listEl}>
+  <div class="max-h-60 min-h-0 overflow-y-auto" bind:this={listEl}>
     {#each visible as change (`${change.area ?? "snap"}:${change.path}`)}
       {@const b = badge(change)}
       <button
         class="flex w-full items-center gap-1.5 rounded-md px-1 py-0.5 text-left transition-colors hover:bg-zinc-800/70
           {flashPath === change.path ? 'bg-emerald-500/20' : ''}"
         data-path={change.path}
-        title="{change.path}{change.area ? ` (${change.area})` : ''}"
+        title={describeChange(change)}
         onclick={() => openFile(change.path, { diff: true })}
       >
         <span class="w-3 shrink-0 font-mono text-[11px] font-bold {b.color}">{b.char}</span>

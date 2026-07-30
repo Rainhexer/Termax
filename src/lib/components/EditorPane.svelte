@@ -19,6 +19,7 @@
   import { ipc } from "../ipc";
   import { settings } from "../settings";
   import {
+    activeRoot,
     changes,
     closePane,
     explorerLocked,
@@ -425,7 +426,7 @@
     if (previewKindForPath(filePath) === "image") {
       viewMode = "preview";
       try {
-        const url = await ipc.readFileDataUrl(filePath);
+        const url = await ipc.readFileDataUrl(filePath, $activeRoot ?? undefined);
         if (gen === generation) imageData = url;
       } catch (err) {
         if (gen === generation) error = String(err);
@@ -433,7 +434,7 @@
       return;
     }
     try {
-      const file = await ipc.readFile(filePath);
+      const file = await ipc.readFile(filePath, $activeRoot ?? undefined);
       if (gen !== generation) return;
       if (file.binary) {
         binary = true;
@@ -498,7 +499,7 @@
     }
     const gen = generation;
     try {
-      const [diff, m] = await Promise.all([ipc.getDiff(path, pickArea()), getMonaco()]);
+      const [diff, m] = await Promise.all([ipc.getDiff(path, pickArea(), $activeRoot ?? undefined), getMonaco()]);
       if (gen !== generation || !model) return;
       originalModel = m.editor.createModel(diff.original, model.getLanguageId());
       plainEditor?.dispose();
@@ -529,7 +530,7 @@
     if (!model || !dirty) return;
     const content = model.getValue();
     try {
-      await ipc.writeFile(path, content);
+      await ipc.writeFile(path, content, $activeRoot ?? undefined);
       loadedContent = content;
       dirty = false;
       conflict = false;
@@ -543,7 +544,7 @@
   async function reloadFromDisk() {
     const gen = generation;
     try {
-      const file = await ipc.readFile(path);
+      const file = await ipc.readFile(path, $activeRoot ?? undefined);
       if (gen !== generation || !model || file.binary) return;
       if (file.content !== loadedContent) {
         if (dirty) {
@@ -558,7 +559,7 @@
         }
       }
       if (showDiff && originalModel) {
-        const diff = await ipc.getDiff(path, pickArea());
+        const diff = await ipc.getDiff(path, pickArea(), $activeRoot ?? undefined);
         if (gen === generation) originalModel.setValue(diff.original);
       }
     } catch {
@@ -568,12 +569,12 @@
 
   function openExternally() {
     menuOpen = false;
-    ipc.openInDefaultApp(path).catch((err) => (saveError = String(err)));
+    ipc.openInDefaultApp(path, $activeRoot ?? undefined).catch((err) => (saveError = String(err)));
   }
 
   function revealInExplorer() {
     menuOpen = false;
-    ipc.revealInFileManager(path).catch((err) => (saveError = String(err)));
+    ipc.revealInFileManager(path, $activeRoot ?? undefined).catch((err) => (saveError = String(err)));
   }
 
   /** Re-run the load after a failure (session came up late, transient fs error). */
@@ -685,7 +686,7 @@
     if (model) reloadFromDisk();
     else if (imageOnly) {
       const gen = generation;
-      ipc.readFileDataUrl(path).then((url) => {
+      ipc.readFileDataUrl(path, $activeRoot ?? undefined).then((url) => {
         if (gen === generation) imageData = url;
       }).catch(() => {});
     }

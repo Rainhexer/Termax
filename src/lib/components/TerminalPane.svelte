@@ -1,8 +1,10 @@
 <script lang="ts">
   import type { PaneNode } from "../types";
   import { attach, detach, fitPane, focusTerminal, loadingPanes, fileDropPaneId } from "../terminals";
-  import { activeProject, focusedPaneId, closePane, addPane, movePane, splitPaneAt, draggedPaneId, maximizedPaneId, toggleMaximizedPane, togglePaneBell } from "../stores";
+  import { activeProject, activeTabId, focusedPaneId, closePane, addPane, movePane, splitPaneAt, draggedPaneId, maximizedPaneId, tabs, toggleMaximizedPane, togglePaneBell, worktrees } from "../stores";
+  import { rootForTab } from "../worktrees";
   import { attentionPanes, clearAttention, previewChime } from "../bell";
+  import { get } from "svelte/store";
 
   type DropZone = "top" | "bottom" | "left" | "right" | "center";
 
@@ -15,6 +17,13 @@
   const fileDropTarget = $derived($fileDropPaneId === pane.id);
   const loading = $derived(pane.launch && $loadingPanes.has(pane.id));
   const ringing = $derived($attentionPanes.has(pane.id));
+
+  /** Directory a newly spawned pane should start in. */
+  function spawnRoot(): string {
+    const project = get(activeProject);
+    const tab = get(tabs).find((t) => t.id === get(activeTabId));
+    return rootForTab(tab, get(worktrees), project?.path ?? null) ?? ".";
+  }
 
   function getDropZone(e: DragEvent): DropZone | null {
     const rect = self.getBoundingClientRect();
@@ -71,7 +80,11 @@
 
   $effect(() => {
     const id = pane.id;
-    attach(id, host, $activeProject?.path ?? ".", pane.launch);
+    // The tab's worktree, else the project root. Read untracked via `get` on
+    // purpose: this effect must re-run when the *pane* changes, not when the
+    // active tab's binding does — the shell is already running and cannot be
+    // moved (see paneRoots in terminals.ts).
+    attach(id, host, spawnRoot(), pane.launch);
     const ro = new ResizeObserver(() => fitPane(id));
     ro.observe(host);
     return () => {

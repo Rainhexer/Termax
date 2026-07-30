@@ -1,7 +1,7 @@
 import { derived, writable } from "svelte/store";
 import { attentionPanes } from "./bell";
 import { paneInstances } from "./stores";
-import { paneRuns, paneTitles, readPaneTail } from "./terminals";
+import { isAlive, paneRuns, paneTitles, readPaneTail } from "./terminals";
 
 /**
  * Best-effort "what is this coding CLI doing" readout.
@@ -12,11 +12,24 @@ import { paneRuns, paneTitles, readPaneTail } from "./terminals";
  *  - the OSC title the program sets (coding CLIs put the current task there),
  *    captured by the terminal layer into {@link paneTitles};
  *  - the text of the live screen. For a full-screen TUI the alternate buffer
- *    holds exactly what is drawn right now, so scanning its last rows finds the
- *    footer (model name) and the spinner / permission prompt (activity).
+ *    holds exactly what is drawn right now; for an inline renderer (claude
+ *    draws into the normal buffer) the bottom rows are the live UI and the rest
+ *    is transcript.
  *
- * Everything below is therefore a heuristic over UI text: it degrades to
- * "idle/unknown" rather than lying when a CLI's rendering changes.
+ * Everything below is therefore a heuristic over UI text. Two properties matter
+ * more than raw hit rate, because both were the cause of the readout jumping
+ * around:
+ *
+ *  - **Precision over recall for the model.** The transcript above the footer is
+ *    arbitrary prose, and prose says "sonnet" or "model matching" all the time.
+ *    Only the last few non-empty rows — the status line — are searched, and a
+ *    candidate must still look like a model id to be accepted, so a duration or
+ *    an English word can never latch.
+ *  - **Hysteresis for everything else.** A single poll can land mid-repaint and
+ *    read a half-cleared screen. Verdicts are therefore observations with a
+ *    timestamp and decay after a grace period, rather than being recomputed from
+ *    one frame — which is what made "working" flicker to "idle" and task
+ *    descriptions blink out.
  */
 
 export type CliActivity = "working" | "awaiting" | "idle" | "failed";
@@ -31,52 +44,92 @@ export interface CliStatus {
 
 /** Rows of the live screen to scan. Enough for a permission prompt box plus
  *  the input box and footer beneath it. */
-const SCAN_ROWS = 24;
-/** Footer rows: where the model name sits, scanned first to cut false hits. */
-const FOOTER_ROWS = 8;
-const POLL_MS = 1000;
+const SCAN_ROWS = 30;
+/** Non-empty rows from the bottom that count as "the status line". The model
+ *  lives there; anything higher up is transcript and must not be trusted. */
+const FOOTER_LINES = 4;
+/** Non-empty rows from the bottom that count as "the live UI": the spinner, the
+ *  input box, a permission prompt. Wide enough for a prompt box, tight enough
+ *  that a transcript quoting "esc to interrupt" cannot fake a running turn. */
+const LIVE_LINES = 12;
+const POLL_MS = 700;
 
-// A command is in flight: claude/opencode both print an interrupt hint next to
-// their spinner for as long as they are generating or running a tool.
+/** How long a positive working/awaiting reading survives without being seen
+ *  again. Covers the repaint frames where the screen is momentarily blank. */
+const ACTIVITY_GRACE_MS = 3000;
+/** How long the spinner phrase is kept after it stops being drawn, so the task
+ *  line does not blink out between two turns. */
+const TASK_TTL_MS = 30_000;
+/** The model is sticky (a dialog can cover the footer) but not forever: a pane
+ *  that gets a new program must not keep the old one's badge. */
+const MODEL_TTL_MS = 10 * 60_000;
+
+// A command is in flight: coding CLIs print an interrupt hint next to their
+// spinner for as long as they are generating or running a tool.
 const WORKING = [
-  /\besc(?:ape)? to interrupt\b/i,
-  /\bctrl\+c to (?:stop|interrupt|cancel|abort)\b/i,
+  /\besc(?:ape)?\b[^\n]{0,12}\binterrupt\b/i,
+  /\bctrl\+c\b[^\n]{0,20}\b(?:stop|interrupt|cancel|abort)\b/i,
+  /\bctrl\+b\b[^\n]{0,24}\bbackground\b/i,
   /\bpress esc to (?:stop|cancel)\b/i,
 ];
+
+// A spinner line: an animation glyph followed by a word. Every CLI draws one
+// only while it is busy. Deliberately excludes "·", "•" and "*": those start
+// ordinary bullet lines in a CLI's own output and would fake a running turn.
+const SPINNER_LINE =
+  /^\s*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷✢✳✶✻✽✱∗◐◓◑◒]\s+[A-Za-z]/;
+
+// Elapsed-time token as drawn in a status line ("(12s ·", "· 1m 20s ·"). Only
+// read off lines that look like a status line, never off transcript prose.
+const TIMER = /\b(\d{1,4})\s?s\b/g;
+const STATUS_LINE = /[·•│|]/;
 
 // The CLI stopped and wants an answer: a permission prompt, a select menu, or
 // a plain y/n question.
 const AWAITING = [
   /\b(?:do|would) you (?:want|like) to\b/i,
-  /❯\s*1\.\s/,
+  /❯\s*\d\.\s/,
   /\(\s*y\s*\/\s*n\s*\)/i,
   /\[\s*y\s*\/\s*n\s*\]/i,
   /\bpress enter to continue\b/i,
+  /\ballow\b[^\n]{0,40}\?\s*$/im,
 ];
 
-// Model names, most specific first. Matched against the footer, where every
-// CLI puts the active model.
+/** Families a string must name to be accepted as a model. Without this any
+ *  bare word next to "model" — "matching", "reference" — became the badge. */
+const MODEL_FAMILY =
+  /(claude|gpt|gemini|grok|llama|qwen|deepseek|mistral|kimi|glm|opus|sonnet|haiku|fable|codex)/i;
+
+/** Shapes to pull out of the status line, most specific first. */
 const MODEL = [
   // opencode-style provider-qualified ids: anthropic/claude-sonnet-4-5
-  /\b([a-z][\w.-]*\/[\w.-]*(?:claude|gpt|gemini|grok|llama|qwen|deepseek|mistral|kimi|glm)[\w.-]*)/i,
+  /\b([a-z][\w.]*\/[\w.:-]*(?:claude|gpt|gemini|grok|llama|qwen|deepseek|mistral|kimi|glm)[\w.:-]*)/i,
   /\b(claude-[\w.-]+)/i,
-  /\b((?:opus|sonnet|haiku|fable)(?:\s+[\d.]+)?)\b/i,
+  /\b((?:opus|sonnet|haiku|fable)(?:[- ]?\d+(?:\.\d+)?)?)\b/i,
   /\b(gpt-[\w.-]+)\b/i,
+  /\b(o[34](?:-[\w.]+)?)\b/,
   /\b(gemini[- ][\w.-]+)/i,
   /\b(grok[- ][\w.-]+)/i,
+  /\b(codex[- ][\w.-]+)/i,
 ];
 
-/** Explicitly labelled model line, e.g. "Model: Opus 4.5". */
-const MODEL_LABELLED = /\bmodel:?\s+([\w.\-/]+(?:\s+[\d.]+)?)/i;
+/** Explicitly labelled model line, e.g. "Model: Opus 4.5". The colon is
+ *  required — "the model matching this" is prose, not a status line. */
+const MODEL_LABELLED = /\bmodel:\s*([\w.\-/]+(?:\s+[\d.]+)?)/i;
 
-/** The spinner line: "✽ Cogitating… (12s · ↑ 1.2k tokens · esc to interrupt)". */
-const SPINNER = /^[^\w\n]*([A-Za-z][A-Za-z '-]{2,30}[….]{1,3})/;
+/** A duration, a percentage, a bare number: never a model, however it was
+ *  captured. This is what put a ticking timer in the model badge. */
+const NOT_A_MODEL = /^(?:\d+(?:\.\d+)?\s*(?:ms|s|m|h|k|%)?|v?\d+(?:\.\d+)*)$/i;
+
+/** The spinner's phrase: "✽ Cogitating… (12s · esc to interrupt)". */
+const SPINNER_PHRASE = /^[^\w\n]*([A-Za-z][A-Za-z '-]{2,30}[….]{1,3})/;
 
 /** Titles that say nothing about a task (the program's own name, or a path). */
 function isGenericTitle(title: string, launch: string | null): boolean {
   const t = title.trim();
   if (!t) return true;
   if (launch && t.toLowerCase() === launch.toLowerCase()) return true;
+  if (/^(?:bash|zsh|fish|sh|node|npm|pnpm|yarn|python\d?)\b/i.test(t)) return true;
   return /^[~/]/.test(t) || /^[\w.-]+@[\w.-]+/.test(t);
 }
 
@@ -93,45 +146,128 @@ function lastMatch(text: string, re: RegExp): string | null {
   return found?.trim() || null;
 }
 
+/** The bottom-most `count` non-empty rows: the CLI's live UI, never the
+ *  transcript scrolled above it. Working on non-empty rows matters because an
+ *  inline renderer leaves blank padding under the input box, which would
+ *  otherwise push the status line out of a fixed-height window. */
+function bottomLines(tail: string, count: number): string {
+  const lines = tail.split("\n").filter((l) => l.trim().length > 0);
+  return lines.slice(-count).join("\n");
+}
+
+function footerOf(tail: string): string {
+  return bottomLines(tail, FOOTER_LINES);
+}
+
+function isModelLike(candidate: string): boolean {
+  const c = candidate.replace(/[.,;:)\]]+$/, "").trim();
+  if (!c || c.length > 48) return false;
+  if (NOT_A_MODEL.test(c)) return false;
+  return MODEL_FAMILY.test(c);
+}
+
 function findModel(tail: string): string | null {
-  const footer = tail.split("\n").slice(-FOOTER_ROWS).join("\n");
+  const footer = footerOf(tail);
   for (const re of MODEL) {
     const hit = lastMatch(footer, re);
-    if (hit) return hit;
+    if (hit && isModelLike(hit)) return hit.replace(/[.,;:)\]]+$/, "");
   }
-  return lastMatch(tail, MODEL_LABELLED);
+  const labelled = lastMatch(footer, MODEL_LABELLED);
+  return labelled && isModelLike(labelled) ? labelled : null;
+}
+
+/** Largest elapsed-time value drawn on a status line, or null. Compared across
+ *  polls: a timer that advanced is proof the CLI is mid-turn, whatever wording
+ *  its interrupt hint uses. */
+function findTimer(tail: string): number | null {
+  let max: number | null = null;
+  for (const line of bottomLines(tail, LIVE_LINES).split("\n")) {
+    if (!STATUS_LINE.test(line) && !SPINNER_LINE.test(line)) continue;
+    TIMER.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = TIMER.exec(line)) !== null) {
+      const n = Number(m[1]);
+      if (max === null || n > max) max = n;
+    }
+  }
+  return max;
 }
 
 /** The phrase next to the spinner, as a fallback task description. */
 function findSpinnerTask(tail: string): string | null {
-  for (const line of tail.split("\n").reverse()) {
-    if (!WORKING.some((re) => re.test(line))) continue;
+  for (const line of bottomLines(tail, LIVE_LINES).split("\n").reverse()) {
+    if (!WORKING.some((re) => re.test(line)) && !SPINNER_LINE.test(line)) continue;
     const head = line.split("(")[0];
-    const m = SPINNER.exec(head.trim());
+    const m = SPINNER_PHRASE.exec(head.trim());
     if (m) return m[1].trim();
   }
   return null;
 }
 
+/** Rolling per-pane observations. Every field is "when was this last true",
+ *  never "is it true in this frame" — see the hysteresis note at the top. */
 interface Scan {
-  working: boolean;
-  awaiting: boolean;
+  workingAt: number;
+  awaitingAt: number;
   model: string | null;
-  spinnerTask: string | null;
+  modelAt: number;
+  task: string | null;
+  taskAt: number;
+  timer: number | null;
+  /** Text of the last scan, to notice the screen is being redrawn at all. */
+  blank: boolean;
 }
 
-/** Scans, keyed by pane. The model is sticky: the footer can be covered by a
- *  dialog or scrolled off, and the model has not changed just because this
- *  frame doesn't show it. */
+const EMPTY_SCAN: Scan = {
+  workingAt: 0,
+  awaitingAt: 0,
+  model: null,
+  modelAt: 0,
+  task: null,
+  taskAt: 0,
+  timer: null,
+  blank: true,
+};
+
 const scans = writable<Map<string, Scan>>(new Map());
 
-function scanPane(paneId: string, previous: Scan | undefined): Scan {
+function scanPane(paneId: string, prev: Scan | undefined): Scan {
+  const now = Date.now();
+  const before = prev ?? EMPTY_SCAN;
   const tail = readPaneTail(paneId, SCAN_ROWS);
+
+  // Nothing drawn (pane never opened, or caught mid-clear): keep what we had
+  // rather than reporting a confident "idle" from an empty screen.
+  if (!tail.trim()) return { ...before, blank: true };
+
+  const timer = findTimer(tail);
+  // A status-line timer that advanced since the last poll means a turn is in
+  // flight. Guard against the transcript: only an increase counts, and only up
+  // to a plausible per-poll step.
+  const timerAdvanced =
+    timer !== null &&
+    before.timer !== null &&
+    timer > before.timer &&
+    timer - before.timer <= 30;
+
+  const live = bottomLines(tail, LIVE_LINES);
+  const working =
+    WORKING.some((re) => re.test(live)) ||
+    live.split("\n").some((l) => SPINNER_LINE.test(l)) ||
+    timerAdvanced;
+  const awaiting = AWAITING.some((re) => re.test(live));
+  const model = findModel(tail);
+  const task = findSpinnerTask(tail);
+
   return {
-    working: WORKING.some((re) => re.test(tail)),
-    awaiting: AWAITING.some((re) => re.test(tail)),
-    model: findModel(tail) ?? previous?.model ?? null,
-    spinnerTask: findSpinnerTask(tail) ?? null,
+    workingAt: working ? now : before.workingAt,
+    awaitingAt: awaiting ? now : before.awaitingAt,
+    model: model ?? before.model,
+    modelAt: model ? now : before.modelAt,
+    task: task ?? before.task,
+    taskAt: task ? now : before.taskAt,
+    timer,
+    blank: false,
   };
 }
 
@@ -166,33 +302,55 @@ paneInstances.subscribe((panes) => {
   timer = setInterval(() => scanAll(ids), POLL_MS);
 });
 
+function fresh(at: number, ttl: number, now: number): boolean {
+  return at > 0 && now - at < ttl;
+}
+
 /**
- * Merged status per pane. The screen scan wins when it says something definite,
- * because it reflects the CLI's own UI; otherwise the terminal layer's run
- * state (typed line → quiet settle, or an OSC 133 exit code) decides.
+ * Merged status per pane. The screen scan decides, because it reflects the
+ * CLI's own UI; the terminal layer's run state is only consulted for panes the
+ * scan knows nothing about (a plain shell, or a pane never drawn yet).
  */
 export const cliStatus = derived(
   [scans, paneRuns, paneTitles, attentionPanes, paneInstances],
   ([$scans, $runs, $titles, $attention, $panes]) => {
+    const now = Date.now();
     const out = new Map<string, CliStatus>();
     for (const pane of $panes) {
       const scan = $scans.get(pane.paneId);
       const run = $runs.get(pane.paneId);
       const title = $titles.get(pane.paneId);
+      const scanned = !!scan && !scan.blank;
+      const dead = pane.launch !== null && !isAlive(pane.paneId);
 
       let activity: CliActivity = "idle";
-      if (scan?.awaiting) activity = "awaiting";
-      else if (scan?.working) activity = "working";
-      else if (run?.state === "starting" || run?.state === "running") activity = "working";
-      else if (run?.state === "failed") activity = "failed";
-      else if ($attention.has(pane.paneId)) activity = "awaiting";
+      if (dead) {
+        activity = "idle";
+      } else if (scanned && fresh(scan.awaitingAt, ACTIVITY_GRACE_MS, now)) {
+        activity = "awaiting";
+      } else if (scanned && fresh(scan.workingAt, ACTIVITY_GRACE_MS, now)) {
+        activity = "working";
+      } else if (run?.state === "failed") {
+        activity = "failed";
+      } else if (!scanned && (run?.state === "starting" || run?.state === "running")) {
+        // No CLI UI to read: fall back on the shell run heuristic. For a pane
+        // that *is* being scanned this signal is worse than useless — a coding
+        // CLI never returns to a prompt, so its run state stays "running" long
+        // after the turn ended.
+        activity = "working";
+      } else if (!scanned && $attention.has(pane.paneId)) {
+        activity = "awaiting";
+      }
 
-      const task =
-        title && !isGenericTitle(title, pane.launch)
-          ? cleanTitle(title)
-          : (scan?.spinnerTask ?? null);
+      const named = title && !isGenericTitle(title, pane.launch) ? cleanTitle(title) : null;
+      const spinner = scan && fresh(scan.taskAt, TASK_TTL_MS, now) ? scan.task : null;
+      const model = scan && fresh(scan.modelAt, MODEL_TTL_MS, now) ? scan.model : null;
 
-      out.set(pane.paneId, { activity, model: scan?.model ?? null, task: task || null });
+      out.set(pane.paneId, {
+        activity,
+        model: dead ? null : model,
+        task: named ?? spinner ?? null,
+      });
     }
     return out;
   },
@@ -236,4 +394,27 @@ export function activityTitle(activity: CliActivity): string {
     default:
       return "Idle — no command in flight";
   }
+}
+
+/** What the detector currently sees for one pane, for diagnosing a wrong
+ *  readout against the real screen. Reachable from the devtools console as
+ *  `__cliScan("<paneId>")`. */
+export function debugScan(paneId: string) {
+  const tail = readPaneTail(paneId, SCAN_ROWS);
+  const live = bottomLines(tail, LIVE_LINES);
+  return {
+    tail,
+    live,
+    footer: footerOf(tail),
+    model: findModel(tail),
+    timer: findTimer(tail),
+    spinnerTask: findSpinnerTask(tail),
+    working:
+      WORKING.some((re) => re.test(live)) || live.split("\n").some((l) => SPINNER_LINE.test(l)),
+    awaiting: AWAITING.some((re) => re.test(live)),
+  };
+}
+
+if (typeof window !== "undefined") {
+  (window as unknown as Record<string, unknown>).__cliScan = debugScan;
 }

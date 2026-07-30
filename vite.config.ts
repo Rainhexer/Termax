@@ -21,6 +21,13 @@ export default defineConfig({
   ],
   clearScreen: false,
   server: {
+    // Bind IPv4 explicitly. Left to its default, Vite resolves "localhost"
+    // through the OS and can end up listening on [::1] only, while
+    // `tauri.conf.json`'s devUrl (`http://localhost:1420`) is resolved by
+    // WebKitGTK to 127.0.0.1 — the connection is refused and the dev window
+    // renders as a blank white page with nothing logged anywhere. Which address
+    // Node picks varies between runs, so the failure looks intermittent.
+    host: "127.0.0.1",
     port: 1420,
     strictPort: true,
     watch: {

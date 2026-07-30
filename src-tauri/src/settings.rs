@@ -57,11 +57,25 @@ pub struct Behavior {
     /// Enable bell notification on command done for new panes.
     #[serde(default)]
     pub default_bell: bool,
+    /// Launcher id opened in a new pull-request tab. Empty means the first
+    /// enabled non-shell launcher. Chosen deliberately rather than inferred from
+    /// the focused pane: predictable beats clever when one click spawns an agent.
+    #[serde(default)]
+    pub pr_launcher_id: String,
+    /// Command offered (never run automatically) to set a fresh worktree up —
+    /// typically `npm ci`. A worktree shares git objects but not build output, so
+    /// a new tree of a JS project is broken until something like this runs.
+    #[serde(default)]
+    pub worktree_setup_command: String,
 }
 
 impl Default for Behavior {
     fn default() -> Self {
-        Self { default_bell: false }
+        Self {
+            default_bell: false,
+            pr_launcher_id: String::new(),
+            worktree_setup_command: String::new(),
+        }
     }
 }
 

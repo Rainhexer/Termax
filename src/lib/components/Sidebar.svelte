@@ -1,6 +1,7 @@
 <script lang="ts">
   import {
     activeProject,
+    activeRoot,
     addPane,
     closeProject,
     focusedPaneId,
@@ -16,6 +17,8 @@
   import { activityLabel, activityTitle, cliStatus, loudest, statusFor } from "../cliStatus";
   import type { CliActivity } from "../cliStatus";
   import CommandVault from "./CommandVault.svelte";
+  import PullRequests from "./PullRequests.svelte";
+  import WorktreeChip from "./WorktreeChip.svelte";
   import ChangesPanel from "./ChangesPanel.svelte";
   import FileTree from "./FileTree.svelte";
   import ErrorBoundary from "./ErrorBoundary.svelte";
@@ -152,7 +155,7 @@
       <button
         class="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-base text-zinc-500 hover:bg-zinc-800 hover:text-emerald-400"
         title="New tab"
-        onclick={newTab}
+        onclick={() => newTab()}
       >+</button>
       <button
         class="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
@@ -230,13 +233,21 @@
       >←</button>
       <div class="min-w-0 flex-1">
         <h1 class="truncate text-sm font-semibold text-zinc-100">{$activeProject?.name}</h1>
-        <p class="truncate font-mono text-[10px] text-zinc-600">{$activeProject?.path}</p>
+        <!-- Line two is the orientation zone: it already showed a path, so making
+             it show the *active* root costs no vertical space and answers "which
+             tree am I looking at" without a new panel. -->
+        <div class="flex min-w-0 items-center gap-1">
+          <p class="min-w-0 flex-1 truncate font-mono text-[10px] text-zinc-600">
+            {$activeRoot ?? $activeProject?.path}
+          </p>
+          <WorktreeChip root={$activeRoot} compact />
+        </div>
       </div>
       <div class="flex items-center gap-0.5">
         <button
           class="rounded-md px-1.5 py-0.5 text-base leading-none text-zinc-500 hover:bg-zinc-800 hover:text-emerald-400"
           title="New tab"
-          onclick={newTab}
+          onclick={() => newTab()}
         >+</button>
         <button
           class="rounded-md p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
@@ -253,83 +264,100 @@
       </div>
     </div>
 
-    <div class="flex flex-1 flex-col gap-4 overflow-y-auto px-3 pb-3">
+    <div class="flex flex-1 flex-col min-h-0">
+      <div class="flex-1 overflow-y-auto px-3 min-h-0">
+        <div class="flex flex-col gap-4 pb-3">
 
-      <div class="flex flex-col gap-1">
-        <h2 class="px-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Launch</h2>
-        {#each launchers as launcher (launcher.id)}
-          {@const instances = instancesOf(launcher)}
-          <div class="overflow-hidden rounded-md border border-zinc-800 bg-zinc-900/60">
-            <div class="flex items-stretch">
-              <button
-                class="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left text-xs text-zinc-200 hover:bg-zinc-800"
-                onclick={() => addPane(launcher.command, launcher.name)}
-              >
-                <span class="inline-flex w-5 shrink-0 items-center justify-center text-emerald-400"><TerminalIcon type={launcher.icon} className="h-4 w-4" /></span>
-                <span class="truncate">{launcher.name}</span>
-                <span class="ml-auto shrink-0 text-[10px] text-zinc-600">new pane</span>
-              </button>
-              {#if instances.length}
-                <button
-                  class="flex shrink-0 items-center gap-1 border-l border-zinc-800 px-1.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
-                  title="{instances.length} open — {groupOpen(launcher.id) ? 'hide' : 'show'} instances"
-                  onclick={() => toggleGroup(launcher.id)}
-                >
-                  <span class="h-1.5 w-1.5 rounded-full {dotClass(groupActivity(instances))}"></span>
-                  {instances.length}
-                  <span class="text-zinc-600">{groupOpen(launcher.id) ? "▾" : "▸"}</span>
-                </button>
-              {/if}
-            </div>
-
-            {#if instances.length && groupOpen(launcher.id)}
-              <ul class="border-t border-zinc-800">
-                {#each instances as inst (inst.paneId)}
-                  {@const status = statusFor($cliStatus, inst.paneId)}
-                  <li>
+          <div class="flex flex-col gap-1">
+            <h2 class="px-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Launch</h2>
+            {#each launchers as launcher (launcher.id)}
+              {@const instances = instancesOf(launcher)}
+              <div class="overflow-hidden rounded-md border border-zinc-800 bg-zinc-900/60">
+                <div class="flex items-stretch">
+                  <button
+                    class="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left text-xs text-zinc-200 hover:bg-zinc-800"
+                    onclick={() => addPane(launcher.command, launcher.name)}
+                  >
+                    <span class="inline-flex w-5 shrink-0 items-center justify-center text-emerald-400"><TerminalIcon type={launcher.icon} className="h-4 w-4" /></span>
+                    <span class="truncate">{launcher.name}</span>
+                    <span class="ml-auto shrink-0 text-[10px] text-zinc-600">new pane</span>
+                  </button>
+                  {#if instances.length}
                     <button
-                      class="flex w-full flex-col gap-0.5 px-2 py-1 text-left hover:bg-zinc-800/70"
-                      class:bg-zinc-800={$focusedPaneId === inst.paneId}
-                      title={`${inst.title} — ${activityTitle(status.activity)}\n↳ ${inst.tabTitle}${status.model ? `\n↳ ${status.model}` : ""}`}
-                      onclick={() => revealPane(inst.paneId)}
+                      class="flex shrink-0 items-center gap-1 border-l border-zinc-800 px-1.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
+                      title="{instances.length} open — {groupOpen(launcher.id) ? 'hide' : 'show'} instances"
+                      onclick={() => toggleGroup(launcher.id)}
                     >
-                      <span class="flex w-full items-center gap-1.5">
-                        {#if status.activity === "working"}
-                          <span class="h-2.5 w-2.5 shrink-0 animate-spin rounded-full border-[1.5px] border-zinc-700 border-t-emerald-400"></span>
-                        {:else}
-                          <span class="ml-0.5 h-1.5 w-1.5 shrink-0 rounded-full {dotClass(status.activity)}"></span>
-                        {/if}
-                        <span class="min-w-0 flex-1 truncate text-[11px] text-zinc-300">{inst.title}</span>
-                        <span class="shrink-0 text-[10px] {textClass(status.activity)}">{activityLabel(status.activity)}</span>
-                      </span>
-                      <span class="flex w-full items-baseline gap-1.5 pl-4">
-                        <span class="min-w-0 flex-1 truncate text-[10px] text-zinc-500">
-                          {status.task ?? inst.tabTitle}
-                        </span>
-                        {#if status.model}
-                          <span class="shrink-0 rounded bg-zinc-800 px-1 font-mono text-[9px] text-zinc-400" title="Model in use">
-                            {status.model}
-                          </span>
-                        {/if}
-                      </span>
+                      <span class="h-1.5 w-1.5 rounded-full {dotClass(groupActivity(instances))}"></span>
+                      {instances.length}
+                      <span class="text-zinc-600">{groupOpen(launcher.id) ? "▾" : "▸"}</span>
                     </button>
-                  </li>
-                {/each}
-              </ul>
-            {/if}
-          </div>
-        {/each}
-      </div>
+                  {/if}
+                </div>
 
-      <ErrorBoundary label="Command vault" compact>
-        <CommandVault />
-      </ErrorBoundary>
-      <ErrorBoundary label="File tree" compact>
-        <FileTree />
-      </ErrorBoundary>
-      <ErrorBoundary label="Changes" compact>
-        <ChangesPanel />
-      </ErrorBoundary>
+                {#if instances.length && groupOpen(launcher.id)}
+                  <ul class="border-t border-zinc-800">
+                    {#each instances as inst (inst.paneId)}
+                      {@const status = statusFor($cliStatus, inst.paneId)}
+                      <li>
+                        <button
+                          class="flex w-full flex-col gap-0.5 px-2 py-1 text-left hover:bg-zinc-800/70"
+                          class:bg-zinc-800={$focusedPaneId === inst.paneId}
+                          title={`${inst.title} — ${activityTitle(status.activity)}\n↳ ${inst.tabTitle}${status.model ? `\n↳ ${status.model}` : ""}`}
+                          onclick={() => revealPane(inst.paneId)}
+                        >
+                          <span class="flex w-full items-center gap-1.5">
+                            {#if status.activity === "working"}
+                              <span class="h-2.5 w-2.5 shrink-0 animate-spin rounded-full border-[1.5px] border-zinc-700 border-t-emerald-400"></span>
+                            {:else}
+                              <span class="ml-0.5 h-1.5 w-1.5 shrink-0 rounded-full {dotClass(status.activity)}"></span>
+                            {/if}
+                            <span class="min-w-0 flex-1 truncate text-[11px] text-zinc-300">{inst.title}</span>
+                            <span class="shrink-0 text-[10px] {textClass(status.activity)}">{activityLabel(status.activity)}</span>
+                          </span>
+                          <span class="flex w-full items-baseline gap-1.5 pl-4">
+                            <!-- Which PR this agent is on, taken from the pane's real
+                                 spawn root rather than its tab: a pane dragged to
+                                 another tab keeps the shell it already had. -->
+                            <WorktreeChip root={inst.root} compact />
+                            <span class="min-w-0 flex-1 truncate text-[10px] text-zinc-500">
+                              {status.task ?? inst.tabTitle}
+                            </span>
+                            {#if status.model}
+                              <span class="shrink-0 rounded bg-zinc-800 px-1 font-mono text-[9px] text-zinc-400" title="Model in use">
+                                {status.model}
+                              </span>
+                            {/if}
+                          </span>
+                        </button>
+                      </li>
+                    {/each}
+                  </ul>
+                {/if}
+              </div>
+            {/each}
+          </div>
+
+          <!-- Above the vault and the tree because starting work on a pull request
+               is a sibling of launching an agent: both create panes. The two
+               scrolling panels below it stay at the bottom. -->
+          <ErrorBoundary label="Pull requests" compact>
+            <PullRequests />
+          </ErrorBoundary>
+          <ErrorBoundary label="Command vault" compact>
+            <CommandVault />
+          </ErrorBoundary>
+          <ErrorBoundary label="File tree" compact>
+            <FileTree />
+          </ErrorBoundary>
+
+        </div>
+      </div>
+      <div class="px-3 pt-3 pb-3">
+        <ErrorBoundary label="Changes" compact>
+          <ChangesPanel />
+        </ErrorBoundary>
+      </div>
     </div>
   {/if}
 </aside>

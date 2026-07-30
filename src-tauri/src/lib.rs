@@ -1,5 +1,6 @@
 mod fstree;
 mod git;
+mod github;
 mod projects;
 mod pty;
 mod session;
@@ -44,6 +45,19 @@ pub fn run() {
             projects::remove_vault_command,
             session::start_session,
             session::stop_session,
+            session::open_worktree_session,
+            session::close_worktree_session,
+            session::list_worktrees,
+            session::worktree_add,
+            session::worktree_remove,
+            session::worktree_prune,
+            session::git_default_branch,
+            session::git_create_branch,
+            session::git_fetch_branch,
+            session::git_fetch_pr_head,
+            session::git_push,
+            session::git_delete_branch,
+            session::git_commit_subjects,
             session::git_status,
             session::git_fetch,
             session::git_pull,
@@ -51,6 +65,14 @@ pub fn run() {
             session::git_checkout,
             session::get_changes,
             session::get_diff,
+            github::gh_probe,
+            github::gh_pr_list,
+            github::gh_pr_for_branch,
+            github::gh_pr_view,
+            github::gh_pr_create,
+            github::gh_pr_ready,
+            github::gh_pr_merge,
+            github::gh_pr_close,
             fstree::list_dir,
             fstree::read_file,
             fstree::read_file_data_url,

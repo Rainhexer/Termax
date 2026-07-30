@@ -53,14 +53,17 @@ fn resolve(root: &Path, rel: &str) -> Result<PathBuf, String> {
 }
 
 /// Batch-query git for which of the given relative paths are ignored.
+///
+/// Goes through `git::git_command` rather than a bare `Command::new("git")` so
+/// this shares the anti-hostile-repo settings (`core.fsmonitor`,
+/// `core.hooksPath`, `protocol.ext`) with every other git call. It matters more
+/// now that roots can be created programmatically as worktrees.
 fn git_ignored(root: &Path, rels: &[String]) -> HashSet<String> {
     let mut ignored = HashSet::new();
     if rels.is_empty() {
         return ignored;
     }
-    let Ok(mut child) = Command::new("git")
-        .arg("-C")
-        .arg(root)
+    let Ok(mut child) = crate::git::git_command(root)
         .args(["check-ignore", "--stdin", "-z"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -90,8 +93,11 @@ fn git_ignored(root: &Path, rels: &[String]) -> HashSet<String> {
 pub fn list_dir(
     manager: tauri::State<SessionManager>,
     path: String,
+    root: Option<String>,
 ) -> Result<Vec<TreeEntry>, String> {
-    let (root, git_mode) = manager.root_info().ok_or("no active session")?;
+    let (root, git_mode) = manager
+        .root_info(root.as_deref())
+        .ok_or("no active session")?;
     let dir = resolve(&root, &path)?;
 
     let mut entries: Vec<(String, bool)> = Vec::new();
@@ -141,8 +147,11 @@ pub fn list_dir(
 pub fn read_file(
     manager: tauri::State<SessionManager>,
     path: String,
+    root: Option<String>,
 ) -> Result<FileContent, String> {
-    let (root, _) = manager.root_info().ok_or("no active session")?;
+    let (root, _) = manager
+        .root_info(root.as_deref())
+        .ok_or("no active session")?;
     let abs = resolve(&root, &path)?;
     let meta = std::fs::metadata(&abs).map_err(|e| e.to_string())?;
     if !meta.is_file() {
@@ -172,9 +181,12 @@ pub fn read_file(
 pub fn read_file_data_url(
     manager: tauri::State<SessionManager>,
     path: String,
+    root: Option<String>,
 ) -> Result<String, String> {
     use base64::Engine;
-    let (root, _) = manager.root_info().ok_or("no active session")?;
+    let (root, _) = manager
+        .root_info(root.as_deref())
+        .ok_or("no active session")?;
     let abs = resolve(&root, &path)?;
     let meta = std::fs::metadata(&abs).map_err(|e| e.to_string())?;
     if !meta.is_file() {
@@ -209,8 +221,11 @@ pub fn write_file(
     manager: tauri::State<SessionManager>,
     path: String,
     content: String,
+    root: Option<String>,
 ) -> Result<(), String> {
-    let (root, _) = manager.root_info().ok_or("no active session")?;
+    let (root, _) = manager
+        .root_info(root.as_deref())
+        .ok_or("no active session")?;
     let abs = resolve(&root, &path)?;
     if !abs.is_file() {
         return Err(format!("not a file: {path}"));
@@ -222,8 +237,11 @@ pub fn write_file(
 pub fn reveal_in_file_manager(
     manager: tauri::State<SessionManager>,
     path: String,
+    root: Option<String>,
 ) -> Result<(), String> {
-    let (root, _) = manager.root_info().ok_or("no active session")?;
+    let (root, _) = manager
+        .root_info(root.as_deref())
+        .ok_or("no active session")?;
     let abs = resolve(&root, &path)?;
 
     #[cfg(target_os = "linux")]
@@ -261,8 +279,11 @@ pub fn reveal_in_file_manager(
 pub fn open_in_default_app(
     manager: tauri::State<SessionManager>,
     path: String,
+    root: Option<String>,
 ) -> Result<(), String> {
-    let (root, _) = manager.root_info().ok_or("no active session")?;
+    let (root, _) = manager
+        .root_info(root.as_deref())
+        .ok_or("no active session")?;
     let abs = resolve(&root, &path)?;
     if !abs.exists() {
         return Err(format!("not found: {path}"));

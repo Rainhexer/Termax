@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { getVersion } from "@tauri-apps/api/app";
   import { ipc } from "../ipc";
-  import { settings, settingsOpen, syncDetected, updateSettings } from "../settings";
+  import { enabledLaunchers, settings, settingsOpen, syncDetected, updateSettings } from "../settings";
   import LauncherSettings from "./LauncherSettings.svelte";
   import AppearanceSettings from "./AppearanceSettings.svelte";
   import ErrorBoundary from "./ErrorBoundary.svelte";
@@ -162,7 +162,52 @@
               <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
               <path d="M13.7 21a2 2 0 0 1-3.4 0" />
             </svg>
-            <span class="text-xs text-zinc-400">Command complete notification on new windows</span>
+            <!-- "panes", not "windows": Termax is a single-window app, and this
+                 seeds `defaultBell` on newly created panes. -->
+            <span class="text-xs text-zinc-400">Chime and pulse when a command finishes (applies to new panes)</span>
+          </label>
+
+          <label class="flex flex-col gap-1">
+            <span class="text-xs text-zinc-400">Agent to open for a pull request</span>
+            <select
+              class="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-200 focus:border-emerald-500 focus:outline-none"
+              value={$settings.behavior.prLauncherId}
+              onchange={(e) =>
+                updateSettings((s) => ({
+                  ...s,
+                  behavior: { ...s.behavior, prLauncherId: (e.target as HTMLSelectElement).value },
+                }))}
+            >
+              <option value="">First available agent</option>
+              {#each enabledLaunchers($settings) as l (l.id)}
+                <option value={l.id}>{l.name}</option>
+              {/each}
+            </select>
+            <span class="text-[11px] text-zinc-600">
+              Opened in the new tab when you start work on a pull request.
+            </span>
+          </label>
+
+          <label class="flex flex-col gap-1">
+            <span class="text-xs text-zinc-400">Worktree setup command</span>
+            <input
+              class="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1.5 font-mono text-xs text-zinc-200 focus:border-emerald-500 focus:outline-none"
+              placeholder="npm ci"
+              value={$settings.behavior.worktreeSetupCommand}
+              onchange={(e) =>
+                updateSettings((s) => ({
+                  ...s,
+                  behavior: {
+                    ...s.behavior,
+                    worktreeSetupCommand: (e.target as HTMLInputElement).value,
+                  },
+                }))}
+            />
+            <span class="text-[11px] text-zinc-600">
+              A new worktree shares git history but not <span class="font-mono">node_modules</span>
+              or build output, so it may not build until this runs. Termax types it
+              into a pane for you and waits — it never runs it on its own.
+            </span>
           </label>
         </div>
       {:else}
