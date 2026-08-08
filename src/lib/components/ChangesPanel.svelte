@@ -36,6 +36,13 @@
   let branchList = $state<string[]>([]);
   let branchFilter = $state("");
   let branchAnchor = $state<HTMLElement>();
+  let branchMenuEl = $state<HTMLDivElement>();
+  /** The Changes panel sits pinned to the bottom of the sidebar, so the menu can
+   *  run out of window below it; when it does, flip it to open upward instead. */
+  let branchMenuUp = $state(false);
+  /** Set once the menu has been measured, so it never renders in the wrong
+   *  direction for even a frame. */
+  let branchMenuMeasured = $state(false);
   /** Set when listing branches failed, so the menu can distinguish "this repo has
    *  no other branches" from "git could not be asked". */
   let branchError = $state<string | null>(null);
@@ -66,6 +73,28 @@
       ? branchList.filter((b) => b.toLowerCase().includes(branchFilter.trim().toLowerCase()))
       : branchList,
   );
+
+  // Pick the menu's open direction from real measurements: open downward unless
+  // the menu would stick past the bottom of the window, in which case open
+  // upward — but only if it actually fits above. Re-evaluate on window resizes.
+  $effect(() => {
+    if (!branchMenuOpen || !branchAnchor || !branchMenuEl) {
+      branchMenuMeasured = false;
+      return;
+    }
+    const place = () => {
+      const rect = branchAnchor.getBoundingClientRect();
+      const height = branchMenuEl.offsetHeight;
+      const margin = 4;
+      const fitsBelow = window.innerHeight - rect.bottom - margin >= height;
+      const fitsAbove = rect.top - margin >= height;
+      branchMenuUp = !fitsBelow && fitsAbove;
+      branchMenuMeasured = true;
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+  });
 
   // Close the branch menu on outside click or Escape.
   $effect(() => {
@@ -205,7 +234,10 @@
 
           {#if branchMenuOpen}
             <div
-              class="absolute left-0 top-full z-20 mt-1 max-h-72 w-56 overflow-hidden rounded-md border border-zinc-700 bg-zinc-900 shadow-xl shadow-black/50"
+              bind:this={branchMenuEl}
+              class="absolute left-0 z-20 w-56 max-h-72 overflow-hidden rounded-md border border-zinc-700 bg-zinc-900 shadow-xl shadow-black/50
+                {branchMenuUp ? 'bottom-full mb-1' : 'top-full mt-1'}
+                {branchMenuMeasured ? '' : 'invisible'}"
             >
               {#if $gitStatus.remoteUrl}
                 <button
