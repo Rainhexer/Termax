@@ -52,11 +52,12 @@ package() {
 		[Desktop Entry]
 		Name=Termax
 		Comment=$pkgdesc
-		Exec=$_pkgname
+		Exec=$_pkgname %u
 		Icon=$_pkgname
 		Terminal=false
 		Type=Application
 		Categories=Development;Utility;
 		StartupWMClass=Termax
+		MimeType=inode/directory;
 	EOF
 }

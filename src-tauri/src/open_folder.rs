@@ -103,6 +103,23 @@ mod tests {
         assert_eq!(folder_arg(&argv), None);
     }
 
+    /// The whole feature is dead without this. A desktop entry whose `Exec`
+    /// carries no field code is launched with no arguments at all, so the
+    /// folder KDE wants opened never reaches `folder_arg`.
+    #[test]
+    fn desktop_entry_passes_the_folder_through() {
+        let template = include_str!("../main.desktop");
+        let exec = template
+            .lines()
+            .find(|line| line.starts_with("Exec="))
+            .expect("template must define Exec");
+        assert!(exec.ends_with(" %u"), "Exec needs a URL field code: {exec}");
+        assert!(
+            template.contains("MimeType=inode/directory;"),
+            "template must register the app as a folder handler"
+        );
+    }
+
     #[test]
     fn ignores_argv_zero_and_non_directory_args() {
         let dir = existing_dir("file-arg");
