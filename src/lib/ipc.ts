@@ -2,15 +2,23 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   ChangeArea,
   ChangeEntry,
+  CloseReason,
   FileContent,
   FileDiff,
   GhProbe,
   GitStatus,
+  IssueDetail,
+  IssueEdit,
+  IssueFilter,
+  IssueListResult,
   LayoutNode,
+  LockReason,
+  Milestone,
   PrDetail,
   PrListResult,
   Project,
   PullRequest,
+  RepoLabel,
   SessionInfo,
   TreeEntry,
   VaultCommand,
@@ -104,6 +112,61 @@ export const ipc = {
   ghPrMerge: (number: number, method: string, deleteBranch: boolean, root?: string) =>
     invoke<string>("gh_pr_merge", { number, method, deleteBranch, root }),
   ghPrClose: (number: number, root?: string) => invoke<void>("gh_pr_close", { number, root }),
+
+  // Issues. Same posture as the pull-request calls: every one reaches the
+  // network, so nothing here runs without the panel being open or the user
+  // pressing something. `filter` and `edit` are whole objects rather than long
+  // argument lists — both grow, and Tauri drops undefined keys, so an omitted
+  // field arrives as Rust's None and means "unset" rather than "empty".
+  ghIssueList: (filter: IssueFilter) => invoke<IssueListResult>("gh_issue_list", { filter }),
+  ghIssueView: (number: number) => invoke<IssueDetail>("gh_issue_view", { number }),
+  /** Creates the issue and returns its URL. */
+  ghIssueCreate: (
+    title: string,
+    body: string,
+    labels: string[],
+    assignees: string[],
+    milestone?: string,
+    root?: string,
+  ) => invoke<string>("gh_issue_create", { title, body, labels, assignees, milestone, root }),
+  ghIssueEdit: (number: number, edit: IssueEdit, root?: string) =>
+    invoke<void>("gh_issue_edit", { number, edit, root }),
+  ghIssueClose: (
+    number: number,
+    reason?: CloseReason,
+    comment?: string,
+    duplicateOf?: string,
+    root?: string,
+  ) => invoke<void>("gh_issue_close", { number, reason, comment, duplicateOf, root }),
+  ghIssueReopen: (number: number, comment?: string, root?: string) =>
+    invoke<void>("gh_issue_reopen", { number, comment, root }),
+  /** Comments and returns the new comment's URL. */
+  ghIssueComment: (number: number, body: string, root?: string) =>
+    invoke<string>("gh_issue_comment", { number, body, root }),
+  /** Creates a branch on the *remote*, linked to the issue so merging its pull
+   *  request closes the issue. Returns the branch's real name, which GitHub may
+   *  have suffixed if the requested one was taken. */
+  ghIssueDevelop: (number: number, name: string, base?: string, root?: string) =>
+    invoke<string>("gh_issue_develop", { number, name, base, root }),
+  /** Branches already linked to an issue: "is someone on this already?" */
+  ghIssueDevelopList: (number: number) => invoke<string[]>("gh_issue_develop_list", { number }),
+  ghIssuePin: (number: number, pinned: boolean, root?: string) =>
+    invoke<void>("gh_issue_pin", { number, pinned, root }),
+  ghIssueLock: (number: number, locked: boolean, reason?: LockReason, root?: string) =>
+    invoke<void>("gh_issue_lock", { number, locked, reason, root }),
+  ghIssueTransfer: (number: number, destination: string, root?: string) =>
+    invoke<string>("gh_issue_transfer", { number, destination, root }),
+  /** Irreversible, and needs admin rights on the repository. */
+  ghIssueDelete: (number: number, root?: string) => invoke<void>("gh_issue_delete", { number, root }),
+
+  // Repository metadata for the pickers. Each degrades to an empty list rather
+  // than an error: a missing label list means a free-text field, not a failure.
+  ghRepoLabels: () => invoke<RepoLabel[]>("gh_repo_labels"),
+  ghRepoAssignees: () => invoke<{ login: string }[]>("gh_repo_assignees"),
+  ghRepoMilestones: () => invoke<Milestone[]>("gh_repo_milestones"),
+  /** The signed-in login, for "assigned to me" and for marking your own
+   *  comments. null when gh cannot say. */
+  ghMe: () => invoke<string | null>("gh_me"),
 
   // Git mutations used by the pull-request flows. All hardened the same way as
   // the read paths — gh shells out to plain git, so ref changes stay on our side.

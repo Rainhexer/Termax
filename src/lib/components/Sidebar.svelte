@@ -18,6 +18,7 @@
   import type { CliActivity } from "../cliStatus";
   import CommandVault from "./CommandVault.svelte";
   import PullRequests from "./PullRequests.svelte";
+  import Issues from "./Issues.svelte";
   import WorktreeChip from "./WorktreeChip.svelte";
   import ChangesPanel from "./ChangesPanel.svelte";
   import FileTree from "./FileTree.svelte";
@@ -343,6 +344,12 @@
                scrolling panels below it stay at the bottom. -->
           <ErrorBoundary label="Pull requests" compact>
             <PullRequests />
+          </ErrorBoundary>
+          <!-- Below pull requests, above the vault: an issue is upstream of a PR
+               in the workflow, but the PR panel is the one with work already in
+               flight, so it keeps the position nearest the launchers. -->
+          <ErrorBoundary label="Issues" compact>
+            <Issues />
           </ErrorBoundary>
           <ErrorBoundary label="Command vault" compact>
             <CommandVault />

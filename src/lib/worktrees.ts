@@ -218,6 +218,29 @@ export function tabForBranch(branch: string): { tabId: string; path: string } | 
   return tab ? { tabId: tab.id, path: entry.path } : null;
 }
 
+/** Find a tab working on an issue, by the shape of its branch name.
+ *
+ *  `gh issue develop` names branches `<number>-<slug>`, so a worktree branch
+ *  starting with the issue number and a dash belongs to that issue. Matching on
+ *  the name rather than storing the number against the tab is the same choice
+ *  `prByBranch` makes and for the same reason: a stored number goes stale the
+ *  moment the branch is renamed, and git can always be asked.
+ *
+ *  The trade-off is a branch named `12-something` for unrelated reasons would
+ *  match issue 12. That costs a wrong "already working on this" hint, which the
+ *  user can see is wrong, and is worth not persisting a mapping that rots. */
+export function tabForIssue(number: number): { tabId: string; path: string } | null {
+  const prefix = `${number}-`;
+  const entry = get(gitWorktrees).find(
+    (w) => w.branch === String(number) || w.branch?.startsWith(prefix),
+  );
+  if (!entry) return null;
+  const record = get(worktrees).find((w) => w.path === entry.path);
+  if (!record) return null;
+  const tab = get(tabs).find((t) => t.worktreeId === record.id);
+  return tab ? { tabId: tab.id, path: entry.path } : null;
+}
+
 /** Ensure a worktree exists for `branch` and return its path.
  *
  *  `prNumber` with `fromFork` fetches `refs/pull/N/head` into a detached tree
@@ -329,6 +352,153 @@ function openTabForWorktree(
     title: opts.launcherName,
     tabTitle: `#${opts.prNumber} ${short}`,
   });
+}
+
+/** Branch name for an issue, in GitHub's own `<number>-<slug>` shape.
+ *
+ *  Matching what `gh issue develop` would pick on its own matters: if the
+ *  branch already exists from a previous attempt, an identical name means we
+ *  adopt it instead of GitHub minting `12-fix-thing-1` beside it. */
+export function branchNameForIssue(number: number, title: string): string {
+  const slug = title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 50)
+    .replace(/-+$/, "");
+  return slug ? `${number}-${slug}` : `${number}`;
+}
+
+/** Fill the issue prompt template. */
+export function renderIssuePrompt(
+  template: string,
+  issue: { number: number; title: string; url: string; body?: string },
+): string {
+  return template
+    .replaceAll("{number}", String(issue.number))
+    .replaceAll("{title}", issue.title)
+    .replaceAll("{url}", issue.url)
+    .replaceAll("{body}", issue.body?.trim() ?? "")
+    .trim();
+}
+
+/** Hand an issue to a coding agent: linked branch, worktree, tab, prompt.
+ *
+ *  The one-click path from "this should be fixed" to "an agent is working on
+ *  it", and the reason the issue panel exists rather than deferring to the
+ *  website. Four things happen, in this order:
+ *
+ *    1. `gh issue develop` creates a branch **on the remote** and links it to
+ *       the issue. The link is the point: GitHub then closes the issue when the
+ *       eventual pull request merges, with no "fixes #12" convention to
+ *       remember. A plain local branch would be one network call cheaper and
+ *       would lose exactly the thing this feature is for.
+ *    2. A worktree is built from it, so this agent cannot collide with whatever
+ *       is running in the project root or in another issue's tree.
+ *    3. A tab opens with the chosen agent in it.
+ *    4. The prompt is *typed* into that agent, not executed. Termax auto-runs
+ *       nothing — see `offerSetupCommand` for the same reasoning. The user
+ *       presses Enter, having read what their agent is about to be told.
+ *
+ *  Idempotent: an issue whose branch already has a tab just gets focused, with
+ *  no network call at all.
+ *
+ *  Returns a human-readable problem, or null on success. */
+export async function startWorkOnIssue(opts: {
+  projectPath: string;
+  number: number;
+  title: string;
+  url: string;
+  body?: string;
+  /** Branch to create; defaults to GitHub's `<number>-<slug>` shape. */
+  branch?: string;
+  /** Base branch for the new branch. Omitted means the repository default. */
+  base?: string;
+  launch: string | null;
+  launcherName: string;
+  /** Rendered prompt. Omitted means no prompt is typed — a plain shell, say. */
+  prompt?: string;
+}): Promise<string | null> {
+  const wanted = opts.branch?.trim() || branchNameForIssue(opts.number, opts.title);
+
+  // Already working on it? Check before touching the network, so pressing the
+  // button twice costs nothing. Both spellings are checked: the exact branch the
+  // caller asked for, and any branch belonging to this issue — the second
+  // catches the case where GitHub suffixed the name on a previous attempt.
+  const existingTab = tabForBranch(wanted) ?? tabForIssue(opts.number);
+  if (existingTab) {
+    switchTab(existingTab.tabId);
+    return null;
+  }
+
+  // GitHub decides the final name: it suffixes when the branch already exists,
+  // so the returned name is used from here on rather than the requested one.
+  let branch: string;
+  try {
+    branch = await ipc.ghIssueDevelop(opts.number, wanted, opts.base);
+  } catch (err) {
+    return String(err);
+  }
+  if (!branch) return "GitHub didn't say which branch it created.";
+
+  // The name may have changed under us, so re-check for a tab before building
+  // anything: `gh issue develop` is idempotent and hands back the existing
+  // branch when one is already linked, which is exactly the second-press case.
+  const onFinalName = tabForBranch(branch);
+  if (onFinalName) {
+    switchTab(onFinalName.tabId);
+    return null;
+  }
+
+  let path: string;
+  try {
+    path = await ensureWorktree(opts.projectPath, branch);
+  } catch (err) {
+    const message = String(err);
+    if (isAlreadyCheckedOut(message)) {
+      const holder = get(gitWorktrees).find((w) => w.branch === branch);
+      if (holder) {
+        const id = registerWorktree(holder.path);
+        openTabForIssue(id, {
+          number: opts.number,
+          title: opts.title,
+          launch: opts.launch,
+          launcherName: opts.launcherName,
+        });
+        return null;
+      }
+      return `${branch} is already checked out in another worktree.`;
+    }
+    return message;
+  }
+
+  // Register and create the tab in one synchronous block: an await between the
+  // two would let the reconciler observe a worktree nothing references yet.
+  const id = registerWorktree(path);
+  const paneId = openTabForIssue(id, {
+    number: opts.number,
+    title: opts.title,
+    launch: opts.launch,
+    launcherName: opts.launcherName,
+  });
+  if (opts.prompt?.trim() && paneId) queueType(paneId, opts.prompt.trim());
+  offerSetupCommand();
+  return null;
+}
+
+/** Open the tab for an issue, returning the agent pane's id. */
+function openTabForIssue(
+  worktreeId: string,
+  opts: { number: number; title: string; launch: string | null; launcherName: string },
+): string | null {
+  const short = opts.title.length > 24 ? `${opts.title.slice(0, 24)}…` : opts.title;
+  const tab = newTab({
+    worktreeId,
+    launch: opts.launch,
+    title: opts.launcherName,
+    tabTitle: `#${opts.number} ${short}`,
+  });
+  return tab.focusedPaneId;
 }
 
 /** Remove a worktree from disk after checking nothing is using it.

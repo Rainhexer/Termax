@@ -2,7 +2,14 @@
   import { onMount } from "svelte";
   import { getVersion } from "@tauri-apps/api/app";
   import { ipc } from "../ipc";
-  import { enabledLaunchers, settings, settingsOpen, syncDetected, updateSettings } from "../settings";
+  import {
+    DEFAULT_ISSUE_PROMPT,
+    enabledLaunchers,
+    settings,
+    settingsOpen,
+    syncDetected,
+    updateSettings,
+  } from "../settings";
   import LauncherSettings from "./LauncherSettings.svelte";
   import AppearanceSettings from "./AppearanceSettings.svelte";
   import ErrorBoundary from "./ErrorBoundary.svelte";
@@ -185,6 +192,56 @@
             </select>
             <span class="text-[11px] text-zinc-600">
               Opened in the new tab when you start work on a pull request.
+            </span>
+          </label>
+
+          <label class="flex flex-col gap-1">
+            <span class="text-xs text-zinc-400">Agent to open for an issue</span>
+            <select
+              class="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-200 focus:border-emerald-500 focus:outline-none"
+              value={$settings.behavior.issueLauncherId}
+              onchange={(e) =>
+                updateSettings((s) => ({
+                  ...s,
+                  behavior: {
+                    ...s.behavior,
+                    issueLauncherId: (e.target as HTMLSelectElement).value,
+                  },
+                }))}
+            >
+              <option value="">Same as pull requests</option>
+              {#each enabledLaunchers($settings) as l (l.id)}
+                <option value={l.id}>{l.name}</option>
+              {/each}
+            </select>
+            <span class="text-[11px] text-zinc-600">
+              Preselected when you hand an issue to an agent. You can still pick a
+              different one each time.
+            </span>
+          </label>
+
+          <label class="flex flex-col gap-1">
+            <span class="text-xs text-zinc-400">Issue prompt</span>
+            <textarea
+              class="h-24 resize-none rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1.5 font-mono text-[11px] text-zinc-200 focus:border-emerald-500 focus:outline-none"
+              placeholder={DEFAULT_ISSUE_PROMPT}
+              value={$settings.behavior.issuePromptTemplate}
+              onchange={(e) =>
+                updateSettings((s) => ({
+                  ...s,
+                  behavior: {
+                    ...s.behavior,
+                    issuePromptTemplate: (e.target as HTMLTextAreaElement).value,
+                  },
+                }))}
+            ></textarea>
+            <span class="text-[11px] text-zinc-600">
+              Typed into the agent when you start work on an issue.
+              <span class="font-mono">{"{number}"}</span>,
+              <span class="font-mono">{"{title}"}</span>,
+              <span class="font-mono">{"{url}"}</span> and
+              <span class="font-mono">{"{body}"}</span> are filled in. Leave empty
+              for the built-in one — and it is always editable before it is sent.
             </span>
           </label>
 

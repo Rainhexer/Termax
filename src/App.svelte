@@ -20,6 +20,7 @@
   } from "./lib/stores";
   import { loadSettings, settingsOpen } from "./lib/settings";
   import { initPrListeners } from "./lib/pr";
+  import { initIssueListeners } from "./lib/issues";
   import { initWorktreeListeners } from "./lib/worktrees";
   import ProjectPicker from "./lib/components/ProjectPicker.svelte";
   import Sidebar from "./lib/components/Sidebar.svelte";
@@ -50,6 +51,9 @@
     initListeners();
     initWorktreeListeners();
     initPrListeners();
+    // After the PR listeners: the issue panel reacts to the gh probe, which
+    // `initPrListeners` is what kicks off.
+    initIssueListeners();
     loadSettings();
     loadProjects();
 

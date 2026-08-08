@@ -205,6 +205,121 @@ export interface PrDetail {
   body: string;
 }
 
+// --- Issues -----------------------------------------------------------------
+
+export type IssueState = "OPEN" | "CLOSED";
+
+/** Why an issue is closed. null while it is open — Rust collapses gh's "" so the
+ *  UI has one "no reason" case rather than two. */
+export type IssueStateReason = "COMPLETED" | "NOT_PLANNED" | "DUPLICATE" | "REOPENED" | null;
+
+/** A milestone as it appears inside an issue. {@link Milestone} is the fuller
+ *  repository-level record, which additionally knows its state and counts. */
+export interface MilestoneRef {
+  number: number;
+  title: string;
+  description: string;
+  /** RFC 3339; null when the milestone has no due date. */
+  dueOn: string | null;
+}
+
+export interface Milestone {
+  number: number;
+  title: string;
+  description: string;
+  state: "open" | "closed";
+  dueOn: string | null;
+  openIssues: number;
+  closedIssues: number;
+}
+
+/** A repository label, with the description the pickers show. Issue rows carry
+ *  the lighter `{ name, color }` shape instead. */
+export interface RepoLabel {
+  name: string;
+  /** Six-digit hex, no leading '#'. */
+  color: string;
+  description: string;
+}
+
+export interface Issue {
+  number: number;
+  title: string;
+  state: IssueState;
+  stateReason: IssueStateReason;
+  author: { login: string };
+  assignees: { login: string }[];
+  labels: { name: string; color: string }[];
+  milestone: MilestoneRef | null;
+  createdAt: string;
+  updatedAt: string;
+  url: string;
+  isPinned: boolean;
+}
+
+export interface IssueListResult {
+  issues: Issue[];
+  /** null on success. A problem is a panel state, not a failed call. */
+  problem: GhProblem | null;
+  /** gh returned exactly the limit, so there is probably more. */
+  truncated: boolean;
+}
+
+export interface IssueComment {
+  id: string;
+  author: { login: string };
+  body: string;
+  createdAt: string;
+  url: string;
+  /** "OWNER" | "MEMBER" | "COLLABORATOR" | "CONTRIBUTOR" | "NONE". */
+  authorAssociation: string;
+  /** Hidden as off-topic/spam/abuse. Rendered collapsed rather than dropped. */
+  isMinimized: boolean;
+  minimizedReason: string;
+}
+
+/** One issue with the fields too expensive to list. The issue's own fields are
+ *  flattened in by Rust, so this is `Issue` plus three keys. */
+export interface IssueDetail extends Issue {
+  body: string;
+  comments: IssueComment[];
+  closedAt: string | null;
+}
+
+/** What to ask GitHub for. Every field is optional; an unset one is not passed,
+ *  so the default is gh's own: open issues, newest first. */
+export interface IssueFilter {
+  state?: "open" | "closed" | "all";
+  labels?: string[];
+  /** A login, or "@me". */
+  assignee?: string;
+  author?: string;
+  /** Milestone number or title. */
+  milestone?: string;
+  /** A GitHub search query, passed through verbatim. */
+  search?: string;
+  limit?: number;
+}
+
+/** Fields to change on an issue. An omitted key means "leave alone", which is
+ *  what lets one call serve a rename, a label toggle and a reassignment. */
+export interface IssueEdit {
+  title?: string;
+  body?: string;
+  addLabels?: string[];
+  removeLabels?: string[];
+  addAssignees?: string[];
+  removeAssignees?: string[];
+  /** Milestone title. `""` detaches it; omitting the key leaves it untouched. */
+  milestone?: string;
+}
+
+/** Reason recorded when closing. "duplicate" additionally needs the issue it
+ *  duplicates, which GitHub stores as a real relationship. */
+export type CloseReason = "completed" | "not planned" | "duplicate";
+
+export type LockReason = "off_topic" | "resolved" | "spam" | "too_heated";
+
 export interface FileDiff {
   original: string;
   modified: string;

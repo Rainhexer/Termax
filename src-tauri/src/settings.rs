@@ -67,6 +67,19 @@ pub struct Behavior {
     /// a new tree of a JS project is broken until something like this runs.
     #[serde(default)]
     pub worktree_setup_command: String,
+    /// Launcher id opened when handing an issue to an agent. Empty means "use
+    /// whatever `pr_launcher_id` resolves to" — the same agent, since wanting
+    /// one tool for issues and another for pull requests is unusual enough that
+    /// it should be opt-in rather than a second thing to configure.
+    #[serde(default)]
+    pub issue_launcher_id: String,
+    /// Prompt typed into the agent when an issue is handed to it.
+    ///
+    /// `{number}`, `{title}`, `{url}` and `{body}` are substituted. Empty means
+    /// the built-in template. Typed rather than executed, like every other
+    /// command Termax puts in a pane.
+    #[serde(default)]
+    pub issue_prompt_template: String,
 }
 
 impl Default for Behavior {
@@ -75,6 +88,8 @@ impl Default for Behavior {
             default_bell: false,
             pr_launcher_id: String::new(),
             worktree_setup_command: String::new(),
+            issue_launcher_id: String::new(),
+            issue_prompt_template: String::new(),
         }
     }
 }

@@ -42,7 +42,30 @@ export interface Behavior {
    *  typically `npm ci`. Worktrees share git objects but not build output, so a
    *  new tree of a JS project is broken until something like this runs. */
   worktreeSetupCommand: string;
+  /** Launcher id opened when handing an issue to an agent; "" falls back to
+   *  {@link Behavior.prLauncherId}, since wanting different agents for issues
+   *  and pull requests is unusual enough to be opt-in. */
+  issueLauncherId: string;
+  /** Prompt typed into the agent when an issue is handed to it. `{number}`,
+   *  `{title}`, `{url}` and `{body}` are substituted; "" uses
+   *  {@link DEFAULT_ISSUE_PROMPT}. */
+  issuePromptTemplate: string;
 }
+
+/** The prompt an agent receives when an issue is handed to it.
+ *
+ *  Deliberately short. A long template is a worse version of the issue itself,
+ *  and the agent can read the repository — what it cannot do is know *which*
+ *  issue it was opened for, so that is the part worth stating. The body is
+ *  included because an agent that has to run `gh issue view` first has already
+ *  spent a turn on something the caller knew. */
+export const DEFAULT_ISSUE_PROMPT = `Work on GitHub issue #{number}: {title}
+
+{url}
+
+{body}
+
+You're on a fresh worktree branched for this issue. Investigate first, then implement.`;
 
 export interface TerminalSettings {
   /** Empty string = auto-detect ($SHELL). */
@@ -90,6 +113,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
     defaultBell: false,
     prLauncherId: "",
     worktreeSetupCommand: "",
+    issueLauncherId: "",
+    issuePromptTemplate: "",
   },
 };
 
