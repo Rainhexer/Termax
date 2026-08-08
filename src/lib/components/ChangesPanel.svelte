@@ -2,7 +2,6 @@
   import {
     changes,
     changesError,
-    checkoutBranch,
     fetchRemote,
     gitBusy,
     gitError,
@@ -26,6 +25,7 @@
     toggleUnstaged,
     trustCurrentFolder,
   } from "../stores";
+  import { branchesElsewhere, refreshGitWorktrees, switchToBranch } from "../worktrees";
   import type { ChangeEntry } from "../types";
 
   let listEl = $state<HTMLDivElement>();
@@ -56,7 +56,11 @@
     branchError = null;
     branchMenuOpen = true;
     try {
-      branchList = await loadBranches();
+      // Re-read the worktree list alongside the branches: a tree added or removed
+      // from a terminal pane since the last refresh would otherwise mark the
+      // wrong rows as living elsewhere. It never throws — see refreshGitWorktrees.
+      const [list] = await Promise.all([loadBranches(), refreshGitWorktrees()]);
+      branchList = list;
     } catch (err) {
       branchList = [];
       branchError = String(err);
@@ -65,7 +69,9 @@
 
   async function pickBranch(name: string) {
     branchMenuOpen = false;
-    await checkoutBranch(name);
+    // Not a plain checkout: a branch another worktree holds is reached by going
+    // to that worktree's tab, because git will not check it out twice.
+    await switchToBranch(name);
   }
 
   let filteredBranches = $derived(
@@ -262,13 +268,21 @@
               </div>
               <div class="max-h-52 overflow-y-auto py-0.5">
                 {#each filteredBranches as b (b)}
+                  <!-- A branch checked out in another worktree cannot be checked
+                       out here at all, so say so before the click: selecting it
+                       goes to that worktree's tab instead. -->
+                  {@const elsewhere = $branchesElsewhere.get(b)}
                   <button
                     class="flex w-full items-center gap-1.5 px-2 py-1 text-left font-mono text-[11px] hover:bg-zinc-800
                       {b === $gitStatus.branch ? 'text-emerald-400' : 'text-zinc-300'}"
+                    title={elsewhere ? `Checked out in ${elsewhere} — go to that tab` : `Switch to ${b}`}
                     onclick={() => pickBranch(b)}
                   >
                     <span class="w-2.5 shrink-0 text-emerald-400">{b === $gitStatus.branch ? "✓" : ""}</span>
                     <span class="min-w-0 flex-1 truncate">{b}</span>
+                    {#if elsewhere}
+                      <span class="shrink-0 text-[10px] text-zinc-500">↗ worktree</span>
+                    {/if}
                   </button>
                 {:else}
                   {#if branchError}
