@@ -76,8 +76,9 @@ export const ipc = {
   stopSession: () => invoke<void>("stop_session"),
   openWorktreeSession: (path: string) => invoke<SessionInfo>("open_worktree_session", { path }),
   closeWorktreeSession: (path: string) => invoke<void>("close_worktree_session", { path }),
-  getChanges: (root?: string) => invoke<ChangeEntry[]>("get_changes", { root }),
-  getGitStatus: (root?: string) => invoke<GitStatus | null>("git_status", { root }),
+  /** Change list and branch state for a root, in one call: they come from the
+   *  same `git status`, and this is the app's most repeated backend work. */
+  getRootGit: (root?: string) => invoke<{ changes: ChangeEntry[]; status: GitStatus | null }>("get_root_git", { root }),
   gitFetch: (root?: string) => invoke<GitStatus>("git_fetch", { root }),
   gitPull: (root?: string) => invoke<string>("git_pull", { root }),
   gitBranches: (root?: string) => invoke<string[]>("git_branches", { root }),

@@ -60,6 +60,10 @@
     // Debounced per root, not globally: with a worktree-bound tab open there are
     // several watchers, and one shared timer would let a busy root starve
     // another's refresh (and refresh the wrong one when it finally fired).
+    //
+    // Short, because the backend now coalesces filesystem notifications before
+    // emitting (see FS_COALESCE in session.rs); this only absorbs the tail.
+    const FS_DEBOUNCE_MS = 150;
     const timers = new Map<string, ReturnType<typeof setTimeout>>();
     const unlisten = listen<{ root: string }>("fs-changed", (event) => {
       const root = event.payload?.root;
@@ -73,7 +77,7 @@
           // The file tree and editor panes only ever show the active root, so a
           // background worktree's churn must not make them reload.
           if (root === get(activeRoot)) fsTick.update((n) => n + 1);
-        }, 400),
+        }, FS_DEBOUNCE_MS),
       );
     });
     const onKeydown = (e: KeyboardEvent) => {

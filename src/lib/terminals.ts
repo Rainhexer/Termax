@@ -75,6 +75,7 @@ function clearRun(paneId: string) {
 export const fileDropPaneId = writable<string | null>(null);
 
 interface Entry {
+  paneId: string;
   term: Terminal;
   fit: FitAddon;
   el: HTMLDivElement;
@@ -82,6 +83,13 @@ interface Entry {
   opening: boolean;
   spawned: boolean;
   exited: boolean;
+  /** Mirrors membership of {@link loadingPanes}. Output arrives thousands of
+   *  times a minute across a screenful of agents and each store write allocates
+   *  a Set and wakes every subscriber, so the veil is only cleared once. */
+  loading: boolean;
+  /** Bumped for every batch of output written to this pane. Pollers use it to
+   *  skip panes whose screen cannot have changed since they last looked. */
+  outputSeq: number;
   /** A line was submitted and its command has not been seen finishing yet. */
   busy: boolean;
   /** performance.now() of the last submitted line / the last PTY output. */
@@ -121,30 +129,42 @@ interface PendingInput {
 const oscBuffers = new Map<string, string>();
 
 // Same, for the OSC 133 status scan (kept separate: it reads the raw chunk
-// before the OSC 52 pass rewrites it).
+// before the OSC 52 pass rewrites it). Only held while a chunk ended on a
+// possibly-unfinished escape sequence, so the common case leaves nothing behind.
 const statusTails = new Map<string, string>();
 
-function addLoading(paneId: string) {
+// A pane waiting to be typed into watches its own output for the moment its
+// program becomes ready (see flushPending). Those watchers live here and are
+// called from the one global output listener: registering a `listen()` per
+// pending pane instead would make every chunk of every pane pay for another IPC
+// callback dispatch.
+const outputHooks = new Map<string, (text: string) => void>();
+
+/** Opening bytes of any OSC sequence. Both scans below can only match inside
+ *  one, so a chunk without this skips them entirely. */
+const OSC_START = "\x1b]";
+
+function addLoading(paneId: string, entry: Entry) {
+  entry.loading = true;
   loadingPanes.update(s => new Set(s).add(paneId));
 }
 
 function removeLoading(paneId: string) {
+  const entry = registry.get(paneId);
+  if (entry) entry.loading = false;
   loadingPanes.update(s => {
+    if (!s.has(paneId)) return s;
     const next = new Set(s);
     next.delete(paneId);
     return next;
   });
 }
 
-function b64ToBytes(b64: string): Uint8Array {
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return bytes;
-}
+const OSC52 = /\x1b\]52;([pc]);([A-Za-z0-9+/=]*?)(?:\x07|\x1b\\)/g;
 
 function processOsc52(paneId: string, text: string): string {
-  const re = /\x1b\]52;([pc]);([A-Za-z0-9+/=]*?)(?:\x07|\x1b\\)/g;
+  const re = OSC52;
+  re.lastIndex = 0;
   let m;
   let lastIndex = 0;
   const parts: string[] = [];
@@ -199,7 +219,11 @@ function scanShellStatus(paneId: string, chunk: string) {
   }
   // Keep only what follows the last match, so a sequence sitting in the tail
   // cannot be counted twice; the slice is long enough to hold a split marker.
-  statusTails.set(paneId, text.slice(Math.max(end, text.length - 24)));
+  // Kept only when it could still hold half of one, so an idle pane holds no
+  // state and the next chunk can skip this scan on the cheap check alone.
+  const tail = text.slice(Math.max(end, text.length - 24));
+  if (tail.includes("\x1b")) statusTails.set(paneId, tail);
+  else statusTails.delete(paneId);
   if (code !== null) finishRun(paneId, code);
 }
 
@@ -221,26 +245,44 @@ function finishRun(paneId: string, exitCode: number | null) {
 
 let listenersReady = false;
 
+/** One entry per pane that produced output in the batch. The backend already
+ *  decoded the bytes, so `data` is text, not base64. */
+interface PtyChunk {
+  pane_id: string;
+  data: string;
+}
+
+function applyOutput(paneId: string, text: string) {
+  const entry = registry.get(paneId);
+  if (!entry) return;
+
+  if (entry.loading) removeLoading(paneId);
+  entry.outputSeq++;
+  noteOutput(entry, text.length);
+  outputHooks.get(paneId)?.(text);
+
+  // The pending buffers still have to be honoured even when this chunk holds no
+  // escape at all: a sequence split across chunks left its opening half behind.
+  const mayHaveOsc = text.includes(OSC_START);
+  if (mayHaveOsc || statusTails.has(paneId)) scanShellStatus(paneId, text);
+
+  let out = text;
+  const carried = oscBuffers.get(paneId);
+  if (carried !== undefined) {
+    oscBuffers.delete(paneId);
+    out = carried + text;
+  }
+  if (carried !== undefined || mayHaveOsc) out = processOsc52(paneId, out);
+  if (out) entry.term.write(out);
+}
+
 export async function initPtyListeners(onExit: (paneId: string) => void) {
   if (listenersReady) return;
   listenersReady = true;
-  await listen<{ pane_id: string; data: string }>("pty-output", (e) => {
-    const entry = registry.get(e.payload.pane_id);
-    if (!entry) return;
-
-    removeLoading(e.payload.pane_id);
-
-    const raw = b64ToBytes(e.payload.data);
-    noteOutput(e.payload.pane_id, raw.length);
-    const chunk = new TextDecoder().decode(raw);
-    scanShellStatus(e.payload.pane_id, chunk);
-
-    let text = oscBuffers.get(e.payload.pane_id) ?? "";
-    oscBuffers.delete(e.payload.pane_id);
-    text += chunk;
-
-    const cleaned = processOsc52(e.payload.pane_id, text);
-    if (cleaned) entry.term.write(cleaned);
+  // One event carries every pane's output for the last few milliseconds — see
+  // the coalescing note in src-tauri/src/pty.rs.
+  await listen<PtyChunk[]>("pty-output", (e) => {
+    for (const chunk of e.payload) applyOutput(chunk.pane_id, chunk.data);
   });
   await listen<{ pane_id: string }>("pty-exit", (e) => {
     const entry = registry.get(e.payload.pane_id);
@@ -355,6 +397,7 @@ function create(paneId: string): Entry {
   el.className = "h-full w-full";
 
   const entry: Entry = {
+    paneId,
     term,
     fit,
     el,
@@ -362,6 +405,8 @@ function create(paneId: string): Entry {
     opening: false,
     spawned: false,
     exited: false,
+    loading: false,
+    outputSeq: 0,
     busy: false,
     submittedAt: 0,
     lastOutputAt: 0,
@@ -469,17 +514,15 @@ function probeForeground(paneId: string, entry: Entry) {
     });
 }
 
-function noteOutput(paneId: string, bytes: number) {
-  const entry = registry.get(paneId);
-  if (!entry) return;
+function noteOutput(entry: Entry, bytes: number) {
   entry.lastOutputAt = performance.now();
   if (!entry.busy) {
-    probeForeground(paneId, entry);
+    probeForeground(entry.paneId, entry);
     return;
   }
   entry.outputSinceSubmit += bytes;
   clearTimeout(entry.quietTimer);
-  entry.quietTimer = setTimeout(() => settleRun(paneId), quietWindow(entry));
+  entry.quietTimer = setTimeout(() => settleRun(entry.paneId), quietWindow(entry));
 }
 
 function noteInput(paneId: string, data: string) {
@@ -514,7 +557,7 @@ export function attach(
     fitPane(paneId);
   } else if (!entry.opening) {
     entry.opening = true;
-    if (launch) addLoading(paneId);
+    if (launch) addLoading(paneId, entry);
     openWhenSized(entry, paneId, cwd, launch);
   }
 }
@@ -637,7 +680,6 @@ function flushPending(paneId: string, launch: string | null) {
   let ready = launch === null;
   let carry = "";
   let settleTimer: ReturnType<typeof setTimeout>;
-  let unlistenOutput: (() => void) | undefined;
   let done = false;
 
   const go = () => {
@@ -645,7 +687,7 @@ function flushPending(paneId: string, launch: string | null) {
     done = true;
     clearTimeout(settleTimer);
     clearTimeout(safetyTimer);
-    unlistenOutput?.();
+    outputHooks.delete(paneId);
     if (queued.execute) runInPane(paneId, queued.text);
     else typeInPane(paneId, queued.text);
   };
@@ -655,26 +697,21 @@ function flushPending(paneId: string, launch: string | null) {
     settleTimer = setTimeout(go, SETTLE_MS);
   };
 
-  const onOutput = (e: { payload: { pane_id: string; data: string } }) => {
-    if (e.payload.pane_id !== paneId || done) return;
+  outputHooks.set(paneId, (text) => {
+    if (done) return;
     if (!ready) {
       // Keep a small tail so the frame marker is still matched if it's split
       // across PTY read chunks; ignore output until the UI actually paints.
-      carry = (carry + new TextDecoder().decode(b64ToBytes(e.payload.data))).slice(-256);
+      carry = (carry + text).slice(-256);
       if (!READY_FRAME.test(carry)) return;
       ready = true;
       carry = "";
     }
     arm();
-  };
+  });
 
   // Shell prints its prompt immediately; start the settle window now for it.
   if (ready) arm();
-
-  // Watch output for readiness + settle
-  listen<{ pane_id: string; data: string }>("pty-output", onOutput).then(fn => {
-    if (done) fn(); else unlistenOutput = fn;
-  });
 
   // Safety: proceed no matter what after SAFETY_MS
   const safetyTimer = setTimeout(go, SAFETY_MS);
@@ -690,6 +727,13 @@ export function detach(paneId: string, host: HTMLElement) {
 export function isAlive(paneId: string): boolean {
   const entry = registry.get(paneId);
   return !!entry && !entry.exited;
+}
+
+/** How many batches of output this pane has received. A poller that remembers
+ *  the value it last saw can skip the pane entirely while this is unchanged:
+ *  nothing has been written, so the screen it would read is the same one. */
+export function outputSeq(paneId: string): number {
+  return registry.get(paneId)?.outputSeq ?? 0;
 }
 
 /** Last `rows` lines of what the pane currently shows, as plain text.
@@ -748,6 +792,7 @@ export function destroyPane(paneId: string) {
   if (!entry) return;
   registry.delete(paneId);
   pendingRun.delete(paneId);
+  outputHooks.delete(paneId);
   oscBuffers.delete(paneId);
   statusTails.delete(paneId);
   clearRun(paneId);

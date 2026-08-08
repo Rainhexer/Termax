@@ -9,6 +9,10 @@ use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 use walkdir::WalkDir;
 
+/// Window over which filesystem notifications for one root are folded into a
+/// single `fs-changed` event. See the note where the watcher is started.
+const FS_COALESCE: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Per-file snapshot/diff cap in bytes; driven by the oversized-limit setting.
 static SNAPSHOT_LIMIT: AtomicU64 = AtomicU64::new(1024 * 1024);
 
@@ -321,6 +325,28 @@ fn start_watcher(
     let signal_common_dir = common_dir.to_path_buf();
     let event_key = root.to_string_lossy().into_owned();
 
+    // A Tauri event costs a script evaluation on the window's event loop — the
+    // same loop that dispatches key presses — so emitting one per filesystem
+    // notification is what turns an agent running a build into visible input
+    // lag: `npm ci` or `cargo build` produces thousands of them a second. The
+    // frontend already debounces, but only after every one of those has been
+    // paid for. Coalesce here instead, on a thread of our own, so a churning
+    // tree costs at most one emit per window.
+    let (dirty_tx, dirty_rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        // Ends when the watcher is dropped and takes the sender with it.
+        while dirty_rx.recv().is_ok() {
+            std::thread::sleep(FS_COALESCE);
+            while dirty_rx.try_recv().is_ok() {}
+            let _ = emit_app.emit(
+                "fs-changed",
+                FsChanged {
+                    root: event_key.clone(),
+                },
+            );
+        }
+    });
+
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         let Ok(event) = res else { return };
         let mut dirty = false;
@@ -347,12 +373,7 @@ fn start_watcher(
             }
         }
         if dirty {
-            let _ = emit_app.emit(
-                "fs-changed",
-                FsChanged {
-                    root: event_key.clone(),
-                },
-            );
+            let _ = dirty_tx.send(());
         }
     })
     .map_err(|e| e.to_string())?;
@@ -374,7 +395,7 @@ fn start_watcher(
     Ok(watcher)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn start_session(
     app: AppHandle,
     manager: tauri::State<SessionManager>,
@@ -414,7 +435,7 @@ pub fn stop_session(manager: tauri::State<SessionManager>) {
 /// anything is watched. The frontend can therefore never induce the backend to
 /// watch or read an arbitrary directory, which mirrors how `fstree::resolve`
 /// refuses paths that escape the project.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_worktree_session(
     app: AppHandle,
     manager: tauri::State<SessionManager>,
@@ -485,7 +506,7 @@ pub fn close_worktree_session(manager: tauri::State<SessionManager>, path: Strin
 }
 
 /// The worktrees of the open project, main tree first.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_worktrees(
     manager: tauri::State<SessionManager>,
 ) -> Result<Vec<git::WorktreeEntry>, String> {
@@ -501,7 +522,7 @@ pub fn list_worktrees(
 ///
 /// With `committish`, the tree is created detached at that commit — the fork-PR
 /// case, where the head branch does not exist in this repository.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn worktree_add(
     manager: tauri::State<SessionManager>,
     path: String,
@@ -523,7 +544,7 @@ pub fn worktree_add(
 /// `force` is only ever passed after the user has explicitly chosen to discard
 /// them. The session is dropped first so its watcher is not left pointing at a
 /// directory being deleted.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn worktree_remove(
     manager: tauri::State<SessionManager>,
     path: String,
@@ -541,7 +562,7 @@ pub fn worktree_remove(
 
 /// Drop administrative records for worktrees whose directories are gone. Never
 /// called automatically — deleting git metadata is the user's decision.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn worktree_prune(
     manager: tauri::State<SessionManager>,
 ) -> Result<Vec<git::WorktreeEntry>, String> {
@@ -552,14 +573,14 @@ pub fn worktree_prune(
 
 /// Default branch of `origin` (e.g. "main"), read from the local symref rather
 /// than the network. Used to prefill the base branch when creating a PR.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_default_branch(manager: tauri::State<SessionManager>) -> Result<Option<String>, String> {
     let root = resolve_git(&manager, None)?;
     Ok(git::default_branch(&root))
 }
 
 /// Create a branch at HEAD and switch to it, returning the new status.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_create_branch(
     manager: tauri::State<SessionManager>,
     branch: String,
@@ -571,7 +592,7 @@ pub fn git_create_branch(
 }
 
 /// Fetch a branch from origin. Used before creating a worktree from a PR head.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_fetch_branch(
     manager: tauri::State<SessionManager>,
     branch: String,
@@ -582,7 +603,7 @@ pub fn git_fetch_branch(
 
 /// Fetch a pull request's head into a local ref and return that ref. For fork
 /// PRs, whose head branch does not exist in this repository.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_fetch_pr_head(
     manager: tauri::State<SessionManager>,
     number: u64,
@@ -592,7 +613,7 @@ pub fn git_fetch_pr_head(
 }
 
 /// Push a branch to origin, setting upstream.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_push(
     manager: tauri::State<SessionManager>,
     branch: String,
@@ -608,7 +629,7 @@ pub fn git_push(
 /// Refuses while a worktree still has the branch checked out: git would fail
 /// anyway, and doing the check here lets the UI say something useful instead of
 /// relaying a confusing error.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_delete_branch(
     manager: tauri::State<SessionManager>,
     branch: String,
@@ -634,7 +655,7 @@ pub fn git_delete_branch(
 
 /// Commit subject lines on this branch but not on `base`, for prefilling a
 /// pull-request body.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_commit_subjects(
     manager: tauri::State<SessionManager>,
     base: String,
@@ -643,23 +664,6 @@ pub fn git_commit_subjects(
 ) -> Result<Vec<String>, String> {
     let root = resolve_git(&manager, root.as_deref())?;
     Ok(git::commit_subjects(&root, &base, limit))
-}
-
-#[tauri::command]
-pub fn git_status(
-    manager: tauri::State<SessionManager>,
-    root: Option<String>,
-) -> Result<Option<git::GitStatus>, String> {
-    let key = manager.key_for(root.as_deref()).ok_or("no active session")?;
-    let session_root = {
-        let guard = manager.sessions.lock().unwrap();
-        let session = guard.get(&key).ok_or("no active session")?;
-        match session.mode {
-            Mode::Git => session.root.clone(),
-            Mode::Snapshot { .. } => return Ok(None),
-        }
-    };
-    git::status(&session_root).map(|(status, _)| Some(status))
 }
 
 /// Root of a git-mode session (the primary when `root` is None), or an error for
@@ -688,7 +692,7 @@ pub(crate) fn git_root(manager: &SessionManager) -> Result<PathBuf, String> {
     resolve_git(manager, None)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_fetch(
     manager: tauri::State<SessionManager>,
     root: Option<String>,
@@ -698,7 +702,7 @@ pub fn git_fetch(
     git::status(&root).map(|(status, _)| status)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_pull(
     manager: tauri::State<SessionManager>,
     root: Option<String>,
@@ -707,7 +711,7 @@ pub fn git_pull(
     git::pull(&root)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_branches(
     manager: tauri::State<SessionManager>,
     root: Option<String>,
@@ -716,7 +720,7 @@ pub fn git_branches(
     git::branches(&root)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_checkout(
     manager: tauri::State<SessionManager>,
     branch: String,
@@ -727,37 +731,82 @@ pub fn git_checkout(
     git::status(&root).map(|(status, _)| status)
 }
 
-#[tauri::command]
-pub fn get_changes(
+/// Everything the change panel needs for one root.
+///
+/// This is one command rather than two because `git status` is the single most
+/// repeated piece of work in the app — it reruns on every filesystem event, for
+/// every open worktree — and the change list and the branch/ahead/behind line
+/// are two halves of the same `git::status` call. Asking for them separately
+/// walked the whole worktree twice and ran six git subprocesses where three do.
+#[derive(Serialize)]
+pub struct RootGit {
+    pub changes: Vec<ChangeEntry>,
+    /// None for a folder tracked by snapshot rather than by git.
+    pub status: Option<git::GitStatus>,
+}
+
+#[tauri::command(async)]
+pub fn get_root_git(
     manager: tauri::State<SessionManager>,
     root: Option<String>,
-) -> Result<Vec<ChangeEntry>, String> {
+) -> Result<RootGit, String> {
     let key = manager.key_for(root.as_deref()).ok_or("no active session")?;
-    let guard = manager.sessions.lock().unwrap();
-    let session = guard.get(&key).ok_or("no active session")?;
 
-    let (snapshot, changed) = match &session.mode {
-        Mode::Git => {
-            let (_, entries) = git::status(&session.root)?;
-            return Ok(entries
-                .into_iter()
-                .map(|e| ChangeEntry {
-                    path: e.path,
-                    status: e.status,
-                    added: e.added,
-                    removed: e.removed,
-                    area: Some(e.area),
-                })
-                .collect());
+    // Resolve under the lock, then release it: git below is slow, and holding
+    // this would block every other session command for its duration.
+    enum Work {
+        Git(PathBuf),
+        Snapshot(PathBuf, Snapshot, Arc<Mutex<HashSet<String>>>),
+    }
+    let work = {
+        let guard = manager.sessions.lock().unwrap();
+        let session = guard.get(&key).ok_or("no active session")?;
+        match &session.mode {
+            Mode::Git => Work::Git(session.root.clone()),
+            Mode::Snapshot { snapshot, changed } => Work::Snapshot(
+                session.root.clone(),
+                snapshot.clone(),
+                Arc::clone(changed),
+            ),
         }
-        Mode::Snapshot { snapshot, changed } => (snapshot, changed),
     };
 
+    match work {
+        Work::Git(root) => {
+            let (status, entries) = git::status(&root)?;
+            Ok(RootGit {
+                changes: entries
+                    .into_iter()
+                    .map(|e| ChangeEntry {
+                        path: e.path,
+                        status: e.status,
+                        added: e.added,
+                        removed: e.removed,
+                        area: Some(e.area),
+                    })
+                    .collect(),
+                status: Some(status),
+            })
+        }
+        Work::Snapshot(root, snapshot, changed) => Ok(RootGit {
+            changes: snapshot_changes(&root, &snapshot, &changed),
+            status: None,
+        }),
+    }
+}
+
+/// Change list for a folder tracked by snapshot: everything the watcher has
+/// flagged, diffed against the contents recorded when the session opened.
+fn snapshot_changes(
+    root: &Path,
+    snapshot: &Snapshot,
+    changed: &Arc<Mutex<HashSet<String>>>,
+) -> Vec<ChangeEntry> {
     let mut entries = Vec::new();
     let changed: Vec<String> = changed.lock().unwrap().iter().cloned().collect();
 
     for rel in changed {
-        let abs = session.root.join(&rel);
+        let abs = root.join(&rel);
         let existed = snapshot.contains_key(&rel);
         let exists = abs.is_file();
         // directories or transient paths
@@ -807,10 +856,10 @@ pub fn get_changes(
     }
 
     entries.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(entries)
+    entries
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_diff(
     manager: tauri::State<SessionManager>,
     path: String,
