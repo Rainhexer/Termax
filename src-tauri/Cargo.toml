@@ -2,7 +2,7 @@
 name = "termax"
 version = "0.1.0"
 description = "Terminal multiplexer and project manager for AI coding agents"
-license = "MIT"
+license = "GPL-3.0-only"
 edition = "2021"
 
 [lib]
