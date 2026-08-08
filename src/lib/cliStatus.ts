@@ -1,7 +1,7 @@
-import { derived, writable } from "svelte/store";
+import { derived, get, writable } from "svelte/store";
 import { attentionPanes } from "./bell";
 import { paneInstances } from "./stores";
-import { isAlive, paneRuns, paneTitles, readPaneTail } from "./terminals";
+import { isAlive, outputSeq, paneRuns, paneTitles, readPaneTail } from "./terminals";
 
 /**
  * Best-effort "what is this coding CLI doing" readout.
@@ -216,6 +216,8 @@ interface Scan {
   timer: number | null;
   /** Text of the last scan, to notice the screen is being redrawn at all. */
   blank: boolean;
+  /** The pane's output counter when this was taken; see {@link scanAll}. */
+  seq: number;
 }
 
 const EMPTY_SCAN: Scan = {
@@ -227,18 +229,19 @@ const EMPTY_SCAN: Scan = {
   taskAt: 0,
   timer: null,
   blank: true,
+  seq: -1,
 };
 
 const scans = writable<Map<string, Scan>>(new Map());
 
-function scanPane(paneId: string, prev: Scan | undefined): Scan {
+function scanPane(paneId: string, prev: Scan | undefined, seq: number): Scan {
   const now = Date.now();
   const before = prev ?? EMPTY_SCAN;
   const tail = readPaneTail(paneId, SCAN_ROWS);
 
   // Nothing drawn (pane never opened, or caught mid-clear): keep what we had
   // rather than reporting a confident "idle" from an empty screen.
-  if (!tail.trim()) return { ...before, blank: true };
+  if (!tail.trim()) return { ...before, blank: true, seq };
 
   const timer = findTimer(tail);
   // A status-line timer that advanced since the last poll means a turn is in
@@ -268,16 +271,46 @@ function scanPane(paneId: string, prev: Scan | undefined): Scan {
     taskAt: task ? now : before.taskAt,
     timer,
     blank: false,
+    seq,
   };
 }
 
-/** Re-scan every launched pane. Cheap: a few dozen lines per pane. */
+/** Whether any of this pane's observations is still inside its grace period, so
+ *  the readout can change on the clock alone even with nothing new drawn. */
+function decaying(scan: Scan, now: number): boolean {
+  return (
+    fresh(scan.workingAt, ACTIVITY_GRACE_MS, now) ||
+    fresh(scan.awaitingAt, ACTIVITY_GRACE_MS, now) ||
+    fresh(scan.taskAt, TASK_TTL_MS, now) ||
+    fresh(scan.modelAt, MODEL_TTL_MS, now)
+  );
+}
+
+/** Re-scan every launched pane whose screen can have changed.
+ *
+ *  A scan is a few dozen `translateToString` calls plus twenty-odd regexes, and
+ *  it ran for every launched pane on every tick whether or not that pane had
+ *  drawn anything — the wrong shape when the whole point is a screenful of
+ *  agents, most of them waiting. The pane's output counter says exactly when a
+ *  re-read could produce a different answer, so a quiet pane costs a lookup. */
 function scanAll(paneIds: string[]) {
-  scans.update((prev) => {
-    const next = new Map<string, Scan>();
-    for (const id of paneIds) next.set(id, scanPane(id, prev.get(id)));
-    return next;
-  });
+  const prev = get(scans);
+  const now = Date.now();
+  const next = new Map<string, Scan>();
+  let changed = prev.size !== paneIds.length;
+  let pending = false;
+  for (const id of paneIds) {
+    const before = prev.get(id);
+    const seq = outputSeq(id);
+    const scan = before && before.seq === seq ? before : scanPane(id, before, seq);
+    next.set(id, scan);
+    if (scan !== before) changed = true;
+    if (decaying(scan, now)) pending = true;
+  }
+  // Publishing on an unchanged scan is not pointless while an observation is
+  // still inside its grace period: those expire on wall-clock time, and the
+  // derived readout only recomputes when one of its inputs fires.
+  if (changed || pending) scans.set(next);
 }
 
 // Poll only while at least one launched pane exists; a plain shell has no CLI

@@ -321,7 +321,7 @@ fn roll_up(raw: Vec<RawCheck>) -> ChecksRollup {
 /// Whether `gh` is installed. Deliberately does no network and needs no repo, so
 /// it is safe to call on project open to decide whether to offer the PR panel at
 /// all.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn gh_probe() -> GhProbe {
     // `gh --version` runs in whatever directory; use the current one rather than
     // requiring a session, since this is called before any repo is known.
@@ -347,7 +347,7 @@ pub fn gh_probe() -> GhProbe {
 /// unauthenticated, non-GitHub remote, no remote) because those are panel states
 /// rather than caller errors. Only "there is no git-mode session" is an `Err` —
 /// the caller should not have asked.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn gh_pr_list(manager: tauri::State<session::SessionManager>) -> Result<PrListResult, String> {
     let root = session::git_root(&manager)?;
     let out = match gh(
@@ -372,7 +372,7 @@ pub fn gh_pr_list(manager: tauri::State<session::SessionManager>) -> Result<PrLi
 /// `gh pr list --state open` drops a PR the instant it merges, which would make
 /// a merged branch look like it never had one. This is the targeted follow-up
 /// used for the handful of branches that have a bound worktree.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn gh_pr_for_branch(
     manager: tauri::State<session::SessionManager>,
     branch: String,
@@ -397,7 +397,7 @@ pub fn gh_pr_for_branch(
 }
 
 /// Merge-readiness detail for one PR: the fields too expensive to list.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn gh_pr_view(
     manager: tauri::State<session::SessionManager>,
     number: u64,
@@ -488,7 +488,7 @@ fn gh_with_stdin(root: &Path, args: &[&str], body: &str) -> Result<Vec<u8>, GhPr
 /// Note this *pushes*: `gh pr create` sets the upstream if the branch has none.
 /// The UI has to say so before the user commits to it — an unexpected push is not
 /// something to discover afterwards.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn gh_pr_create(
     manager: tauri::State<session::SessionManager>,
     title: String,
@@ -510,7 +510,7 @@ pub fn gh_pr_create(
 }
 
 /// Take a draft pull request out of draft.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn gh_pr_ready(
     manager: tauri::State<session::SessionManager>,
     number: u64,
@@ -530,7 +530,7 @@ pub fn gh_pr_ready(
 /// GitHub is the authority and a second opinion computed here could disagree with
 /// the one the user was shown. A refusal comes back as gh's stderr verbatim,
 /// which is where branch-protection and merge-queue detail actually lives.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn gh_pr_merge(
     manager: tauri::State<session::SessionManager>,
     number: u64,
@@ -555,7 +555,7 @@ pub fn gh_pr_merge(
 }
 
 /// Close a pull request without merging it.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn gh_pr_close(
     manager: tauri::State<session::SessionManager>,
     number: u64,
@@ -832,7 +832,7 @@ fn checked(kind: &str, value: &str) -> Result<String, String> {
 }
 
 /// Issues matching `filter`.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn gh_issue_list(
     manager: tauri::State<session::SessionManager>,
     filter: IssueFilter,
@@ -882,7 +882,7 @@ pub fn gh_issue_list(
 }
 
 /// One issue in full: body, comments, and everything the list already had.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn gh_issue_view(
     manager: tauri::State<session::SessionManager>,
     number: u64,
@@ -918,7 +918,7 @@ pub fn gh_issue_view(
 }
 
 /// Open a new issue. Returns its URL.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn gh_issue_create(
     manager: tauri::State<session::SessionManager>,
     title: String,
@@ -957,7 +957,7 @@ pub fn gh_issue_create(
 
 /// Change an existing issue. A no-op edit is refused rather than spawning gh to
 /// do nothing.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn gh_issue_edit(
     manager: tauri::State<session::SessionManager>,
     number: u64,
@@ -1011,7 +1011,7 @@ pub fn gh_issue_edit(
 /// `reason` is "completed" | "not planned" | "duplicate". A duplicate needs
 /// `duplicate_of`, which GitHub records as a real relationship rather than a
 /// comment, so the two are validated together instead of letting gh refuse.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn gh_issue_close(
     manager: tauri::State<session::SessionManager>,
     number: u64,
@@ -1068,7 +1068,7 @@ pub fn gh_issue_close(
 }
 
 /// Reopen a closed issue.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn gh_issue_reopen(
     manager: tauri::State<session::SessionManager>,
     number: u64,
@@ -1095,7 +1095,7 @@ pub fn gh_issue_reopen(
 }
 
 /// Comment on an issue. Returns the new comment's URL.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn gh_issue_comment(
     manager: tauri::State<session::SessionManager>,
     number: u64,
@@ -1130,7 +1130,7 @@ pub fn gh_issue_comment(
 ///
 /// Note the branch lands on the *remote*; the caller has to fetch before it can
 /// build a worktree from it.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn gh_issue_develop(
     manager: tauri::State<session::SessionManager>,
     number: u64,
@@ -1166,7 +1166,7 @@ pub fn gh_issue_develop(
 /// `--list` prints "branch\tURL" per line rather than JSON, so this parses
 /// columns. Used to answer "is someone already working on this?" before
 /// offering to create another branch.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn gh_issue_develop_list(
     manager: tauri::State<session::SessionManager>,
     number: u64,
@@ -1189,7 +1189,7 @@ pub fn gh_issue_develop_list(
 
 /// Pin or unpin an issue. A repository allows at most three pinned issues; gh
 /// reports the refusal, which the caller shows verbatim.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn gh_issue_pin(
     manager: tauri::State<session::SessionManager>,
     number: u64,
@@ -1204,7 +1204,7 @@ pub fn gh_issue_pin(
 }
 
 /// Lock or unlock an issue's conversation.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn gh_issue_lock(
     manager: tauri::State<session::SessionManager>,
     number: u64,
@@ -1231,7 +1231,7 @@ pub fn gh_issue_lock(
 }
 
 /// Move an issue to another repository. Returns the issue's new URL.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn gh_issue_transfer(
     manager: tauri::State<session::SessionManager>,
     number: u64,
@@ -1256,7 +1256,7 @@ pub fn gh_issue_transfer(
 /// `--yes` is passed because there is no tty to confirm on; the confirmation
 /// that matters happens in the UI, which is the only place that can explain that
 /// this is irreversible and needs admin rights.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn gh_issue_delete(
     manager: tauri::State<session::SessionManager>,
     number: u64,
@@ -1269,7 +1269,7 @@ pub fn gh_issue_delete(
 }
 
 /// Labels defined in this repository, for the pickers.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn gh_repo_labels(
     manager: tauri::State<session::SessionManager>,
 ) -> Result<Vec<RepoLabel>, String> {
@@ -1287,7 +1287,7 @@ pub fn gh_repo_labels(
 }
 
 /// Users who can be assigned issues in this repository.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn gh_repo_assignees(
     manager: tauri::State<session::SessionManager>,
 ) -> Result<Vec<GhUser>, String> {
@@ -1304,7 +1304,7 @@ pub fn gh_repo_assignees(
 }
 
 /// Milestones in this repository, open ones first.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn gh_repo_milestones(
     manager: tauri::State<session::SessionManager>,
 ) -> Result<Vec<Milestone>, String> {
@@ -1323,7 +1323,7 @@ pub fn gh_repo_milestones(
 
 /// The signed-in user's login, for the "assigned to me" filter and for deciding
 /// which comments are the user's own. Cheap, but still a network call.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn gh_me(manager: tauri::State<session::SessionManager>) -> Result<Option<String>, String> {
     let root = session::git_root(&manager)?;
     match gh(&root, &["api", "user", "--jq", ".login"]) {

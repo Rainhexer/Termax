@@ -89,7 +89,7 @@ fn git_ignored(root: &Path, rels: &[String]) -> HashSet<String> {
     ignored
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_dir(
     manager: tauri::State<SessionManager>,
     path: String,
@@ -143,7 +143,7 @@ pub fn list_dir(
         .collect())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_file(
     manager: tauri::State<SessionManager>,
     path: String,
@@ -177,7 +177,7 @@ pub fn read_file(
 }
 
 /// Read a file as a base64 `data:` URL for inline image/asset preview.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_file_data_url(
     manager: tauri::State<SessionManager>,
     path: String,
@@ -216,7 +216,7 @@ pub fn read_file_data_url(
     Ok(format!("data:{mime};base64,{b64}"))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn write_file(
     manager: tauri::State<SessionManager>,
     path: String,
@@ -233,7 +233,7 @@ pub fn write_file(
     std::fs::write(&abs, content).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn reveal_in_file_manager(
     manager: tauri::State<SessionManager>,
     path: String,
@@ -275,7 +275,7 @@ pub fn reveal_in_file_manager(
 }
 
 /// Open a file in the OS default application (external editor / viewer).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_in_default_app(
     manager: tauri::State<SessionManager>,
     path: String,

@@ -846,22 +846,35 @@ function patchRootGit(root: string, patch: Partial<RootGit>) {
  *  working tree with the whole git toolbar missing — the most misleading state in
  *  the app, and worse with several roots since the panel could be describing a
  *  root that failed. A failure now clears the entries *and* sets `gitError`. */
+/** Roots with a refresh in flight, so a burst of filesystem events cannot pile
+ *  up several `git status` runs over the same tree. A root flagged while one is
+ *  running is refreshed once more when it lands, which is all any number of
+ *  events in that window can ask for. */
+const refreshing = new Map<string, { again: boolean }>();
+
 export async function refreshChanges(root?: string) {
   const target = root ?? get(activeRoot);
   if (!target) return;
+  const inFlight = refreshing.get(target);
+  if (inFlight) {
+    inFlight.again = true;
+    return;
+  }
+  const state = { again: false };
+  refreshing.set(target, state);
   try {
-    const [entries, status] = await Promise.all([
-      ipc.getChanges(target),
-      get(gitMode) ? ipc.getGitStatus(target) : Promise.resolve(null),
-    ]);
-    setRootGit(target, { changes: entries, status });
+    const { changes, status } = await ipc.getRootGit(target);
+    setRootGit(target, { changes, status });
     // Only clear an error we could have raised here; a fetch/pull error stays
     // visible until its own next attempt.
     if (get(changesError)) changesError.set(null);
   } catch (err) {
     setRootGit(target, EMPTY_ROOT_GIT);
     changesError.set(String(err));
+  } finally {
+    refreshing.delete(target);
   }
+  if (state.again) await refreshChanges(target);
 }
 
 /** Show a transient status line, auto-clearing after a delay unless another

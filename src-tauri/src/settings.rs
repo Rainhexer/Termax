@@ -218,7 +218,7 @@ pub fn save_settings(
 
 /// Write a theme file to a path the user picked in a save dialog. Restricted to
 /// `.json` so a stray call can't clobber arbitrary files.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn write_theme_file(path: String, contents: String) -> Result<(), String> {
     let p = PathBuf::from(&path);
     if p.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -228,7 +228,7 @@ pub fn write_theme_file(path: String, contents: String) -> Result<(), String> {
 }
 
 /// Read a theme file the user picked in an open dialog.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_theme_file(path: String) -> Result<String, String> {
     let p = PathBuf::from(&path);
     if p.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -443,7 +443,7 @@ pub async fn detect_agents() -> Vec<DetectedAgent> {
 /// Open an http(s) URL in the system browser. Detached with its stdio nulled so
 /// the opener process (and the browser it launches) survives independently of
 /// the app and never blocks on an inherited pipe.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_url(url: String) -> Result<(), String> {
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err(format!("refusing to open non-http url: {url}"));
@@ -475,7 +475,7 @@ pub fn open_url(url: String) -> Result<(), String> {
 
 /// True when the command resolves: absolute/relative path to an executable,
 /// or a bare name found on $PATH.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn validate_command(command: String) -> bool {
     let command = command.trim();
     if command.is_empty() {
