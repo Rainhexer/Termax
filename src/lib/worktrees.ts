@@ -31,7 +31,10 @@ import {
   activeRoot,
   activeTabId,
   addPane,
+  checkoutBranch,
   collectTabPanes,
+  flashGitMessage,
+  gitError,
   newTab,
   primaryRoot,
   refreshChanges,
@@ -218,6 +221,36 @@ export function tabForBranch(branch: string): { tabId: string; path: string } | 
   return tab ? { tabId: tab.id, path: entry.path } : null;
 }
 
+/** Compare two roots as paths, not as strings.
+ *
+ *  The same tree reaches us spelled two ways: git prints resolved paths, while a
+ *  path that came from the picker or the persisted workspace may carry a trailing
+ *  separator or predate the backend canonicalizing it. Both spellings are
+ *  compared so a stale one cannot make a tree look like a different one. */
+function samePath(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false;
+  const norm = (p: string) => p.replace(/[\/\\]+$/, "");
+  if (norm(a) === norm(b)) return true;
+  return norm(canonicalRoot(a) ?? a) === norm(canonicalRoot(b) ?? b);
+}
+
+/** Branches checked out in a tree *other* than the one on screen, branch → path.
+ *
+ *  Git allows a branch in exactly one worktree, so these are precisely the
+ *  branches `git checkout` will refuse here. The switcher reads it to mark them
+ *  before the click, and `switchToBranch` reads it to navigate instead. */
+export const branchesElsewhere = derived(
+  [gitWorktrees, activeTabRoot],
+  ([entries, here]) => {
+    const map = new Map<string, string>();
+    for (const entry of entries) {
+      if (!entry.branch || samePath(entry.path, here)) continue;
+      map.set(entry.branch, entry.path);
+    }
+    return map;
+  },
+);
+
 /** Find a tab working on an issue, by the shape of its branch name.
  *
  *  `gh issue develop` names branches `<number>-<slug>`, so a worktree branch
@@ -239,6 +272,68 @@ export function tabForIssue(number: number): { tabId: string; path: string } | n
   if (!record) return null;
   const tab = get(tabs).find((t) => t.worktreeId === record.id);
   return tab ? { tabId: tab.id, path: entry.path } : null;
+}
+
+/** Last path segment, for messages that name a tree without a wall of path. */
+function dirName(path: string): string {
+  const trimmed = path.replace(/[\/\\]+$/, "");
+  const cut = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+  return cut >= 0 ? trimmed.slice(cut + 1) : trimmed;
+}
+
+/** Put `path` on screen: its bound tab if it has one, the project-root tab when
+ *  the tree *is* the project, otherwise a new tab bound to it. */
+async function goToWorktree(branch: string, path: string): Promise<void> {
+  const record = get(worktrees).find((w) => samePath(w.path, path));
+  const bound = record ? get(tabs).find((t) => t.worktreeId === record.id) : undefined;
+  if (bound) {
+    switchTab(bound.id);
+    // The cached status for that root can be minutes old; the panel is about to
+    // show it as the answer to "switch to this branch", so re-read it.
+    await refreshChanges();
+  } else if (samePath(path, get(primaryRoot))) {
+    // The project root is not a worktree record — tabs reach it by having no
+    // `worktreeId` at all — so it needs its own case rather than a registration.
+    const rootTab = get(tabs).find((t) => !t.worktreeId);
+    if (rootTab) {
+      switchTab(rootTab.id);
+      await refreshChanges();
+    } else {
+      newTab({ worktreeId: null, tabTitle: branch });
+    }
+  } else {
+    // Register and create the tab in one synchronous block: an await between the
+    // two would let the reconciler observe a worktree nothing references yet.
+    const id = registerWorktree(path);
+    newTab({ worktreeId: id, tabTitle: branch });
+  }
+  flashGitMessage(`On ${branch} in ${dirName(path)}`);
+}
+
+/** Switch the view to `branch`, wherever it is checked out.
+ *
+ *  Git allows a branch in one worktree only, so `git checkout master` from a
+ *  second tree fails with "fatal: 'master' is already used by worktree at …".
+ *  The switcher used to show that verbatim and stop, which reads as a broken
+ *  branch list — the branch is right there and cannot be selected. But the
+ *  branch *is* checked out somewhere, so the useful move is to go to that tree
+ *  instead of trying to steal the branch from it. Only a branch no tree holds is
+ *  checked out here, exactly as before. */
+export async function switchToBranch(branch: string): Promise<void> {
+  const holder = get(branchesElsewhere).get(branch);
+  if (holder) {
+    await goToWorktree(branch, holder);
+    return;
+  }
+  const failure = await checkoutBranch(branch);
+  if (!failure || !isAlreadyCheckedOut(failure)) return;
+  // Our list was stale — a worktree added from a terminal, say. Ask git again
+  // rather than leaving its wording as the final answer.
+  await refreshGitWorktrees();
+  const late = get(branchesElsewhere).get(branch);
+  if (!late) return;
+  gitError.set(null);
+  await goToWorktree(branch, late);
 }
 
 /** Ensure a worktree exists for `branch` and return its path.

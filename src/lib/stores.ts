@@ -968,10 +968,15 @@ export async function loadBranches(): Promise<string[]> {
 }
 
 /** Switch branches, then refresh the panel. Git's error (e.g. dirty worktree)
- *  is surfaced verbatim on failure. */
-export async function checkoutBranch(branch: string) {
-  if (!get(gitMode) || get(gitBusy)) return;
-  if (get(gitStatus)?.branch === branch) return;
+ *  is surfaced verbatim on failure.
+ *
+ *  Returns that error as well as showing it, because one caller can do better
+ *  than the message: `switchToBranch` turns "already used by worktree at …" into
+ *  a jump to the tree that holds the branch. Everything else can ignore the
+ *  return value — the error is already on screen. */
+export async function checkoutBranch(branch: string): Promise<string | null> {
+  if (!get(gitMode) || get(gitBusy)) return null;
+  if (get(gitStatus)?.branch === branch) return null;
   // Switching branches rewrites the working tree and invalidates every open
   // editor pane. That is fine on a clean tree and worth a warning on a dirty one,
   // where git may refuse or carry changes across.
@@ -981,7 +986,7 @@ export async function checkoutBranch(branch: string) {
       `Switch to ${branch} with ${dirty} uncommitted change${dirty === 1 ? "" : "s"}?\n\nGit will refuse if the switch would overwrite them, and any it can carry across will follow you to the new branch.`,
       { title: "Switch branch?", kind: "warning", okLabel: "Switch", cancelLabel: "Cancel" },
     );
-    if (!ok) return;
+    if (!ok) return null;
   }
   gitBusy.set(true);
   gitError.set(null);
@@ -993,9 +998,12 @@ export async function checkoutBranch(branch: string) {
     if (root) patchRootGit(root, { status: after });
     await refreshChanges();
     flashGitMessage(`On ${branch}`);
+    return null;
   } catch (err) {
     gitMessage.set(null);
-    gitError.set(String(err));
+    const message = String(err);
+    gitError.set(message);
+    return message;
   } finally {
     gitBusy.set(false);
   }
