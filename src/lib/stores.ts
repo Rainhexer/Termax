@@ -512,6 +512,29 @@ export async function openProject(project: Project) {
   }
 }
 
+/** Open a folder the desktop shell asked us to open (KDE task-manager recents,
+ *  Windows jump lists, macOS Dock). Reuses the project when one already exists
+ *  for the path; otherwise it is added exactly like a picker selection. */
+export async function openFolderByPath(raw: string) {
+  const path = raw.replace(/[\\/]+$/, "");
+  if (!path) return;
+  const existing = get(projects).find((p) => p.path.replace(/[\\/]+$/, "") === path);
+  if (existing) {
+    await openProject(existing);
+    return;
+  }
+  const name = path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ?? path;
+  try {
+    const project = await ipc.addProject(name, path);
+    await loadProjects();
+    await openProject(project);
+  } catch (err) {
+    // Usually a stale recent entry whose folder was deleted or unmounted: the
+    // add fails with "not a directory" and there is nothing sensible to open.
+    console.error("open_folder_by_path failed", err);
+  }
+}
+
 /** Trust the currently open folder and re-open it so git activates. */
 export async function trustCurrentFolder() {
   const project = get(activeProject);

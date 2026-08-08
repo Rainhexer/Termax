@@ -1,12 +1,13 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { get } from "svelte/store";
-  import { listen } from "@tauri-apps/api/event";
+  import { emit, listen } from "@tauri-apps/api/event";
   import {
     activeProject,
     activeRoot,
     closeProject,
     openProject,
+    openFolderByPath,
     sessionError,
     layout,
     loadProjects,
@@ -57,6 +58,12 @@
     loadSettings();
     loadProjects();
 
+    // Folders the desktop shell asked us to open (KDE task-manager recents,
+    // Windows jump lists, macOS Dock). The backend only emits after it heard
+    // `frontend-ready`, so emit that only once this listener is registered.
+    const openFolder = listen<string>("open-folder", (event) => openFolderByPath(event.payload));
+    openFolder.then(() => emit("frontend-ready").catch(() => {}));
+
     // Debounced per root, not globally: with a worktree-bound tab open there are
     // several watchers, and one shared timer would let a busy root starve
     // another's refresh (and refresh the wrong one when it finally fired).
@@ -99,6 +106,7 @@
 
     return () => {
       unlisten.then((fn) => fn());
+      openFolder.then((fn) => fn());
       window.removeEventListener("keydown", onKeydown, true);
     };
   });

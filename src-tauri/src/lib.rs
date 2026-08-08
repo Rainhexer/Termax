@@ -1,6 +1,7 @@
 mod fstree;
 mod git;
 mod github;
+mod open_folder;
 mod projects;
 mod pty;
 mod session;
@@ -12,8 +13,15 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // Folders handed to a second instance — the KDE task-manager "recent
+        // folders" entries in issue #20 — are routed back to the running app.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if let Some(path) = open_folder::folder_arg(&argv) {
+                open_folder::handle_open_request(app, path);
+            }
+        }))
         .setup(|app| {
             let store = projects::ProjectStore::load(app.handle());
             app.manage(store);
@@ -21,6 +29,14 @@ pub fn run() {
             app.manage(trust::TrustStore::load(app.handle()));
             app.manage(pty::PtyManager::default());
             app.manage(session::SessionManager::default());
+            app.manage(open_folder::PendingFolder::default());
+            app.manage(open_folder::FrontendReady::default());
+            open_folder::on_frontend_ready(app.handle());
+            // Cold start: a desktop shell launched us with a folder. It is
+            // queued, not emitted — setup runs before the webview can listen.
+            if let Some(path) = open_folder::folder_arg(&std::env::args().collect::<Vec<_>>()) {
+                open_folder::handle_open_request(app.handle(), path);
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -108,6 +124,22 @@ pub fn run() {
             trust::trust_folder,
             trust::revoke_trust,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app, event| {
+        // macOS Dock / "Open with" delivers folders this way; other platforms
+        // hand them to a fresh process, which the single-instance plugin routes
+        // back to this app via argv.
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Opened { urls } = event {
+            for url in urls {
+                if let Ok(path) = url.to_file_path() {
+                    open_folder::handle_open_request(app, path.to_string_lossy().into_owned());
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = (app, event);
+    });
 }
