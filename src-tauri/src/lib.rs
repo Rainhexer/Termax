@@ -15,13 +15,6 @@ use tauri::Manager;
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        // Folders handed to a second instance — the KDE task-manager "recent
-        // folders" entries in issue #20 — are routed back to the running app.
-        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            if let Some(path) = open_folder::folder_arg(&argv) {
-                open_folder::handle_open_request(app, path);
-            }
-        }))
         .setup(|app| {
             let store = projects::ProjectStore::load(app.handle());
             app.manage(store);
@@ -32,8 +25,8 @@ pub fn run() {
             app.manage(open_folder::PendingFolder::default());
             app.manage(open_folder::FrontendReady::default());
             open_folder::on_frontend_ready(app.handle());
-            // Cold start: a desktop shell launched us with a folder. It is
-            // queued, not emitted — setup runs before the webview can listen.
+            // Cold start: a desktop shell launched us with a folder. Since any
+            // number of instances may run, every launch handles its own args.
             if let Some(path) = open_folder::folder_arg(&std::env::args().collect::<Vec<_>>()) {
                 open_folder::handle_open_request(app.handle(), path);
             }
