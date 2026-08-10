@@ -37,6 +37,12 @@
   import MergePrDialog from "./MergePrDialog.svelte";
   import type { PrDetail, PullRequest } from "../types";
 
+  /** Filling the sidebar's swap panel: the tab that selected this component is
+   *  the disclosure, so the header drops its own toggle and the list takes the
+   *  height it is given instead of capping itself. `prPanelOpen` still gates the
+   *  fetching — the sidebar sets it from the selected tab. */
+  let { fill = false }: { fill?: boolean } = $props();
+
   /** Expanded row → its detail, or null while loading. */
   let expanded = $state<number | null>(null);
   let detail = $state<PrDetail | null>(null);
@@ -248,19 +254,26 @@
 </script>
 
 {#if $gitMode && !$restricted}
-  <div class="flex flex-col gap-0.5">
+  <div class="flex min-h-0 flex-col gap-0.5 {fill ? 'flex-1' : ''}">
     <div class="flex items-center gap-1 px-1">
-      <button
-        class="flex items-center gap-1 text-left text-[11px] font-semibold uppercase tracking-wider text-zinc-500 hover:text-zinc-300"
-        title={$prPanelOpen
-          ? "Hide pull requests (also stops checking GitHub)"
-          : "Show pull requests (checks GitHub)"}
-        onclick={() => prPanelOpen.update((v) => !v)}
-      >
-        <span class="text-[9px]">{$prPanelOpen ? "▼" : "▶"}</span>
-        Pull Requests
-        {#if $prPanelOpen && prs.length}<span class="text-zinc-600">({prs.length})</span>{/if}
-      </button>
+      {#if fill}
+        <h2 class="flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+          Pull Requests
+          {#if prs.length}<span class="text-zinc-600">({prs.length})</span>{/if}
+        </h2>
+      {:else}
+        <button
+          class="flex items-center gap-1 text-left text-[11px] font-semibold uppercase tracking-wider text-zinc-500 hover:text-zinc-300"
+          title={$prPanelOpen
+            ? "Hide pull requests (also stops checking GitHub)"
+            : "Show pull requests (checks GitHub)"}
+          onclick={() => prPanelOpen.update((v) => !v)}
+        >
+          <span class="text-[9px]">{$prPanelOpen ? "▼" : "▶"}</span>
+          Pull Requests
+          {#if $prPanelOpen && prs.length}<span class="text-zinc-600">({prs.length})</span>{/if}
+        </button>
+      {/if}
       <div class="flex flex-1 items-center justify-end gap-1">
         {#if $prPanelOpen}
           {#if $prCache.loading}
@@ -354,7 +367,7 @@
         </p>
       {/if}
 
-      <div class="max-h-72 min-h-0 overflow-y-auto">
+      <div class="min-h-0 overflow-y-auto {fill ? 'flex-1' : 'max-h-72'}">
         {#each prs as pr (pr.number)}
           {@const isCurrent = $currentPr?.number === pr.number}
           {@const review = reviewLabel(pr.reviewDecision)}

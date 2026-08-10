@@ -22,6 +22,11 @@
   import type { TreeEntry } from "../types";
   import FileTreeNode from "./FileTreeNode.svelte";
 
+  /** Filling the sidebar's swap panel: the tab that selected this component is
+   *  the disclosure, so the header loses its own toggle and the tree takes the
+   *  height instead of capping itself. */
+  let { fill = false }: { fill?: boolean } = $props();
+
   let open = $state(true);
   let menu = $state<{ x: number; y: number; entry: TreeEntry } | null>(null);
 
@@ -91,15 +96,19 @@
   }
 </script>
 
-<div class="flex min-h-0 flex-col gap-1">
+<div class="flex min-h-0 flex-col gap-1 {fill ? 'flex-1' : ''}">
   <div class="flex items-center gap-1 px-1">
-    <button
-      class="flex items-center gap-1 text-left text-[11px] font-semibold uppercase tracking-wider text-zinc-500 hover:text-zinc-300"
-      onclick={() => (open = !open)}
-    >
-      <span class="text-[9px]">{open ? "▼" : "▶"}</span>
-      Explorer
-    </button>
+    {#if fill}
+      <h2 class="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Explorer</h2>
+    {:else}
+      <button
+        class="flex items-center gap-1 text-left text-[11px] font-semibold uppercase tracking-wider text-zinc-500 hover:text-zinc-300"
+        onclick={() => (open = !open)}
+      >
+        <span class="text-[9px]">{open ? "▼" : "▶"}</span>
+        Explorer
+      </button>
+    {/if}
     <button
       class="flex h-4 w-4 items-center justify-center rounded transition-all duration-200 {$explorerLocked
         ? 'text-zinc-600 hover:bg-zinc-800 hover:text-zinc-400'
@@ -119,8 +128,8 @@
     </button>
   </div>
 
-  {#if open}
-    <div class="max-h-72 min-h-0 overflow-y-auto">
+  {#if open || fill}
+    <div class="min-h-0 overflow-y-auto {fill ? 'flex-1' : 'max-h-72'}">
       {#if root.length === 0}
         <p class="px-1 text-[11px] text-zinc-600">Empty directory.</p>
       {:else}

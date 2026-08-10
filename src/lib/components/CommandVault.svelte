@@ -8,6 +8,10 @@
 
   import type { VaultCommand } from "../types";
 
+  /** Filling the sidebar's swap panel: the saved-command list scrolls in the
+   *  height it is given rather than growing the whole sidebar. */
+  let { fill = false }: { fill?: boolean } = $props();
+
   let name = $state("");
   let command = $state("");
   let type = $state("shell");
@@ -140,7 +144,7 @@
 
 </script>
 
-<div class="flex flex-col gap-1">
+<div class="flex min-h-0 flex-col gap-1 {fill ? 'flex-1' : ''}">
   <div class="flex items-center justify-between px-1">
     <h2 class="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Command Vault</h2>
     <button
@@ -200,6 +204,7 @@
     </form>
   {/if}
 
+  <div class="flex min-h-0 flex-col gap-1 {fill ? 'flex-1 overflow-y-auto' : ''}">
   {#if vault.length === 0 && !adding && !editingId}
     <p class="px-1 text-[11px] text-zinc-600">No saved commands.</p>
   {/if}
@@ -254,5 +259,6 @@
       >✕</button>
     </div>
   {/each}
+  </div>
 </div>
                                                       
