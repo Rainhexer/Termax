@@ -22,6 +22,18 @@ pub struct Project {
     pub commands: Vec<VaultCommand>,
     #[serde(default)]
     pub layout: Option<serde_json::Value>,
+    /// Kept at the front of the home screen regardless of recency. The home
+    /// screen does not scroll, so "always visible" is a real guarantee and not
+    /// just a sort key.
+    #[serde(default)]
+    pub pinned: bool,
+    /// Seconds since the epoch, set when the project is opened. Orders the home
+    /// screen so the folders you actually work in stay on it.
+    ///
+    /// `#[serde(default)]` on both of these is what lets a `projects.json`
+    /// written before they existed load unchanged.
+    #[serde(default, rename = "lastOpened")]
+    pub last_opened: Option<i64>,
 }
 
 #[derive(Default)]
@@ -72,10 +84,77 @@ pub fn add_project(
         path,
         commands: Vec::new(),
         layout: None,
+        pinned: false,
+        // A project you just added is the one you are about to open, so it
+        // sorts as freshly used rather than as never-used.
+        last_opened: Some(now()),
     };
     store.projects.lock().unwrap().push(project.clone());
     store.save()?;
     Ok(project)
+}
+
+/// Seconds since the epoch. Clock skew only ever affects sort order here, so a
+/// pre-1970 clock collapsing to 0 is a fine failure mode.
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Change a project's display name. The folder on disk is untouched: this is a
+/// label, so that two checkouts of the same repository can be told apart.
+#[tauri::command]
+pub fn rename_project(
+    store: tauri::State<ProjectStore>,
+    id: String,
+    name: String,
+) -> Result<(), String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("a project needs a name".into());
+    }
+    {
+        let mut projects = store.projects.lock().unwrap();
+        let project = projects
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or("no such project")?;
+        project.name = name;
+    }
+    store.save()
+}
+
+#[tauri::command]
+pub fn set_project_pinned(
+    store: tauri::State<ProjectStore>,
+    id: String,
+    pinned: bool,
+) -> Result<(), String> {
+    {
+        let mut projects = store.projects.lock().unwrap();
+        let project = projects
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or("no such project")?;
+        project.pinned = pinned;
+    }
+    store.save()
+}
+
+/// Record that a project was just opened, for the home screen's ordering.
+#[tauri::command]
+pub fn touch_project(store: tauri::State<ProjectStore>, id: String) -> Result<(), String> {
+    {
+        let mut projects = store.projects.lock().unwrap();
+        let project = projects
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or("no such project")?;
+        project.last_opened = Some(now());
+    }
+    store.save()
 }
 
 #[tauri::command]

@@ -23,7 +23,7 @@
   import { initPrListeners } from "./lib/pr";
   import { initIssueListeners } from "./lib/issues";
   import { initWorktreeListeners } from "./lib/worktrees";
-  import ProjectPicker from "./lib/components/ProjectPicker.svelte";
+  import HomeScreen from "./lib/components/HomeScreen.svelte";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import TabBar from "./lib/components/TabBar.svelte";
   import TilingLayout from "./lib/components/TilingLayout.svelte";
@@ -175,8 +175,8 @@
       </main>
     </div>
   {:else}
-    <ErrorBoundary label="Project picker">
-      <ProjectPicker />
+    <ErrorBoundary label="Home screen">
+      <HomeScreen />
     </ErrorBoundary>
   {/if}
 

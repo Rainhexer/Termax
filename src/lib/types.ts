@@ -14,6 +14,82 @@ export interface Project {
   /** Persisted workspace. Newer projects store a {@link Workspace}; older ones
    *  store a bare {@link LayoutNode} (single-tab, auto-migrated on open). */
   layout: Workspace | LayoutNode | null;
+  /** Held at the front of the home screen regardless of recency. */
+  pinned?: boolean;
+  /** Seconds since the epoch; absent for projects never opened since the field
+   *  was added. Orders the home screen. */
+  lastOpened?: number | null;
+}
+
+/** The commit a project's HEAD points at. */
+export interface Commit {
+  /** Abbreviated hash. */
+  sha: string;
+  subject: string;
+  author: string;
+  /** Seconds since the epoch. */
+  timestamp: number;
+}
+
+/** Commits on one calendar day, as git formatted it (`YYYY-MM-DD`, local). */
+export interface DayCount {
+  date: string;
+  count: number;
+}
+
+/** Everything the home screen knows about a project without opening it.
+ *
+ *  Read straight from disk and git rather than from a session — the home screen
+ *  is what you see *before* a project is open. Untrusted folders come back with
+ *  `trusted: false` and every git field empty, which the card must render as
+ *  "not asked" rather than as "zero". */
+export interface ProjectStats {
+  id: string;
+  /** The directory is gone: deleted, renamed, or on an unmounted volume. */
+  missing: boolean;
+  trusted: boolean;
+  isRepo: boolean;
+  branch: string | null;
+  detached: boolean;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  staged: number;
+  unstaged: number;
+  untracked: number;
+  /** Unmerged paths — a state to resolve, not a change to keep working past. */
+  conflicts: number;
+  /** Most recent commits, newest first (at most three). Empty for a repo with
+   *  no commits, and for anything not asked (untrusted, missing, not a repo). */
+  recentCommits: Commit[];
+  remoteUrl: string | null;
+  activity: DayCount[];
+  /** Linked worktrees, excluding the main tree. */
+  worktrees: number;
+  /** Stack tags from marker files ("rust", "node", …). */
+  stack: string[];
+  /** Agent instruction files present (CLAUDE.md, AGENTS.md, …). */
+  agentDocs: string[];
+}
+
+export interface SearchHit {
+  projectId: string;
+  projectName: string;
+  /** Project-relative, forward slashes. */
+  path: string;
+  /** 1-based; null for a filename match. */
+  line: number | null;
+  /** The matching line; null for a filename match. */
+  text: string | null;
+}
+
+export interface SearchResult {
+  files: SearchHit[];
+  text: SearchHit[];
+  /** A cap was hit: this is a sample, not the answer. */
+  truncated: boolean;
+  /** Projects that could not be searched, by name (a missing folder). */
+  skipped: string[];
 }
 
 /** A git worktree this project's tabs can run in.

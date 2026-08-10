@@ -17,8 +17,10 @@ import type {
   PrDetail,
   PrListResult,
   Project,
+  ProjectStats,
   PullRequest,
   RepoLabel,
+  SearchResult,
   SessionInfo,
   TreeEntry,
   VaultCommand,
@@ -43,6 +45,11 @@ export const ipc = {
   listProjects: () => invoke<Project[]>("list_projects"),
   addProject: (name: string, path: string) => invoke<Project>("add_project", { name, path }),
   removeProject: (id: string) => invoke<void>("remove_project", { id }),
+  /** Rename the *label*, not the folder. */
+  renameProject: (id: string, name: string) => invoke<void>("rename_project", { id, name }),
+  setProjectPinned: (id: string, pinned: boolean) =>
+    invoke<void>("set_project_pinned", { id, pinned }),
+  touchProject: (id: string) => invoke<void>("touch_project", { id }),
   saveLayout: (id: string, layout: Workspace | LayoutNode | null) =>
     invoke<void>("save_layout", { id, layout }),
   addVaultCommand: (projectId: string, name: string, command: string, terminalType: string) =>
@@ -63,6 +70,14 @@ export const ipc = {
     }),
   removeVaultCommand: (projectId: string, commandId: string) =>
     invoke<void>("remove_vault_command", { projectId, commandId }),
+
+  // Home screen. These run with no session open, so they take a project *id*
+  // and the backend resolves the path from its own store — the frontend never
+  // names a directory. Git only runs on trusted folders (see home.rs).
+  projectStats: (id: string) => invoke<ProjectStats>("project_stats", { id }),
+  searchProjects: (query: string) => invoke<SearchResult>("search_projects", { query }),
+  openProjectFolder: (id: string) => invoke<void>("open_project_folder", { id }),
+  openProjectTerminal: (id: string) => invoke<void>("open_project_terminal", { id }),
 
   // Change tracking.
   //
