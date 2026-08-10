@@ -4,6 +4,7 @@ import { paneInstances } from "./stores";
 import {
   cliTurnEnded,
   isAlive,
+  msSinceInput,
   outputSeq,
   paneRuns,
   paneTitles,
@@ -70,6 +71,18 @@ const TASK_TTL_MS = 30_000;
 /** The model is sticky (a dialog can cover the footer) but not forever: a pane
  *  that gets a new program must not keep the old one's badge. */
 const MODEL_TTL_MS = 10 * 60_000;
+
+/** Consecutive polls that must each see new output before repaint churn alone
+ *  counts as a running turn. One poll is not enough — a single redraw happens
+ *  on a resize or a stray notification — but a CLI that is drawing on every
+ *  700ms tick for this long is animating something. */
+const CHURN_POLLS = 3;
+/** A keystroke echoes back as output, so churn is only the program's own work
+ *  once the user has been quiet for longer than a fast typist's gap. */
+const INPUT_QUIET_MS = 1200;
+/** Churn is the weakest of the working signals, so it decays fastest: a CLI
+ *  that stops drawing has stopped working, whatever its footer still says. */
+const CHURN_GRACE_MS = 1500;
 
 // A command is in flight: coding CLIs print an interrupt hint next to their
 // spinner for as long as they are generating or running a tool.
@@ -225,6 +238,10 @@ interface Scan {
   blank: boolean;
   /** The pane's output counter when this was taken; see {@link scanAll}. */
   seq: number;
+  /** Polls in a row that saw new output with no keystroke behind it. */
+  churn: number;
+  /** Last time {@link churn} reached {@link CHURN_POLLS}. */
+  churnAt: number;
 }
 
 const EMPTY_SCAN: Scan = {
@@ -237,6 +254,8 @@ const EMPTY_SCAN: Scan = {
   timer: null,
   blank: true,
   seq: -1,
+  churn: 0,
+  churnAt: 0,
 };
 
 const scans = writable<Map<string, Scan>>(new Map());
@@ -279,6 +298,10 @@ function scanPane(paneId: string, prev: Scan | undefined, seq: number): Scan {
     timer,
     blank: false,
     seq,
+    // Churn is counted by the caller, which is the only place that knows
+    // whether the poll before this one also saw new output.
+    churn: before.churn,
+    churnAt: before.churnAt,
   };
 }
 
@@ -286,6 +309,7 @@ function scanPane(paneId: string, prev: Scan | undefined, seq: number): Scan {
  *  the readout can change on the clock alone even with nothing new drawn. */
 function decaying(scan: Scan, now: number): boolean {
   return (
+    fresh(scan.churnAt, CHURN_GRACE_MS, now) ||
     fresh(scan.workingAt, ACTIVITY_GRACE_MS, now) ||
     fresh(scan.awaitingAt, ACTIVITY_GRACE_MS, now) ||
     fresh(scan.taskAt, TASK_TTL_MS, now) ||
@@ -309,7 +333,18 @@ function scanAll(paneIds: string[]) {
   for (const id of paneIds) {
     const before = prev.get(id);
     const seq = outputSeq(id);
-    const scan = before && before.seq === seq ? before : scanPane(id, before, seq);
+    const drew = !before || before.seq !== seq;
+    // Repaint churn: a CLI that keeps drawing while nobody is typing is running
+    // a turn, whatever its footer says. This is the signal that catches the
+    // states the text heuristics miss — a spinner glyph we do not know, a
+    // wrapped status line, a tool whose output has pushed the hint off-screen.
+    const selfDrawn = drew && !!before && msSinceInput(id) > INPUT_QUIET_MS;
+    const churn = selfDrawn ? before.churn + 1 : 0;
+    const churnAt = churn >= CHURN_POLLS ? now : (before?.churnAt ?? 0);
+
+    const base = drew ? scanPane(id, before, seq) : (before as Scan);
+    const scan =
+      base.churn === churn && base.churnAt === churnAt ? base : { ...base, churn, churnAt };
     next.set(id, scan);
     if (scan !== before) changed = true;
     if (decaying(scan, now)) pending = true;
@@ -369,6 +404,11 @@ export const cliStatus = derived(
       } else if (scanned && fresh(scan.awaitingAt, ACTIVITY_GRACE_MS, now)) {
         activity = "awaiting";
       } else if (scanned && fresh(scan.workingAt, ACTIVITY_GRACE_MS, now)) {
+        activity = "working";
+      } else if (scan && fresh(scan.churnAt, CHURN_GRACE_MS, now)) {
+        // Not gated on `scanned`: a pane caught mid-clear reads blank, and a
+        // blank read is exactly when the text heuristics have nothing to say
+        // and the fact that it is redrawing is all we have.
         activity = "working";
       } else if (run?.state === "failed") {
         activity = "failed";
@@ -475,6 +515,22 @@ export function activityLabel(activity: CliActivity): string {
       return "error";
     default:
       return "idle";
+  }
+}
+
+/** Second line for a pane with nothing better to say. The pane's own title is
+ *  already on the row above, so repeating it ("Claude Code" over "Claude Code")
+ *  spends a line to say nothing — describe the state instead. */
+export function activitySubtitle(activity: CliActivity): string {
+  switch (activity) {
+    case "working":
+      return "working…";
+    case "awaiting":
+      return "waiting for your answer";
+    case "failed":
+      return "last command failed";
+    default:
+      return "no task running";
   }
 }
 
