@@ -19,8 +19,8 @@
   import { prCache, prPanelOpen } from "../pr";
   import { enabledLaunchers, launcherById, settings, settingsOpen, updateSettings } from "../settings";
   import type { Launcher } from "../settings";
-  import { activityLabel, activityTitle, cliStatus, loudest, statusFor } from "../cliStatus";
-  import type { CliActivity } from "../cliStatus";
+  import { activityLabel, activitySubtitle, activityTitle, cliStatus, loudest, statusFor } from "../cliStatus";
+  import type { CliActivity, CliStatus } from "../cliStatus";
   import CommandVault from "./CommandVault.svelte";
   import PullRequests from "./PullRequests.svelte";
   import Issues from "./Issues.svelte";
@@ -82,6 +82,17 @@
   /** Loudest state among a launcher's panes, for its badge. */
   const groupActivity = (instances: PaneInstance[]): CliActivity =>
     loudest(instances.map((i) => statusFor($cliStatus, i.paneId).activity));
+
+  /** The instance row's second line. The detected task first; then the tab it
+   *  lives in, but only when that adds something — a tab named after the
+   *  launcher that opened it would just echo the title on the row above; and
+   *  failing both, a description of the state. */
+  function subtitleOf(inst: PaneInstance, status: CliStatus): string {
+    if (status.task) return status.task;
+    const tab = inst.tabTitle.trim();
+    if (tab && tab.toLowerCase() !== inst.title.trim().toLowerCase()) return tab;
+    return activitySubtitle(status.activity);
+  }
 
   function dotClass(activity: CliActivity): string {
     switch (activity) {
@@ -353,7 +364,7 @@
                         <button
                           class="flex w-full flex-col gap-0.5 px-2 py-1 text-left hover:bg-zinc-800/70"
                           class:bg-zinc-800={$focusedPaneId === inst.paneId}
-                          title={`${inst.title} — ${activityTitle(status.activity)}\n↳ ${inst.tabTitle}${status.model ? `\n↳ ${status.model}` : ""}`}
+                          title={`${inst.title} — ${activityTitle(status.activity)}\n↳ ${subtitleOf(inst, status)}${status.model ? `\n↳ ${status.model}` : ""}`}
                           onclick={() => revealPane(inst.paneId)}
                         >
                           <span class="flex w-full items-center gap-1.5">
@@ -371,7 +382,7 @@
                                  another tab keeps the shell it already had. -->
                             <WorktreeChip root={inst.root} compact />
                             <span class="min-w-0 flex-1 truncate text-[10px] text-zinc-500">
-                              {status.task ?? inst.tabTitle}
+                              {subtitleOf(inst, status)}
                             </span>
                             {#if status.model}
                               <span class="shrink-0 rounded bg-zinc-800 px-1 font-mono text-[9px] text-zinc-400" title="Model in use">

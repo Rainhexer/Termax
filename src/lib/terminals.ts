@@ -95,6 +95,10 @@ interface Entry {
   /** performance.now() of the last submitted line / the last PTY output. */
   submittedAt: number;
   lastOutputAt: number;
+  /** performance.now() of the last keystroke sent to the PTY, newline or not.
+   *  Typing echoes back as output, so any "the program is repainting on its
+   *  own" signal has to be able to rule the user out. */
+  lastInputAt: number;
   /** Bytes the PTY has produced since that line was submitted. */
   outputSinceSubmit: number;
   /** The pane's program has emitted OSC 133 at least once, so its "finished"
@@ -410,6 +414,7 @@ function create(paneId: string): Entry {
     busy: false,
     submittedAt: 0,
     lastOutputAt: 0,
+    lastInputAt: 0,
     outputSinceSubmit: 0,
     shellIntegration: false,
     foregroundKnown: false,
@@ -529,6 +534,7 @@ function noteInput(paneId: string, data: string) {
   const entry = registry.get(paneId);
   if (!entry) return;
   bell.clearAttention(paneId);
+  entry.lastInputAt = performance.now();
   if (!data.includes("\r") && !data.includes("\n")) return;
   entry.busy = true;
   entry.submittedAt = performance.now();
@@ -736,12 +742,25 @@ export function outputSeq(paneId: string): number {
   return registry.get(paneId)?.outputSeq ?? 0;
 }
 
+/** Milliseconds since this pane last received a keystroke, or Infinity if it
+ *  never has. Lets a caller tell the program's own repaints apart from the echo
+ *  of someone typing into it. */
+export function msSinceInput(paneId: string): number {
+  const entry = registry.get(paneId);
+  if (!entry || entry.lastInputAt === 0) return Infinity;
+  return performance.now() - entry.lastInputAt;
+}
+
 /** Last `rows` lines of what the pane currently shows, as plain text.
  *  For a full-screen TUI (claude/opencode) the active buffer is the alternate
  *  screen, so this is exactly the live UI — no stale scrollback mixed in. */
 export function readPaneTail(paneId: string, rows = 24): string {
+  // Deliberately not gated on `opened`: output is written to the xterm instance
+  // whether or not it is currently homed in a DOM node, so a pane sitting in a
+  // background tab has a perfectly readable buffer — and refusing to read it is
+  // what made the sidebar report "idle" for agents working off-screen.
   const entry = registry.get(paneId);
-  if (!entry?.opened) return "";
+  if (!entry) return "";
   const buf = entry.term.buffer.active;
   const end = buf.baseY + entry.term.rows;
   const start = Math.max(0, end - rows);
