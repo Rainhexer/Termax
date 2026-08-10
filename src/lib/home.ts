@@ -92,6 +92,7 @@ const EMPTY_STATS: ProjectStats = {
   activity: [],
   worktrees: 0,
   stack: [],
+  extensions: [],
   agentDocs: [],
 };
 

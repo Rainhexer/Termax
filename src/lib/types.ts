@@ -37,6 +37,17 @@ export interface DayCount {
   count: number;
 }
 
+/** Working-tree bytes carrying one file extension.
+ *
+ *  Raw extensions rather than language names: the extension→language table
+ *  lives in `lib/languages.ts` so colours, monograms and "is this even code"
+ *  are decided in one place. */
+export interface ExtBytes {
+  /** Lowercased, no dot ("rs", "ts"). */
+  ext: string;
+  bytes: number;
+}
+
 /** Everything the home screen knows about a project without opening it.
  *
  *  Read straight from disk and git rather than from a session — the home screen
@@ -68,6 +79,8 @@ export interface ProjectStats {
   worktrees: number;
   /** Stack tags from marker files ("rust", "node", …). */
   stack: string[];
+  /** Bytes per file extension, biggest first; empty when git was not asked. */
+  extensions: ExtBytes[];
   /** Agent instruction files present (CLAUDE.md, AGENTS.md, …). */
   agentDocs: string[];
 }

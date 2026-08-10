@@ -13,11 +13,16 @@
   let {
     projects,
     stats,
+    compact = false,
     onfocusproject,
   }: {
     projects: Project[];
     /** Stats that have arrived; the tiles are meaningful while still filling in. */
     stats: ProjectStats[];
+    /** One line instead of four tiles. On a short window the tiles wrap into a
+     *  block deeper than the project grid they are supposed to summarize, and
+     *  the grid is the screen — so the strip gives way rather than the cards. */
+    compact?: boolean;
     /** Jump to the first project needing attention. */
     onfocusproject: (id: string) => void;
   } = $props();
@@ -90,7 +95,23 @@
   );
 </script>
 
-<div class="grid grid-cols-4 gap-2">
+{#if compact}
+  <!-- The same four answers, one line, no pictures. -->
+  <div class="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[11px] text-zinc-500">
+    <span>
+      <span class={attention.length ? (conflicts > 0 ? "text-red-300" : "text-amber-300") : "text-emerald-400"}
+      >{attention.length}</span> of {projects.length} need attention
+    </span>
+    <span><span class="text-zinc-200">{changes}</span> uncommitted</span>
+    <span class="text-blue-400" title="{ahead} to push, {behind} to pull">↑{ahead} ↓{behind}</span>
+    <span><span class="text-zinc-200">{commits}</span> commits · 28d</span>
+    <span class="ml-auto"><span class="text-emerald-400">{agentReady}</span> agent-ready</span>
+  </div>
+{:else}
+<!-- `auto-fit` rather than four fixed columns: in a portrait window four tiles
+     of this density squeeze into unreadable slivers, and the honest answer is
+     to let them wrap to two columns and then to one. -->
+<div class="grid gap-2.5" style="grid-template-columns: repeat(auto-fit, minmax(210px, 1fr))">
   <!-- Attention. Styled loudest on purpose: it is the only tile that ever
        asks you to do something. -->
   <div
@@ -162,27 +183,31 @@
     </p>
   </div>
 
-  <!-- Four weeks of commits across every project. -->
+  <!-- Four weeks of commits across every project. The grid is laid out wide —
+       a week per row, a day per square — because the tile is wide, and it is
+       captioned, because a block of shaded squares with nothing to read is a
+       decoration until you are told what it counts. -->
   <div class="rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2">
-    <p class="font-mono text-[10px] uppercase tracking-wider text-zinc-500">commits · 28d</p>
+    <p class="font-mono text-[10px] uppercase tracking-wider text-zinc-500">commit activity</p>
     <div class="mt-0.5 flex items-baseline gap-1.5">
       <span class="text-2xl font-bold leading-none text-zinc-100">{commits}</span>
       <span class="text-[11px] text-zinc-500">
+        commits in 28d ·
         {#if lastActive === null}
-          no activity
+          none yet
         {:else if lastActive === 0}
-          today
+          last today
         {:else}
           last {lastActive}d ago
         {/if}
       </span>
     </div>
-    <div class="mt-1.5">
-      <ActivityGrid {series} accent="emerald" cell={4} gap={1} />
+    <div class="mt-2 flex items-end justify-between gap-3">
+      <ActivityGrid {series} accent="emerald" cell={8} gap={2} weekdays legend />
+      <p class="pb-0.5 text-right font-mono text-[10px] leading-snug text-zinc-500">
+        best day<br /><span class="text-zinc-300">{best}</span> · lvl {heatLevel(best)}
+      </p>
     </div>
-    <p class="mt-1 font-mono text-[10px] text-zinc-500">
-      best day {best} · level {heatLevel(best)}
-    </p>
   </div>
 
   <!-- What this app is for: how much of the portfolio an agent can be pointed
@@ -218,3 +243,4 @@
     </p>
   </div>
 </div>
+{/if}

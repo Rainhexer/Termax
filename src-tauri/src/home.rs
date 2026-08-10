@@ -19,6 +19,7 @@ use crate::session::IGNORED_DIRS;
 use crate::trust::TrustStore;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use walkdir::WalkDir;
@@ -81,6 +82,28 @@ const STACK_MARKERS: &[(&str, &str)] = &[
     ("docker-compose.yml", "docker"),
 ];
 
+/// How many of a project's files are weighed when measuring its language mix.
+/// A checkout large enough to pass this is measured from a 20 000-file sample,
+/// which lands on the same two or three languages the whole tree would.
+const EXT_SAMPLE_LIMIT: usize = 20_000;
+
+/// Extensions kept in the answer. Well past the two or three a card shows, so
+/// the frontend's language table still has something to recognize in a project
+/// whose biggest files are lockfiles and fixtures.
+const EXT_KEEP: usize = 40;
+
+/// Bytes of working-tree content carrying one file extension.
+///
+/// Deliberately *not* resolved to a language name here: which extensions count
+/// as code, and what colour and monogram each one gets, is one table in
+/// `lib/languages.ts`. This half only measures.
+#[derive(Serialize, Clone)]
+pub struct ExtBytes {
+    /// Lowercased, without the dot ("rs", "ts"). Extensionless files are skipped.
+    pub ext: String,
+    pub bytes: u64,
+}
+
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Commit {
@@ -136,6 +159,9 @@ pub struct ProjectStats {
     pub worktrees: usize,
     /// Stack tags derived from marker files in the root.
     pub stack: Vec<String>,
+    /// Working-tree bytes per file extension, biggest first. Empty for anything
+    /// not asked (untrusted, missing, not a repo).
+    pub extensions: Vec<ExtBytes>,
     /// Which of {@link AGENT_DOCS} exist, by file name.
     pub agent_docs: Vec<String>,
 }
@@ -269,6 +295,49 @@ fn activity(root: &Path) -> Vec<DayCount> {
     days
 }
 
+/// What this project is *written in*, measured rather than guessed.
+///
+/// Bytes, not file counts: one four-thousand-line Rust module says more about a
+/// checkout than forty one-line JSON fixtures, and a file count says the
+/// opposite. Only files git knows about are weighed, so `node_modules`,
+/// `target/` and every other ignored directory are out for free — which is also
+/// what keeps this cheap enough to run for every project on the home screen.
+fn extension_mix(root: &Path) -> Vec<ExtBytes> {
+    aggregate_extensions(root, git_files(root))
+}
+
+/// The weighing half of {@link extension_mix}, split out so it can be tested
+/// against a plain directory instead of a fixture repository.
+fn aggregate_extensions(root: &Path, files: Vec<String>) -> Vec<ExtBytes> {
+    let mut totals: HashMap<String, u64> = HashMap::new();
+    for rel in files.into_iter().take(EXT_SAMPLE_LIMIT) {
+        let Some(ext) = Path::new(&rel).extension().and_then(|e| e.to_str()) else {
+            continue;
+        };
+        // A long "extension" is a dotted filename, not a language.
+        if ext.is_empty() || ext.len() > 12 {
+            continue;
+        }
+        // Symlinks and stale index entries: `metadata` follows and fails, which
+        // is the same answer as "not a file we can weigh".
+        let Ok(meta) = fs::metadata(root.join(&rel)) else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        *totals.entry(ext.to_ascii_lowercase()).or_default() += meta.len();
+    }
+    let mut out: Vec<ExtBytes> = totals
+        .into_iter()
+        .map(|(ext, bytes)| ExtBytes { ext, bytes })
+        .collect();
+    // Ties broken by name so a project's chips do not reshuffle between reads.
+    out.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.ext.cmp(&b.ext)));
+    out.truncate(EXT_KEEP);
+    out
+}
+
 fn detect_markers(root: &Path) -> (Vec<String>, Vec<String>) {
     let mut stack: Vec<String> = Vec::new();
     for (file, tag) in STACK_MARKERS {
@@ -332,6 +401,7 @@ pub fn project_stats(
     stats.worktrees = git::worktrees(&root)
         .map(|list| list.iter().filter(|w| !w.is_main).count())
         .unwrap_or(0);
+    stats.extensions = extension_mix(&root);
     Ok(stats)
 }
 
@@ -736,6 +806,36 @@ mod tests {
             docs.contains(&"copilot-instructions.md".to_string()),
             "nested agent docs are labelled by file name: {docs:?}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extensions_are_weighed_by_bytes_not_by_file_count() {
+        let dir = std::env::temp_dir().join("termax-home-extensions");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/big.rs"), "x".repeat(4000)).unwrap();
+        std::fs::write(dir.join("a.json"), "1").unwrap();
+        std::fs::write(dir.join("b.json"), "2").unwrap();
+        std::fs::write(dir.join("c.json"), "3").unwrap();
+        std::fs::write(dir.join("LICENSE"), "no extension").unwrap();
+
+        let mix = aggregate_extensions(
+            &dir,
+            vec![
+                "src/big.rs".into(),
+                "a.json".into(),
+                "b.json".into(),
+                "c.json".into(),
+                "LICENSE".into(),
+                "gone.rs".into(), // stale index entry
+            ],
+        );
+        assert_eq!(mix[0].ext, "rs", "one big file outweighs three small ones");
+        assert_eq!(mix[0].bytes, 4000, "a missing file contributes nothing");
+        assert_eq!(mix[1].ext, "json");
+        assert_eq!(mix[1].bytes, 3, "same extension is summed across files");
+        assert_eq!(mix.len(), 2, "extensionless files are skipped");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -2,9 +2,14 @@
   /** One project, drawn as a folder.
    *
    *  The card has to answer "what state did I leave this in?" before you open
-   *  it, so every decoration carries data: the paper slips peeking out of the
-   *  folder are the last three commits, the grid is four weeks of activity, and
-   *  the counters are the working tree. Nothing here is a placeholder shape. */
+   *  it, so every mark on it carries data: the chips are the languages the
+   *  checkout is actually made of, the grid is four weeks of commits, and the
+   *  counters are the working tree. Nothing here is a placeholder shape.
+   *
+   *  The card does not reflow. Its slot is a fixed aspect ratio (see
+   *  HomeScreen) and the three bands below — identity, signals, flap — are laid
+   *  out top-to-bottom with fixed room, so a project's numbers stay in the same
+   *  place at every window size instead of drifting as the grid resizes. */
   import {
     ACCENT_CLASSES,
     accentFor,
@@ -15,14 +20,15 @@
     relativeTime,
     repoSubPage,
   } from "../home";
+  import { topLanguages } from "../languages";
   import type { Project, ProjectStats } from "../types";
   import ActivityGrid from "./ActivityGrid.svelte";
+  import LangMark from "./LangMark.svelte";
 
   let {
     project,
     stats,
     pending = false,
-    height,
     renaming = false,
     onopen,
     onmenu,
@@ -34,8 +40,6 @@
     project: Project;
     stats?: ProjectStats;
     pending?: boolean;
-    /** Measured slot height; the card degrades rather than overflowing. */
-    height: number;
     renaming?: boolean;
     onopen: () => void;
     onmenu: (e: MouseEvent) => void;
@@ -48,27 +52,13 @@
   const accent = $derived(accentFor(project.path));
   const tone = $derived(ACCENT_CLASSES[accent]);
 
-  /** Two degradation steps rather than a scrollbar: the home screen fits on one
-   *  screen by dropping detail, in the order you'd drop it yourself. */
-  const compact = $derived(height < 158);
-  const tiny = $derived(height < 128);
-
-  /** The flap is a fixed height, not a percentage: its contents are two rows of
-   *  fixed-size text, so a percentage either starves them on a short card or
-   *  leaves a band of nothing on a tall one. Whatever height is left over goes
-   *  to the identity zone, which has something to do with it — one more commit. */
-  const flapHeight = $derived(tiny ? 40 : compact ? 46 : 56);
-
   const dirty = $derived(dirtyCount(stats));
   const series = $derived(activitySeries(stats?.activity ?? []));
   const commits = $derived(stats?.recentCommits ?? []);
-  const commit = $derived(commits[0] ?? null);
-
-  /** How many commit lines the identity zone can hold: its height, less the
-   *  name and path, divided by a line. */
-  const commitLines = $derived(
-    Math.max(0, Math.min(commits.length, Math.floor((height - 8 - flapHeight - 34) / 14))),
-  );
+  /** Two lines, always. A count derived from the measured height is what used
+   *  to make two identical projects disagree about how much history they had. */
+  const shown = $derived(commits.slice(0, 2));
+  const languages = $derived(topLanguages(stats?.extensions ?? []));
 
   /** The one-word verdict, and its colour. Order is severity: a conflict
    *  outranks being behind, which outranks having edits.
@@ -87,14 +77,7 @@
     return { glyph: "✓", label: "clean", cls: "text-emerald-400" };
   });
 
-  /** Paper slips = recent commits. Three of them when there is history, one
-   *  hollow slip when there is not, so the folder silhouette survives an empty
-   *  or untrusted project. */
-  const slips = $derived(commits.length ? commits.map((_, i) => i) : [0]);
-
-  const host = $derived(
-    stats?.remoteUrl ? stats.remoteUrl.replace(/^https:\/\//, "") : null,
-  );
+  const host = $derived(stats?.remoteUrl ? stats.remoteUrl.replace(/^https:\/\//, "") : null);
   const issuesUrl = $derived(repoSubPage(stats?.remoteUrl ?? null, "issues"));
   const pullsUrl = $derived(repoSubPage(stats?.remoteUrl ?? null, "pulls"));
 
@@ -120,7 +103,7 @@
     }
   }
 
-  /** Chip clicks must not also open the project. */
+  /** Button clicks inside the card must not also open the project. */
   function chip(action: () => void) {
     return (e: MouseEvent) => {
       e.stopPropagation();
@@ -151,223 +134,201 @@
            {tone.tab}"
   ></div>
 
-  <!-- Folder back: everything else stacks on this. -->
+  <!-- Folder back. A column, so every band gets the room it asked for and the
+       flap is pinned to the bottom without absolute positioning. -->
   <div
-    class="absolute inset-x-0 bottom-0 top-2 overflow-hidden rounded-lg rounded-tl-none
-           border border-zinc-800 bg-gradient-to-b from-zinc-800 to-zinc-900 shadow-lg
-           transition-colors group-hover:border-zinc-700 {tone.glow}"
+    class="absolute inset-x-0 bottom-0 top-2 flex flex-col justify-between overflow-hidden
+           rounded-lg rounded-tl-none border border-zinc-800 bg-gradient-to-b from-zinc-800
+           to-zinc-900 shadow-lg transition-colors group-hover:border-zinc-700 {tone.glow}"
   >
-    <!-- Commit slips: the last commits, peeking out from behind the flap the
-         way paper does out of a folder. Sized to tuck under it, so they read as
-         texture from across the room and as "there is history here" up close. -->
-    <div class="pointer-events-none absolute right-2 top-1.5 h-9 w-11">
-      {#each slips as index (index)}
-        <div
-          class="absolute right-0 top-0 h-8 w-10 rounded-[2px] border
-                 {commit
-            ? 'border-zinc-500/50 bg-zinc-300/70'
-            : 'border-dashed border-zinc-700 bg-transparent'}"
-          style="transform: rotate({-7 + index * 6}deg) translateX({index * -3}px);
-                 z-index: {slips.length - index}"
-        >
-          {#if commit && index === 0}
-            <div class="flex flex-col gap-[3px] p-1.5">
-              <div class="h-px w-6 rounded bg-zinc-500/70"></div>
-              <div class="h-px w-7 rounded bg-zinc-500/50"></div>
-              <div class="h-px w-4 rounded bg-zinc-500/50"></div>
-            </div>
+    <!-- Identity. What you read first, on its own with nothing beside it. -->
+    <div class="shrink-0 px-4 pt-2.5">
+      {#if renaming}
+        <!-- svelte-ignore a11y_autofocus -->
+        <input
+          class="w-full rounded border border-emerald-500/60 bg-zinc-950 px-2 py-1 text-[15px]
+                 font-semibold text-zinc-100 outline-none"
+          autofocus
+          bind:value={renameValue}
+          onclick={(e) => e.stopPropagation()}
+          onkeydown={(e) => {
+            e.stopPropagation();
+            if (e.key === "Enter") commitRename();
+            if (e.key === "Escape") oncancelrename();
+          }}
+          onblur={commitRename}
+        />
+      {:else}
+        <div class="flex items-center gap-2">
+          {#if project.pinned}
+            <span class="{tone.text} shrink-0 text-[11px]" title="Pinned to home">◆</span>
           {/if}
+          <h3 class="min-w-0 flex-1 truncate text-[15px] font-semibold leading-tight text-zinc-100">
+            {project.name}
+          </h3>
+          <span
+            class="shrink-0 font-mono text-xs {verdict.cls} {pending ? 'animate-pulse' : ''}"
+            title={verdict.label}
+          >{verdict.glyph} {verdict.label}</span>
         </div>
-      {/each}
+      {/if}
+      <p class="mt-1 truncate font-mono text-[11px] leading-tight text-zinc-500" title={project.path}>
+        {prettyPath(project.path)}
+      </p>
     </div>
 
-    <!-- Identity zone. Sits above the flap and holds what you read first. -->
-    <div class="relative px-3 pt-2">
-      <div class="flex items-start gap-2 pr-16">
-        <div class="min-w-0 flex-1">
-          {#if renaming}
-            <!-- svelte-ignore a11y_autofocus -->
-            <input
-              class="w-full rounded border border-emerald-500/60 bg-zinc-950 px-1.5 py-0.5 text-sm
-                     font-semibold text-zinc-100 outline-none"
-              autofocus
-              bind:value={renameValue}
-              onclick={(e) => e.stopPropagation()}
-              onkeydown={(e) => {
-                e.stopPropagation();
-                if (e.key === "Enter") commitRename();
-                if (e.key === "Escape") oncancelrename();
-              }}
-              onblur={commitRename}
-            />
-          {:else}
-            <div class="flex items-center gap-1.5">
-              {#if project.pinned}
-                <span class="{tone.text} shrink-0 text-[10px]" title="Pinned to home">◆</span>
-              {/if}
-              <h3 class="truncate text-sm font-semibold leading-tight text-zinc-100">
-                {project.name}
-              </h3>
-              <span
-                class="shrink-0 font-mono text-[11px] {verdict.cls} {pending ? 'animate-pulse' : ''}"
-                title={verdict.label}
-              >{verdict.glyph}</span>
-            </div>
-          {/if}
-          <p class="truncate font-mono text-[10px] leading-tight text-zinc-500" title={project.path}>
-            {prettyPath(project.path)}
-          </p>
-        </div>
+    <!-- Signals. Languages on the left, four weeks of commits on the right;
+         both are pictures rather than numbers, which is why they share a row. -->
+    <div class="flex shrink-0 items-start justify-between gap-3 px-4">
+      <div class="flex min-w-0 items-start gap-2">
+        {#each languages as lang (lang.name)}
+          <LangMark {lang} />
+        {/each}
+        {#if !languages.length}
+          <span class="font-mono text-[10px] text-zinc-600">
+            {stats && !stats.trusted ? "language mix not read" : "no code detected"}
+          </span>
+        {/if}
       </div>
 
-      {#if commitLines > 0}
-        <!-- What you were last doing here: the most useful thing on the card, so
-             it gets the open space rather than the crowded flap. The newest line
-             is brightest — the rest are context for it. -->
-        <div class="mt-1 flex flex-col gap-px pr-1">
-          {#each commits.slice(0, commitLines) as entry, index (entry.sha)}
-            <div class="flex items-baseline gap-1.5 overflow-hidden {index === 0 ? '' : 'pr-16'}">
-              <span class="shrink-0 font-mono text-[10px] text-zinc-600">{entry.sha}</span>
-              <span
-                class="truncate text-[10px] {index === 0 ? 'text-zinc-300' : 'text-zinc-500'}"
-                title={entry.subject}
-              >{entry.subject}</span>
-              <span
-                class="ml-auto shrink-0 font-mono text-[10px] text-zinc-600"
-                title="{entry.author} · {fullTime(entry.timestamp)}"
-              >{relativeTime(entry.timestamp)}</span>
-            </div>
-          {/each}
+      {#if stats?.isRepo}
+        <div class="flex shrink-0 flex-col items-end gap-1">
+          <ActivityGrid {series} {accent} cell={7} gap={2} layout="weeks-as-rows" empty="bg-zinc-950/50" />
+          <span class="font-mono text-[9px] leading-none text-zinc-600">28d</span>
         </div>
-      {:else if stats?.isRepo && !commits.length && !tiny}
-        <p class="mt-1 text-[10px] text-zinc-600">No commits yet</p>
       {/if}
     </div>
 
+    <!-- Recent history. Dimmer than the identity above it: context, not headline. -->
+    {#if shown.length}
+      <div class="shrink-0 border-t border-zinc-800/70 px-4 py-1.5">
+        {#each shown as entry, index (entry.sha)}
+          <div class="flex items-baseline gap-2 overflow-hidden py-px">
+            <span class="shrink-0 font-mono text-[10px] text-zinc-500">{entry.sha}</span>
+            <span
+              class="truncate text-[11px] {index === 0 ? 'text-zinc-300' : 'text-zinc-500'}"
+              title={entry.subject}
+            >{entry.subject}</span>
+            <span
+              class="ml-auto shrink-0 font-mono text-[10px] text-zinc-600"
+              title="{entry.author} · {fullTime(entry.timestamp)}"
+            >{relativeTime(entry.timestamp)}</span>
+          </div>
+        {/each}
+      </div>
+    {/if}
+
     <!-- Front flap: translucent and blurred, exactly like the folder's front
-         panel. Every row is shrink-0 — a flex row that is allowed to shrink
-         collapses to nothing when the flap is short, taking its content with
-         it, which is silent data loss rather than a layout bug. -->
+         panel. Two rows, both fixed: git facts, then the ways out to the web. -->
     <div
-      class="absolute inset-x-0 bottom-0 flex flex-col justify-center gap-1
-             rounded-b-lg border-t border-white/10 bg-zinc-950/70 px-3
+      class="shrink-0 rounded-b-lg border-t border-white/10 bg-zinc-950/70 px-4 py-2
              backdrop-blur-[3px]"
-      style="height: {flapHeight}px"
     >
       {#if stats?.missing}
-        <p class="shrink-0 truncate text-[11px] text-red-400">Folder is missing or unmounted</p>
+        <p class="truncate py-1.5 text-xs text-red-400">Folder is missing or unmounted</p>
       {:else if stats && !stats.trusted}
-        <div class="flex shrink-0 items-center justify-between gap-2">
-          <p class="truncate text-[11px] text-amber-400">Not trusted — git is off</p>
+        <div class="flex items-center justify-between gap-2">
+          <p class="truncate text-xs text-amber-400">Not trusted — git is off</p>
           <button
-            class="shrink-0 rounded border border-amber-400/40 px-1.5 py-0.5 text-[10px]
-                   text-amber-300 hover:bg-amber-400/10"
+            class="h-7 shrink-0 rounded-md border border-amber-400/40 px-2.5 text-xs text-amber-300
+                   hover:bg-amber-400/10"
             onclick={chip(ontrust)}
-          >Trust</button>
+          >Trust folder</button>
         </div>
       {:else}
-        <!-- Two columns: the git facts read left to right, while the activity
-             grid and the links out hold the right edge. On a wide card this is
-             what keeps the middle of the flap from being a hole. -->
-        <div class="flex items-end gap-3">
-          <div class="flex min-w-0 flex-1 flex-col gap-1">
-            <!-- Branch and divergence. -->
-            <div class="flex shrink-0 items-center gap-1.5 font-mono text-[10px]">
-              {#if stats?.branch}
-                <span
-                  class="min-w-0 truncate rounded px-1 py-px {tone.fill} {tone.text}"
-                  title={stats.detached ? "Detached HEAD" : `On branch ${stats.branch}`}
-                >{stats.detached ? "◇" : "⑂"} {stats.branch}</span>
-              {:else if stats && !stats.isRepo}
-                <span class="shrink-0 rounded bg-zinc-800 px-1 py-px text-zinc-500">not a repo</span>
-              {:else}
-                <span class="shrink-0 rounded bg-zinc-800 px-1 py-px text-zinc-600">····</span>
-              {/if}
-              {#if stats && stats.ahead > 0}
-                <span class="shrink-0 text-blue-400" title="{stats.ahead} commits to push">
-                  ↑{stats.ahead}
-                </span>
-              {/if}
-              {#if stats && stats.behind > 0}
-                <span class="shrink-0 text-blue-400" title="{stats.behind} commits to pull">
-                  ↓{stats.behind}
-                </span>
-              {/if}
-              {#if stats?.isRepo && stats.upstream === null && !stats.detached}
-                <span class="shrink-0 text-zinc-600" title="No upstream branch set">⊘</span>
-              {/if}
-              {#if stats && stats.worktrees > 0}
-                <span
-                  class="shrink-0 text-purple-400"
-                  title="{stats.worktrees} linked worktree{stats.worktrees === 1 ? '' : 's'}"
-                >⊞{stats.worktrees}</span>
-              {/if}
-              <span class="ml-auto flex shrink-0 items-center gap-1">
-                {#if stats?.agentDocs?.length}
-                  <span
-                    class="rounded bg-emerald-500/15 px-1 text-emerald-400"
-                    title="Agent instructions present: {stats.agentDocs.join(', ')}"
-                  >agents</span>
-                {/if}
-                {#each (stats?.stack ?? []).slice(0, 2) as tag (tag)}
-                  <span class="rounded bg-zinc-800 px-1 text-zinc-400">{tag}</span>
-                {/each}
-              </span>
-            </div>
+        <div class="flex items-center gap-2 font-mono text-[11px]">
+          {#if stats?.branch}
+            <span
+              class="min-w-0 truncate rounded px-1.5 py-0.5 {tone.fill} {tone.text}"
+              title={stats.detached ? "Detached HEAD" : `On branch ${stats.branch}`}
+            >{stats.detached ? "◇" : "⑂"} {stats.branch}</span>
+          {:else if stats && !stats.isRepo}
+            <span class="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-zinc-500">not a repo</span>
+          {:else}
+            <span class="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-zinc-600">····</span>
+          {/if}
+          {#if stats && stats.ahead > 0}
+            <span class="shrink-0 text-blue-400" title="{stats.ahead} commits to push">↑{stats.ahead}</span>
+          {/if}
+          {#if stats && stats.behind > 0}
+            <span class="shrink-0 text-blue-400" title="{stats.behind} commits to pull">↓{stats.behind}</span>
+          {/if}
+          {#if stats?.isRepo && stats.upstream === null && !stats.detached}
+            <span class="shrink-0 text-zinc-600" title="No upstream branch set">⊘</span>
+          {/if}
+          {#if stats && stats.worktrees > 0}
+            <span
+              class="shrink-0 text-purple-400"
+              title="{stats.worktrees} linked worktree{stats.worktrees === 1 ? '' : 's'}"
+            >⊞{stats.worktrees}</span>
+          {/if}
 
-            <!-- Working tree, in terminal shorthand; tooltips spell it out. -->
-            <div class="flex shrink-0 items-center gap-2 font-mono text-[10px]">
-              {#if !stats}
-                <span class="text-zinc-700">····</span>
-              {:else if dirty === 0}
-                <span class="text-emerald-400" title="Working tree clean">✓ clean</span>
-              {:else}
-                {#if stats.staged > 0}
-                  <span class="text-blue-400" title="{stats.staged} staged">+{stats.staged}</span>
-                {/if}
-                {#if stats.unstaged > 0}
-                  <span class="text-amber-400" title="{stats.unstaged} modified">~{stats.unstaged}</span>
-                {/if}
-                {#if stats.untracked > 0}
-                  <span class="text-zinc-400" title="{stats.untracked} untracked">?{stats.untracked}</span>
-                {/if}
-                {#if stats.conflicts > 0}
-                  <span class="text-red-400" title="{stats.conflicts} conflicted">!{stats.conflicts}</span>
-                {/if}
+          <!-- Working tree, in terminal shorthand; tooltips spell it out. -->
+          <span class="ml-auto flex shrink-0 items-center gap-2">
+            {#if !stats}
+              <span class="text-zinc-700">····</span>
+            {:else if dirty === 0}
+              <span class="text-emerald-400" title="Working tree clean">✓ clean</span>
+            {:else}
+              {#if stats.staged > 0}
+                <span class="text-blue-400" title="{stats.staged} staged">+{stats.staged}</span>
               {/if}
-            </div>
-          </div>
+              {#if stats.unstaged > 0}
+                <span class="text-amber-400" title="{stats.unstaged} modified">~{stats.unstaged}</span>
+              {/if}
+              {#if stats.untracked > 0}
+                <span class="text-zinc-400" title="{stats.untracked} untracked">?{stats.untracked}</span>
+              {/if}
+              {#if stats.conflicts > 0}
+                <span class="text-red-400" title="{stats.conflicts} conflicted">!{stats.conflicts}</span>
+              {/if}
+            {/if}
+          </span>
+        </div>
 
-          <!-- Right edge: where this project lives on the web, and how alive it
-               has been over the last four weeks. -->
-          <div class="flex shrink-0 flex-col items-end gap-1">
-            {#if stats?.remoteUrl}
-              <span class="flex shrink-0 items-center gap-0.5 font-mono text-[10px]">
-                <button
-                  class="rounded px-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-100"
-                  title="Open {host}"
-                  onclick={chip(() => onopenurl(stats.remoteUrl!))}
-                >⌂</button>
-                {#if issuesUrl}
-                  <button
-                    class="rounded px-1 text-zinc-500 hover:bg-zinc-800 hover:text-amber-400"
-                    title="Open issues on {host}"
-                    onclick={chip(() => onopenurl(issuesUrl))}
-                  >⊙</button>
-                {/if}
-                {#if pullsUrl}
-                  <button
-                    class="rounded px-1 text-zinc-500 hover:bg-zinc-800 hover:text-purple-400"
-                    title="Open pull requests on {host}"
-                    onclick={chip(() => onopenurl(pullsUrl))}
-                  >⇄</button>
-                {/if}
-              </span>
+        <!-- Links out. Sized as real buttons: these are the only things on the
+             card you are meant to hit, and hitting one by accident opens a
+             browser, so they get labels and a 28px target rather than a glyph. -->
+        <div class="mt-1.5 flex items-center gap-1.5">
+          {#if stats?.remoteUrl}
+            <button
+              class="flex h-7 items-center gap-1.5 rounded-md border border-zinc-700/70 px-2.5
+                     text-[11px] text-zinc-400 hover:border-zinc-600 hover:bg-zinc-800
+                     hover:text-zinc-100"
+              title="Open {host}"
+              onclick={chip(() => onopenurl(stats.remoteUrl!))}
+            ><span class="font-mono">⌂</span> Repo</button>
+            {#if issuesUrl}
+              <button
+                class="flex h-7 items-center gap-1.5 rounded-md border border-zinc-700/70 px-2.5
+                       text-[11px] text-zinc-400 hover:border-amber-400/50 hover:bg-amber-400/10
+                       hover:text-amber-300"
+                title="Open issues on {host}"
+                onclick={chip(() => onopenurl(issuesUrl))}
+              ><span class="font-mono">⊙</span> Issues</button>
             {/if}
-            {#if !compact && stats?.isRepo}
-              <ActivityGrid {series} {accent} cell={4} gap={1} />
+            {#if pullsUrl}
+              <button
+                class="flex h-7 items-center gap-1.5 rounded-md border border-zinc-700/70 px-2.5
+                       text-[11px] text-zinc-400 hover:border-purple-400/50 hover:bg-purple-400/10
+                       hover:text-purple-300"
+                title="Open pull requests on {host}"
+                onclick={chip(() => onopenurl(pullsUrl))}
+              ><span class="font-mono">⇄</span> PRs</button>
             {/if}
-          </div>
+          {:else}
+            <!-- The row keeps its height with no remote, so a card with one and
+                 a card without still line up beside each other. -->
+            <span class="flex h-7 items-center font-mono text-[11px] text-zinc-600">no remote</span>
+          {/if}
+
+          {#if stats?.agentDocs?.length}
+            <span
+              class="ml-auto flex h-7 shrink-0 items-center rounded-md bg-emerald-500/10 px-2
+                     font-mono text-[10px] text-emerald-400"
+              title="Agent instructions present: {stats.agentDocs.join(', ')}"
+            >agents</span>
+          {/if}
         </div>
       {/if}
     </div>

@@ -35,14 +35,22 @@
   import ProjectCard from "./ProjectCard.svelte";
   import TerminalIcon from "./TerminalIcon.svelte";
 
-  /** Grid geometry. The card sizes are the smallest at which the flap's two
-   *  metric rows stay readable; everything else is derived from them so the
-   *  grid can never produce a row that does not fit. */
-  const MIN_CARD_W = 252;
-  const MIN_CARD_H = 118;
-  const MAX_CARD_H = 172;
+  /** Grid geometry.
+   *
+   *  A card's aspect ratio is fixed. A project tile is a *thing* — a folder —
+   *  and a thing that changes proportion as the window moves makes every card's
+   *  contents land somewhere new each time, which is the fastest way to make a
+   *  screen you cannot learn. So the width is clamped to a narrow band instead,
+   *  the height follows from it, and the leftover space goes into the margins
+   *  rather than into the cards.
+   *
+   *  The minimum width is the one at which the flap's two rows — git facts, then
+   *  three labelled buttons — still fit side by side. */
+  const ASPECT = 4 / 3;
+  const MIN_CARD_W = 292;
+  const MAX_CARD_W = 324;
   const MAX_COLS = 6;
-  const GAP = 10; // matches gap-2.5
+  const GAP = 14;
 
   let error = $state<string | null>(null);
   let toast = $state<string | null>(null);
@@ -50,6 +58,16 @@
 
   let gridW = $state(0);
   let gridH = $state(0);
+  /** Height of the whole screen, used to decide whether the portfolio strip
+   *  gets its tiles or its one-liner. Measured on the shell rather than on the
+   *  grid, because the grid's height is the thing that decision changes — read
+   *  the other way round it would oscillate. */
+  let shellH = $state(0);
+
+  /** Below this the four tiles wrap into a block taller than the cards they
+   *  summarize. Roughly a header, two rows of cards, and the strip. */
+  const STATS_TILES_MIN_H = 620;
+  const roomyStats = $derived(shellH >= STATS_TILES_MIN_H);
 
   let menu = $state<{ project: Project; x: number; y: number } | null>(null);
   let renamingId = $state<string | null>(null);
@@ -71,42 +89,30 @@
     return matches.length ? matches : ordered;
   });
 
-  /** Choose the column count that shows the most projects in the best-shaped
-   *  cards for this window.
+  /** How many cards of the fixed shape this window holds.
    *
-   *  A fixed `auto-fill` grid gets both ends wrong: with four projects on a wide
-   *  monitor it draws a thin strip of cards across the top and leaves two thirds
-   *  of the screen empty, and with twenty it hides half of them. Trying every
-   *  column count and scoring the result costs nothing (there are at most six)
-   *  and gets "fill the window, keep the cards card-shaped" right at any size. */
+   *  Everything follows from the width: as many columns as fit at the minimum
+   *  card width (never more than there are projects, so four checkouts on a wide
+   *  monitor sit as a centred block rather than a thin strip), then the largest
+   *  card that fits those columns, then however many rows are left over. */
   const layout = $derived.by(() => {
     const count = Math.max(1, filtered.length);
-    const maxCols = Math.min(
-      MAX_COLS,
-      Math.max(1, Math.floor((gridW + GAP) / (MIN_CARD_W + GAP))),
-    );
-    const maxRows = Math.max(1, Math.floor((gridH + GAP) / (MIN_CARD_H + GAP)));
-    let best = { cols: maxCols, rows: 1, height: MIN_CARD_H, score: -Infinity };
-    for (let cols = 1; cols <= maxCols; cols++) {
-      const rows = Math.min(maxRows, Math.ceil(count / cols));
-      const height = Math.min(MAX_CARD_H, (gridH - (rows - 1) * GAP) / rows);
-      if (height < MIN_CARD_H) continue;
-      const width = (gridW - (cols - 1) * GAP) / cols;
-      const aspect = width / height;
-      const score =
-        // Showing the projects at all dominates everything else…
-        3 * (Math.min(count, cols * rows) / count) +
-        // …then filling the window vertically…
-        (rows * height + (rows - 1) * GAP) / Math.max(1, gridH) +
-        // …then not stretching a card into a letterbox or a tower.
-        (aspect >= 1.25 && aspect <= 3.2 ? 1 : 0.4);
-      if (score > best.score) best = { cols, rows, height, score };
-    }
-    return best;
+    const fitting = Math.max(1, Math.floor((gridW + GAP) / (MIN_CARD_W + GAP)));
+    const cols = Math.min(MAX_COLS, fitting, count);
+    const fair = (gridW - (cols - 1) * GAP) / cols;
+    // The minimum wins over the space available: a card narrower than this
+    // cannot hold its own contents, and half a dozen illegible thumbnails are
+    // worth less than two cards you can read. Only a window narrower than one
+    // card goes below it, and then the card is the window.
+    const width = Math.max(1, Math.min(MAX_CARD_W, Math.max(MIN_CARD_W, fair), gridW));
+    const height = width / ASPECT;
+    const rows = Math.max(1, Math.floor((gridH + GAP) / (height + GAP)));
+    return { cols, rows, width, height };
   });
 
   const cols = $derived(layout.cols);
   const capacity = $derived(layout.cols * layout.rows);
+  const cardW = $derived(layout.width);
   const cardH = $derived(layout.height);
   const overflowing = $derived(filtered.length > capacity);
   /** One slot is given up to the "N more" tile when the list does not fit, so
@@ -267,11 +273,12 @@
 
 <svelte:window onkeydown={onWindowKeydown} onclick={() => (menu = null)} />
 
-<div class="relative flex h-full w-full flex-col overflow-hidden bg-zinc-950">
+<div class="relative flex h-full w-full flex-col overflow-hidden bg-zinc-950"
+     bind:clientHeight={shellH}>
   <AsciiField />
 
   <!-- Header: identity, search, global actions. -->
-  <header class="relative z-20 flex items-center gap-4 px-4 pb-2 pt-3">
+  <header class="relative z-20 flex items-center gap-4 px-4 pb-3 pt-3">
     <div class="flex shrink-0 items-center gap-2">
       <img src={logoUrl} alt="" class="h-6 w-6" />
       <div class="leading-tight">
@@ -317,7 +324,7 @@
 
   <!-- The grid. Sized to the space that is left, never taller than it. -->
   <main
-    class="relative z-10 min-h-0 flex-1 overflow-hidden px-4"
+    class="relative z-10 min-h-0 flex-1 overflow-hidden px-4 py-1"
     bind:clientWidth={gridW}
     bind:clientHeight={gridH}
   >
@@ -338,12 +345,13 @@
         >+ Add your first project</button>
       </div>
     {:else}
-      <!-- `align-content: center` is what keeps a half-full grid from hanging
-           off the top of a tall window: the rows sit in the middle of whatever
-           space is left, and pack normally once they fill it. -->
+      <!-- Fixed track sizes rather than `1fr`: a fraction would stretch the
+           cards back out of shape the moment the window is wider than the grid
+           needs. Centring on both axes is what turns that leftover width into
+           even margins instead of a strip of cards pinned to the left. -->
       <div
-        class="grid h-full content-center"
-        style="grid-template-columns: repeat({cols}, minmax(0, 1fr));
+        class="grid h-full content-center justify-center"
+        style="grid-template-columns: repeat({cols}, {cardW}px);
                grid-auto-rows: {cardH}px; gap: {GAP}px"
       >
         {#each visible as project, index (project.id)}
@@ -352,7 +360,6 @@
               {project}
               stats={$projectStats.get(project.id)}
               pending={$statsPending.has(project.id)}
-              height={cardH}
               renaming={renamingId === project.id}
               onopen={() => enter(project)}
               onmenu={(e) => (menu = { project, x: e.clientX, y: e.clientY })}
@@ -381,8 +388,11 @@
 
   <!-- Portfolio readouts. -->
   {#if $projects.length}
-    <footer class="relative z-20 shrink-0 px-4 pb-3 pt-2">
-      <HomeStats projects={$projects} stats={allStats} onfocusproject={reveal} />
+    <footer
+      class="relative z-20 shrink-0 border-t border-zinc-800/60 px-4
+             {roomyStats ? 'pb-4 pt-3' : 'py-2'}"
+    >
+      <HomeStats projects={$projects} stats={allStats} compact={!roomyStats} onfocusproject={reveal} />
     </footer>
   {/if}
 
