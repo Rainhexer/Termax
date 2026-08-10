@@ -34,6 +34,12 @@
   import StartWorkOnIssueModal from "./StartWorkOnIssueModal.svelte";
   import LabelChip from "./LabelChip.svelte";
 
+  /** Filling the sidebar's swap panel: the tab that selected this component is
+   *  the disclosure, so the header drops its own toggle and the list takes the
+   *  height it is given instead of capping itself. `issuePanelOpen` still gates
+   *  the fetching — the sidebar sets it from the selected tab. */
+  let { fill = false }: { fill?: boolean } = $props();
+
   let creating = $state(false);
   let viewing = $state<number | null>(null);
   let starting = $state<Issue | null>(null);
@@ -113,21 +119,30 @@
 </script>
 
 {#if $gitMode && !$restricted}
-  <div class="flex flex-col gap-0.5">
+  <div class="flex min-h-0 flex-col gap-0.5 {fill ? 'flex-1' : ''}">
     <div class="flex items-center gap-1 px-1">
-      <button
-        class="flex items-center gap-1 text-left text-[11px] font-semibold uppercase tracking-wider text-zinc-500 hover:text-zinc-300"
-        title={$issuePanelOpen
-          ? "Hide issues (also stops checking GitHub)"
-          : "Show issues (checks GitHub)"}
-        onclick={() => issuePanelOpen.update((v) => !v)}
-      >
-        <span class="text-[9px]">{$issuePanelOpen ? "▼" : "▶"}</span>
-        Issues
-        {#if $issuePanelOpen && issues.length}
-          <span class="text-zinc-600">({issues.length}{$issueCache.truncated ? "+" : ""})</span>
-        {/if}
-      </button>
+      {#if fill}
+        <h2 class="flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+          Issues
+          {#if issues.length}
+            <span class="text-zinc-600">({issues.length}{$issueCache.truncated ? "+" : ""})</span>
+          {/if}
+        </h2>
+      {:else}
+        <button
+          class="flex items-center gap-1 text-left text-[11px] font-semibold uppercase tracking-wider text-zinc-500 hover:text-zinc-300"
+          title={$issuePanelOpen
+            ? "Hide issues (also stops checking GitHub)"
+            : "Show issues (checks GitHub)"}
+          onclick={() => issuePanelOpen.update((v) => !v)}
+        >
+          <span class="text-[9px]">{$issuePanelOpen ? "▼" : "▶"}</span>
+          Issues
+          {#if $issuePanelOpen && issues.length}
+            <span class="text-zinc-600">({issues.length}{$issueCache.truncated ? "+" : ""})</span>
+          {/if}
+        </button>
+      {/if}
       <div class="flex flex-1 items-center justify-end gap-1">
         {#if $issuePanelOpen}
           {#if $issueCache.loading}
@@ -309,7 +324,7 @@
         </div>
       {/if}
 
-      <div class="max-h-72 min-h-0 overflow-y-auto">
+      <div class="min-h-0 overflow-y-auto {fill ? 'flex-1' : 'max-h-72'}">
         {#each issues as issue (issue.number)}
           {@const bound = boundTabs.get(issue.number)}
           <div class="group flex items-center gap-1 rounded-md px-1 py-0.5 hover:bg-zinc-800/70">

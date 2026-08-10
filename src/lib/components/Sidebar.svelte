@@ -5,13 +5,18 @@
     addPane,
     closeProject,
     focusedPaneId,
+    gitMode,
     newTab,
     paneInstances,
+    restricted,
     revealPane,
     runVaultCommand,
     sidebarCollapsed,
+    sidebarSection,
   } from "../stores";
-  import type { PaneInstance } from "../stores";
+  import type { PaneInstance, SidebarSection } from "../stores";
+  import { issueCache, issuePanelOpen } from "../issues";
+  import { prCache, prPanelOpen } from "../pr";
   import { enabledLaunchers, launcherById, settings, settingsOpen, updateSettings } from "../settings";
   import type { Launcher } from "../settings";
   import { activityLabel, activityTitle, cliStatus, loudest, statusFor } from "../cliStatus";
@@ -109,6 +114,46 @@
   let vaultPopoverEl = $state<HTMLDivElement>();
 
   const vault = $derived($activeProject?.commands ?? []);
+
+  // The swap panel: Launch and Changes are pinned, and everything else takes
+  // turns in the space between them. The GitHub tabs only exist in a git repo,
+  // matching the guard the two panels apply to themselves.
+  const github = $derived($gitMode && !$restricted);
+  const sections = $derived<{ id: SidebarSection; label: string; count: number; title: string }[]>([
+    ...(github
+      ? [
+          {
+            id: "issues" as const,
+            label: "Issues",
+            count: $issueCache.issues.length,
+            title: "Issues (checks GitHub while shown)",
+          },
+        ]
+      : []),
+    { id: "vault", label: "Vault", count: vault.length, title: "Command vault" },
+    { id: "files", label: "Files", count: 0, title: "Explorer" },
+    ...(github
+      ? [
+          {
+            id: "prs" as const,
+            label: "PRs",
+            count: $prCache.prs.length,
+            title: "Pull requests (checks GitHub while shown)",
+          },
+        ]
+      : []),
+  ]);
+  /** The stored choice, unless it named a tab this project doesn't have. */
+  const section = $derived(
+    sections.some((s) => s.id === $sidebarSection) ? $sidebarSection : "files",
+  );
+
+  // Showing a GitHub panel is what makes it fetch, so the tab drives the same
+  // open flags the old collapsible headers did: leave the tab, stop polling.
+  $effect(() => {
+    issuePanelOpen.set(section === "issues");
+    prPanelOpen.set(section === "prs");
+  });
 
   $effect(() => {
     if (!vaultOpen) return;
@@ -266,8 +311,12 @@
     </div>
 
     <div class="flex flex-1 flex-col min-h-0">
-      <div class="flex-1 overflow-y-auto px-3 min-h-0">
-        <div class="flex flex-col gap-4 pb-3">
+      <!-- Launch is pinned above the swap panel: it is the thing every other
+           section eventually leads to, and it must never be scrolled off. It
+           still scrolls internally, so a project with many agents can't squeeze
+           the panel below it out of existence. -->
+      <div class="max-h-[45%] shrink-0 overflow-y-auto px-3 pb-3 min-h-0">
+        <div class="flex flex-col gap-4">
 
           <div class="flex flex-col gap-1">
             <h2 class="px-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Launch</h2>
@@ -339,28 +388,50 @@
             {/each}
           </div>
 
-          <!-- Above the vault and the tree because starting work on a pull request
-               is a sibling of launching an agent: both create panes. The two
-               scrolling panels below it stay at the bottom. -->
-          <ErrorBoundary label="Pull requests" compact>
-            <PullRequests />
-          </ErrorBoundary>
-          <!-- Below pull requests, above the vault: an issue is upstream of a PR
-               in the workflow, but the PR panel is the one with work already in
-               flight, so it keeps the position nearest the launchers. -->
-          <ErrorBoundary label="Issues" compact>
-            <Issues />
-          </ErrorBoundary>
-          <ErrorBoundary label="Command vault" compact>
-            <CommandVault />
-          </ErrorBoundary>
-          <ErrorBoundary label="File tree" compact>
-            <FileTree />
-          </ErrorBoundary>
-
         </div>
       </div>
-      <div class="px-3 pt-3 pb-3">
+
+      <!-- One row of tabs in place of four stacked panels: the section you pick
+           gets the whole middle of the sidebar, at the size it was designed for. -->
+      <div class="flex shrink-0 border-y border-zinc-800 bg-zinc-900/40">
+        {#each sections as tab (tab.id)}
+          <button
+            class="flex flex-1 items-center justify-center gap-1 px-1 py-1.5 text-[11px] font-medium {section ===
+            tab.id
+              ? 'bg-zinc-800/70 text-emerald-400'
+              : 'text-zinc-500 hover:bg-zinc-800/40 hover:text-zinc-300'}"
+            title={tab.title}
+            onclick={() => sidebarSection.set(tab.id)}
+          >
+            <span class="truncate">{tab.label}</span>
+            {#if tab.count}
+              <span class="shrink-0 text-[10px] text-zinc-600">{tab.count}</span>
+            {/if}
+          </button>
+        {/each}
+      </div>
+
+      <div class="flex min-h-0 flex-1 flex-col px-3 py-2">
+        {#if section === "prs"}
+          <ErrorBoundary label="Pull requests" compact>
+            <PullRequests fill />
+          </ErrorBoundary>
+        {:else if section === "issues"}
+          <ErrorBoundary label="Issues" compact>
+            <Issues fill />
+          </ErrorBoundary>
+        {:else if section === "vault"}
+          <ErrorBoundary label="Command vault" compact>
+            <CommandVault fill />
+          </ErrorBoundary>
+        {:else}
+          <ErrorBoundary label="File tree" compact>
+            <FileTree fill />
+          </ErrorBoundary>
+        {/if}
+      </div>
+
+      <div class="border-t border-zinc-800 px-3 pt-3 pb-3">
         <ErrorBoundary label="Changes" compact>
           <ChangesPanel />
         </ErrorBoundary>

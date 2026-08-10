@@ -26,6 +26,38 @@ export const layout = writable<LayoutNode | null>(null);
 export const focusedPaneId = writable<string | null>(null);
 export const sidebarCollapsed = writable(false);
 
+/** Which section the sidebar's swap panel is showing.
+ *
+ *  The sidebar stacks Launch and Changes around a single swappable panel, so
+ *  exactly one of these is mounted at a time. "files" is the default because it
+ *  is the only one that costs nothing: the two GitHub sections fetch when they
+ *  become visible, and a user who never picks them never talks to GitHub. */
+export type SidebarSection = "issues" | "vault" | "files" | "prs";
+
+const SECTION_KEY = "termax.sidebarSection";
+
+function readSection(): SidebarSection {
+  try {
+    const stored = localStorage.getItem(SECTION_KEY);
+    if (stored === "issues" || stored === "vault" || stored === "files" || stored === "prs") {
+      return stored;
+    }
+  } catch {
+    // A private-mode/quota failure must not break the sidebar.
+  }
+  return "files";
+}
+
+export const sidebarSection = writable<SidebarSection>(readSection());
+
+sidebarSection.subscribe((section) => {
+  try {
+    localStorage.setItem(SECTION_KEY, section);
+  } catch {
+    // As above: the choice just doesn't survive a restart.
+  }
+});
+
 /** Change tracking for one root. */
 export interface RootGit {
   status: GitStatus | null;
