@@ -105,6 +105,12 @@ interface Entry {
   foregroundKnown: boolean;
   foregroundProbing: boolean;
   quietTimer?: ReturnType<typeof setTimeout>;
+  /** The program this pane was launched with (null = plain shell). A coding CLI
+   *  never returns to a shell prompt, so none of the shell run heuristics below
+   *  — quiet windows, foreground pgid, OSC 133, BEL — mean "the turn ended"
+   *  there. Those panes are settled by the screen scan instead; see
+   *  {@link cliTurnEnded}. */
+  launch: string | null;
 }
 
 // Terminals live outside the component tree so panes survive layout re-renders.
@@ -237,9 +243,25 @@ export function acknowledgeRun(paneId: string) {
 function finishRun(paneId: string, exitCode: number | null) {
   const entry = registry.get(paneId);
   if (!entry?.busy) return;
+  // Shell verdicts say nothing about a coding CLI's turn — see cliTurnEnded.
+  if (entry.launch !== null) return;
   clearTimeout(entry.quietTimer);
   entry.busy = false;
   setRun(paneId, exitCode !== null && exitCode !== 0 ? "failed" : "done", exitCode);
+  bell.notifyPane(paneId);
+}
+
+/** The screen scan decided a coding CLI's turn is over: it either went quiet or
+ *  put a prompt up. This — not silence, not OSC 133, not BEL — is what ends a
+ *  run in a launched pane, because everything the CLI does mid-turn (editing a
+ *  file, answering `/usage`, finishing its startup banner) looks identical to a
+ *  finished command from the terminal layer's point of view. */
+export function cliTurnEnded(paneId: string) {
+  const entry = registry.get(paneId);
+  if (!entry || entry.launch === null) return;
+  clearTimeout(entry.quietTimer);
+  entry.busy = false;
+  setRun(paneId, "done", null);
   bell.notifyPane(paneId);
 }
 
@@ -414,9 +436,14 @@ function create(paneId: string): Entry {
     shellIntegration: false,
     foregroundKnown: false,
     foregroundProbing: false,
+    launch: null,
   };
   // A program asking for attention (BEL) rings straight away — no heuristics.
-  term.onBell(() => bell.notifyPane(paneId));
+  // Except in a coding-CLI pane: those ring the bell for their own reasons
+  // (a finished sub-step, a redraw, startup) and the ring must mean "your turn".
+  term.onBell(() => {
+    if (registry.get(paneId)?.launch === null) bell.notifyPane(paneId);
+  });
   term.onTitleChange((title) => setTitle(paneId, title));
   registry.set(paneId, entry);
   return entry;
@@ -521,15 +548,22 @@ function noteOutput(entry: Entry, bytes: number) {
     return;
   }
   entry.outputSinceSubmit += bytes;
+  if (entry.launch !== null) return;
   clearTimeout(entry.quietTimer);
   entry.quietTimer = setTimeout(() => settleRun(entry.paneId), quietWindow(entry));
 }
+
+// Alt+Enter (and Shift/Ctrl variants) insert a newline into a CLI's prompt
+// rather than submitting it: the terminal sends ESC before the CR. Counting
+// those as a submitted line is what made composing a multi-line prompt start —
+// and 800ms later finish — a phantom run, ringing the bell mid-typing.
+const NEWLINE_KEY = /(?:^|[^\x1b])[\r\n]/;
 
 function noteInput(paneId: string, data: string) {
   const entry = registry.get(paneId);
   if (!entry) return;
   bell.clearAttention(paneId);
-  if (!data.includes("\r") && !data.includes("\n")) return;
+  if (!NEWLINE_KEY.test(data)) return;
   entry.busy = true;
   entry.submittedAt = performance.now();
   entry.outputSinceSubmit = 0;
@@ -544,6 +578,7 @@ export function attach(
   launch: string | null,
 ) {
   const entry = registry.get(paneId) ?? create(paneId);
+  entry.launch = launch;
   // A host can still hold another pane's terminal: a pane component reused for
   // a different pane id (tab switch onto a same-shaped grid) keeps its host DOM
   // node. Evict strays first, or both terminals stack in the one pane.
