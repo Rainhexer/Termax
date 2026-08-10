@@ -172,6 +172,18 @@ optgroup {
   background: var(--tmx-ui-elevated);
 }
 
+/* Home screen: fades the decorative glyph field out under the cards, so the
+   texture reads at the edges and never behind text. Same reason as above for
+   living in this file rather than in the component. */
+.ascii-field-fade {
+  background: radial-gradient(
+    ellipse 70% 62% at 50% 48%,
+    var(--tmx-ui-bg) 42%,
+    color-mix(in srgb, var(--tmx-ui-bg) 62%, transparent) 78%,
+    transparent 100%
+  );
+}
+
 /* Pane chrome: backgrounds and the active-edge glow follow the theme. */
 .pane-term-bg {
   background: var(--tmx-term-background);

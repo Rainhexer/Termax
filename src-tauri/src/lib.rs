@@ -1,6 +1,7 @@
 mod fstree;
 mod git;
 mod github;
+mod home;
 mod open_folder;
 mod projects;
 mod pty;
@@ -48,7 +49,14 @@ pub fn run() {
             projects::list_projects,
             projects::add_project,
             projects::remove_project,
+            projects::rename_project,
+            projects::set_project_pinned,
+            projects::touch_project,
             projects::save_layout,
+            home::project_stats,
+            home::search_projects,
+            home::open_project_folder,
+            home::open_project_terminal,
             projects::add_vault_command,
             projects::update_vault_command,
             projects::remove_vault_command,

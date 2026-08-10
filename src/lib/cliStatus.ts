@@ -1,7 +1,15 @@
 import { derived, get, writable } from "svelte/store";
 import { attentionPanes } from "./bell";
 import { paneInstances } from "./stores";
-import { isAlive, msSinceInput, outputSeq, paneRuns, paneTitles, readPaneTail } from "./terminals";
+import {
+  cliTurnEnded,
+  isAlive,
+  msSinceInput,
+  outputSeq,
+  paneRuns,
+  paneTitles,
+  readPaneTail,
+} from "./terminals";
 
 /**
  * Best-effort "what is this coding CLI doing" readout.
@@ -427,6 +435,61 @@ export const cliStatus = derived(
     return out;
   },
 );
+
+/**
+ * Ring a launched pane only when its turn actually ended.
+ *
+ * The terminal layer cannot tell "the agent finished" from "the agent finished
+ * writing a file", "`/usage` printed a table" or "the startup banner is done" —
+ * all three are a burst of output followed by silence, which is why the bell
+ * used to fire on all of them. The screen scan can: a coding CLI draws its
+ * spinner/interrupt hint for exactly as long as a turn is in flight. So the
+ * ring hangs off the working → (awaiting | idle) edge and nothing else.
+ *
+ * Two guards keep the edge honest:
+ *  - the turn must have been observed working for {@link MIN_TURN_MS}, so a
+ *    single poll landing on a spinner frame during startup or a slash command
+ *    cannot manufacture a completed turn;
+ *  - `idle` only counts once the working observation has fully decayed
+ *    (ACTIVITY_GRACE_MS of no spinner), which the derived store already does.
+ */
+const MIN_TURN_MS = 2500;
+
+interface Turn {
+  activity: CliActivity;
+  /** When this pane was first seen working in the current turn. */
+  workingSince: number;
+}
+
+const turns = new Map<string, Turn>();
+
+function watchTurns(map: Map<string, CliStatus>) {
+  const now = Date.now();
+  for (const [paneId, status] of map) {
+    const prev = turns.get(paneId);
+    const activity = status.activity;
+    if (!prev) {
+      turns.set(paneId, { activity, workingSince: activity === "working" ? now : 0 });
+      continue;
+    }
+    if (activity === prev.activity) continue;
+    const workingSince = activity === "working" ? now : 0;
+    const ended =
+      prev.activity === "working" &&
+      (activity === "awaiting" || activity === "idle") &&
+      prev.workingSince > 0 &&
+      now - prev.workingSince >= MIN_TURN_MS;
+    turns.set(paneId, { activity, workingSince });
+    if (ended) cliTurnEnded(paneId);
+  }
+  for (const paneId of [...turns.keys()]) {
+    if (!map.has(paneId)) turns.delete(paneId);
+  }
+}
+
+// Subscribed here rather than from a component: the ring must not depend on the
+// sidebar being mounted, and a derived store with no subscriber never runs.
+cliStatus.subscribe(watchTurns);
 
 const IDLE_STATUS: CliStatus = { activity: "idle", model: null, task: null };
 
