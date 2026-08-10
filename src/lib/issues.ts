@@ -19,9 +19,11 @@
  *     silently showed the previous filter's results would be a bug, not a saving.
  *
  *  2. **No git-state trigger.** A branch moving says something about pull
- *     requests; it says nothing about issues. So the automatic triggers here are
- *     just "the panel opened" and the slow focused-window safety net, which is
- *     strictly less traffic than the PR panel generates.
+ *     requests; it says nothing about issues. The one exception is the session
+ *     starting, which is not a git state but the gate that makes querying
+ *     possible: the panel-open and gh-probe triggers can both land before the
+ *     project session exists, so a single once-per-session refresh on git mode
+ *     coming up is what stops an open panel waiting out the safety net.
  *
  *  Repository metadata (labels, assignees, milestones, the signed-in login)
  *  is fetched once per project on first panel open and then cached, because it
@@ -329,7 +331,23 @@ export function initIssueListeners(): void {
     void loadRepoMeta();
   });
 
-  // Trigger 2: the safety net, skipped when the window is unfocused so a Termax
+  // Trigger 2: git mode coming up. The panel-open and probe triggers above can
+  // both land before the project session exists — `gh --version` runs much
+  // faster than `start_session`, which may wait on the trust dialog — so each
+  // bails out of `canQuery` and nothing re-asks. Unlike the PR panel there is
+  // deliberately no git-state trigger, so this once-per-session transition is
+  // the only thing that can close that gap: it fires on project open, never on
+  // branch moves, keeping issue traffic below the PR panel's.
+  let wasGit = false;
+  gitMode.subscribe((git) => {
+    if (git === wasGit) return;
+    wasGit = git;
+    if (!git || !get(issuePanelOpen)) return;
+    void refreshIssues();
+    void loadRepoMeta();
+  });
+
+  // Trigger 3: the safety net, skipped when the window is unfocused so a Termax
   // left open overnight makes no calls. Slower than the PR panel's because an
   // issue list goes stale on the scale of hours, not minutes.
   setInterval(() => {
