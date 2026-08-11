@@ -47,6 +47,9 @@ export const ipc = {
   removeProject: (id: string) => invoke<void>("remove_project", { id }),
   /** Rename the *label*, not the folder. */
   renameProject: (id: string, name: string) => invoke<void>("rename_project", { id, name }),
+  /** Point a project at a new folder. The id, name, and saved layout survive;
+   *  only the stored path changes — nothing is copied or deleted. */
+  relinkProject: (id: string, path: string) => invoke<void>("relink_project", { id, path }),
   setProjectPinned: (id: string, pinned: boolean) =>
     invoke<void>("set_project_pinned", { id, pinned }),
   touchProject: (id: string) => invoke<void>("touch_project", { id }),

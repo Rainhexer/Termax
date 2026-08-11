@@ -126,6 +126,33 @@ pub fn rename_project(
     store.save()
 }
 
+/// Point a project at a new folder, keeping its id, name, and saved layout.
+///
+/// This is how a project whose folder was deleted, renamed, or moved comes back
+/// to life: the old path is a dead end, but everything Termax knows about the
+/// project — its tabs, its pinned state, its recency — still belongs to it, so
+/// only the path changes. The new folder is untouched beyond being validated;
+/// nothing is copied into it.
+#[tauri::command]
+pub fn relink_project(
+    store: tauri::State<ProjectStore>,
+    id: String,
+    path: String,
+) -> Result<(), String> {
+    if !PathBuf::from(&path).is_dir() {
+        return Err(format!("not a directory: {path}"));
+    }
+    {
+        let mut projects = store.projects.lock().unwrap();
+        let project = projects
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or("no such project")?;
+        project.path = path;
+    }
+    store.save()
+}
+
 #[tauri::command]
 pub fn set_project_pinned(
     store: tauri::State<ProjectStore>,

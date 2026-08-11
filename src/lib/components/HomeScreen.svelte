@@ -6,10 +6,10 @@
    *  project already knowing what state it is in, or straight to a file you can
    *  name a fragment of. Everything on it serves one of those two paths.
    *
-   *  It deliberately does not scroll and has no tabs: one screen, always the
-   *  same shape, so the card you want is in the place you left it. When there
-   *  are more projects than fit, the grid keeps the ones you actually use
-   *  (pinned, then most recently opened) and hands the rest to search. */
+   *  It has no tabs: one screen, always the same shape, so the card you want is
+   *  in the place you left it. Every project stays on the grid — a window that
+   *  cannot hold them all scrolls rather than hiding any of them behind
+   *  search. */
   import { open } from "@tauri-apps/plugin-dialog";
   import { addPane, loadProjects, openFile, openProject, projects } from "../stores";
   import { enabledLaunchers, settings, settingsOpen } from "../settings";
@@ -57,7 +57,6 @@
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
 
   let gridW = $state(0);
-  let gridH = $state(0);
   /** Height of the whole screen, used to decide whether the portfolio strip
    *  gets its tiles or its one-liner. Measured on the shell rather than on the
    *  grid, because the grid's height is the thing that decision changes — read
@@ -89,12 +88,13 @@
     return matches.length ? matches : ordered;
   });
 
-  /** How many cards of the fixed shape this window holds.
+  /** How many columns of the fixed shape this window holds.
    *
    *  Everything follows from the width: as many columns as fit at the minimum
    *  card width (never more than there are projects, so four checkouts on a wide
    *  monitor sit as a centred block rather than a thin strip), then the largest
-   *  card that fits those columns, then however many rows are left over. */
+   *  card that fits those columns. Rows follow from the card count — the grid
+   *  scrolls when the window cannot hold them all. */
   const layout = $derived.by(() => {
     const count = Math.max(1, filtered.length);
     const fitting = Math.max(1, Math.floor((gridW + GAP) / (MIN_CARD_W + GAP)));
@@ -106,18 +106,12 @@
     // card goes below it, and then the card is the window.
     const width = Math.max(1, Math.min(MAX_CARD_W, Math.max(MIN_CARD_W, fair), gridW));
     const height = width / ASPECT;
-    const rows = Math.max(1, Math.floor((gridH + GAP) / (height + GAP)));
-    return { cols, rows, width, height };
+    return { cols, width, height };
   });
 
   const cols = $derived(layout.cols);
-  const capacity = $derived(layout.cols * layout.rows);
   const cardW = $derived(layout.width);
   const cardH = $derived(layout.height);
-  const overflowing = $derived(filtered.length > capacity);
-  /** One slot is given up to the "N more" tile when the list does not fit, so
-   *  the overflow is never silent. */
-  const visible = $derived(filtered.slice(0, overflowing ? capacity - 1 : capacity));
 
   const allStats = $derived(
     $projects.map((p) => $projectStats.get(p.id)).filter((s) => s !== undefined),
@@ -183,7 +177,13 @@
   }
 
   async function act(fn: () => Promise<unknown> | unknown) {
-    menu = null;
+    // Close the menu only after the action has read from it. The menu's
+    // bindings (`{@const target = menu`, and the deriveds built on it) are live
+    // reads of the `menu` state, so nulling `menu` first would make the closure
+    // dereference null — `target.project` throws "null is not an object". The
+    // next microtask still lands inside the same click, so the menu closes just
+    // as fast as it did before.
+    queueMicrotask(() => (menu = null));
     try {
       await fn();
     } catch (err) {
@@ -203,6 +203,21 @@
     await loadProjects();
   }
 
+  /** Point a project at a new folder — the fix for a card that reads "missing".
+   *  Everything Termax knows about the project survives; only the path changes. */
+  async function relink(project: Project) {
+    const dir = await open({ directory: true, title: `Relink ${project.name} to…` });
+    if (!dir) return;
+    try {
+      await ipc.relinkProject(project.id, dir);
+      await loadProjects();
+      void loadStats(project.id);
+      flash(`Relinked ${project.name} to ${dir}`);
+    } catch (err) {
+      error = String(err);
+    }
+  }
+
   async function trust(project: Project) {
     await ipc.trustFolder(project.path);
     await loadStats(project.id);
@@ -213,13 +228,11 @@
     cardEls[index]?.focus();
   }
 
-  /** Bring a project into view for the keyboard.
-   *
-   *  When the project is past the visible slots there is nowhere to move focus
-   *  to, so the query box becomes the way there — the same route the "N more"
-   *  tile offers. */
+  /** Bring a project into view for the keyboard. Focusing it scrolls the grid to
+   *  it; if a search filter currently hides it, the query box is the way
+   *  there. */
   function reveal(id: string) {
-    const index = visible.findIndex((p) => p.id === id);
+    const index = filtered.findIndex((p) => p.id === id);
     if (index >= 0) {
       focusCard(index);
       return;
@@ -263,10 +276,10 @@
       ArrowDown: cols,
       ArrowUp: -cols,
     };
-    if (e.key in step && visible.length) {
+    if (e.key in step && filtered.length) {
       e.preventDefault();
       const next = focusIndex < 0 ? 0 : focusIndex + step[e.key];
-      focusCard(Math.max(0, Math.min(visible.length - 1, next)));
+      focusCard(Math.max(0, Math.min(filtered.length - 1, next)));
     }
   }
 </script>
@@ -322,11 +335,11 @@
     </p>
   {/if}
 
-  <!-- The grid. Sized to the space that is left, never taller than it. -->
+  <!-- The grid. One row per the window's width; when the rows outgrow the
+       window the main area scrolls instead of hiding projects behind search. -->
   <main
-    class="relative z-10 min-h-0 flex-1 overflow-hidden px-4 py-1"
+    class="relative z-10 min-h-0 flex-1 overflow-y-auto px-4 py-1"
     bind:clientWidth={gridW}
-    bind:clientHeight={gridH}
   >
     {#if !$projects.length}
       <div class="flex h-full flex-col items-center justify-center gap-4">
@@ -350,11 +363,11 @@
            needs. Centring on both axes is what turns that leftover width into
            even margins instead of a strip of cards pinned to the left. -->
       <div
-        class="grid h-full content-center justify-center"
+        class="grid min-h-full content-center justify-center"
         style="grid-template-columns: repeat({cols}, {cardW}px);
                grid-auto-rows: {cardH}px; gap: {GAP}px"
       >
-        {#each visible as project, index (project.id)}
+        {#each filtered as project, index (project.id)}
           <div bind:this={cardEls[index]} class="min-w-0 focus:outline-none" tabindex="-1">
             <ProjectCard
               {project}
@@ -367,21 +380,10 @@
               oncancelrename={() => (renamingId = null)}
               onopenurl={(url) => ipc.openUrl(url).catch((err) => (error = String(err)))}
               ontrust={() => trust(project)}
+              onrelink={() => relink(project)}
             />
           </div>
         {/each}
-
-        {#if overflowing}
-          <button
-            class="flex flex-col items-center justify-center gap-1 rounded-lg border border-dashed
-                   border-zinc-800 text-zinc-500 hover:border-emerald-500/60 hover:text-emerald-400"
-            title="Search to reach the rest"
-            onclick={() => search?.focus()}
-          >
-            <span class="font-mono text-lg">+{filtered.length - visible.length}</span>
-            <span class="text-[10px]">more · search to reach them</span>
-          </button>
-        {/if}
       </div>
     {/if}
   </main>
@@ -441,10 +443,15 @@
       <button
         class="menu-item"
         onclick={() => {
-          menu = null;
+          // Read the id while the menu is still open — `target` is a live
+          // binding and would be null after `menu = null`.
           renamingId = target.project.id;
+          menu = null;
         }}
       >Rename…</button>
+      <button class="menu-item" onclick={() => act(() => relink(target.project))}>
+        Relink to a new folder…
+      </button>
       <button class="menu-item" onclick={() => act(() => loadStats(target.project.id))}>
         Refresh status
       </button>

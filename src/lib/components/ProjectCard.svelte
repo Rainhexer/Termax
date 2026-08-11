@@ -36,6 +36,7 @@
     oncancelrename,
     onopenurl,
     ontrust,
+    onrelink,
   }: {
     project: Project;
     stats?: ProjectStats;
@@ -47,6 +48,7 @@
     oncancelrename: () => void;
     onopenurl: (url: string) => void;
     ontrust: () => void;
+    onrelink: () => void;
   } = $props();
 
   const accent = $derived(accentFor(project.path));
@@ -225,7 +227,15 @@
              backdrop-blur-[3px]"
     >
       {#if stats?.missing}
-        <p class="truncate py-1.5 text-xs text-red-400">Folder is missing or unmounted</p>
+        <div class="flex items-center justify-between gap-2">
+          <p class="min-w-0 truncate text-xs text-red-400">Folder is missing or unmounted</p>
+          <button
+            class="h-7 shrink-0 rounded-md border border-red-400/40 px-2.5 text-xs text-red-300
+                   hover:bg-red-400/10"
+            title="Point this project at the folder it now lives in"
+            onclick={chip(onrelink)}
+          >Relink…</button>
+        </div>
       {:else if stats && !stats.trusted}
         <div class="flex items-center justify-between gap-2">
           <p class="truncate text-xs text-amber-400">Not trusted — git is off</p>

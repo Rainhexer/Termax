@@ -50,6 +50,7 @@ pub fn run() {
             projects::add_project,
             projects::remove_project,
             projects::rename_project,
+            projects::relink_project,
             projects::set_project_pinned,
             projects::touch_project,
             projects::save_layout,
