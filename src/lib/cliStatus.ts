@@ -9,6 +9,7 @@ import {
   paneRuns,
   paneTitles,
   readPaneTail,
+  refreshHiddenScreens,
 } from "./terminals";
 
 /**
@@ -373,9 +374,26 @@ paneInstances.subscribe((panes) => {
     scans.set(new Map());
     return;
   }
-  scanAll(ids);
-  timer = setInterval(() => scanAll(ids), POLL_MS);
+  tick(ids);
+  timer = setInterval(() => tick(ids), POLL_MS);
 });
+
+/** One poll: bring the off-screen panes' screens up to date, then scan.
+ *
+ *  A pane the user cannot see is not sent its own output any more — the backend
+ *  holds its screen instead (see `refreshHiddenScreens`) — so the text this scan
+ *  reads has to be fetched before it runs. The fetch is one call for every
+ *  hidden pane at once and usually comes back empty, because it only carries
+ *  panes that actually drew something since the last tick.
+ *
+ *  The scan is not made to wait on it. A poll that lands before the reply just
+ *  reads the previous tick's text, which is 700ms old at worst and inside every
+ *  grace period here; blocking instead would let a slow reply skip a tick
+ *  entirely, and skipped ticks are what the churn counter cannot tolerate. */
+function tick(ids: string[]) {
+  void refreshHiddenScreens(ids, SCAN_ROWS);
+  scanAll(ids);
+}
 
 function fresh(at: number, ttl: number, now: number): boolean {
   return at > 0 && now - at < ttl;

@@ -1,14 +1,16 @@
 import { Terminal } from "@xterm/xterm";
-import { CanvasAddon } from "@xterm/addon-canvas";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { listen } from "@tauri-apps/api/event";
+import { Channel } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { get, writable } from "svelte/store";
 import { ipc } from "./ipc";
+import { perf, setQueueDepthSource } from "./perf";
 import { settings, type AppSettings } from "./settings";
 import { fontStack, xtermTheme } from "./theme";
 import * as bell from "./bell";
+import * as renderers from "./renderers";
+import * as scheduler from "./writeScheduler";
 
 export const loadingPanes = writable<Set<string>>(new Set());
 
@@ -51,10 +53,31 @@ function setPaneRoot(paneId: string, root: string) {
   });
 }
 
+// Titles arrive at frame rate, not at human rate: a coding CLI rewrites its
+// OSC title on every state change, several times a second. Each write here
+// wakes the `cliStatus` derived store, which recomputes over *every* pane and
+// re-renders the sidebar — so publishing them as they land makes the UI cost
+// scale with (frames × panes) for information nobody can read that fast.
+// Collect them and publish at most once a frame instead.
+const pendingTitles = new Map<string, string>();
+let titleFlush: number | undefined;
+
 function setTitle(paneId: string, title: string) {
+  pendingTitles.set(paneId, title);
+  titleFlush ??= requestAnimationFrame(flushTitles);
+}
+
+function flushTitles() {
+  titleFlush = undefined;
   paneTitles.update((m) => {
-    if (m.get(paneId) === title) return m;
-    return new Map(m).set(paneId, title);
+    let next: Map<string, string> | null = null;
+    for (const [paneId, title] of pendingTitles) {
+      if (m.get(paneId) === title) continue;
+      next ??= new Map(m);
+      next.set(paneId, title);
+    }
+    pendingTitles.clear();
+    return next ?? m;
   });
 }
 
@@ -83,6 +106,15 @@ interface Entry {
   opening: boolean;
   spawned: boolean;
   exited: boolean;
+  /** The terminal is homed in a mounted host, so it is on screen. Maintained by
+   *  {@link attach}/{@link detach}, which is exactly when it changes — asking
+   *  the DOM instead would force layout on the output hot path. Drives write
+   *  scheduling priority and which panes get a WebGL context. */
+  visible: boolean;
+  /** What the backend currently believes: whether it should still be shipping
+   *  this pane's bytes. Usually equal to {@link visible}, but see
+   *  {@link syncStream} for the startup case where it is deliberately not. */
+  streaming: boolean;
   /** Mirrors membership of {@link loadingPanes}. Output arrives thousands of
    *  times a minute across a screenful of agents and each store write allocates
    *  a Set and wakes every subscriber, so the veil is only cleared once. */
@@ -161,7 +193,11 @@ function addLoading(paneId: string, entry: Entry) {
 
 function removeLoading(paneId: string) {
   const entry = registry.get(paneId);
-  if (entry) entry.loading = false;
+  if (entry) {
+    entry.loading = false;
+    // It was possibly held open only for this; it may now stop streaming.
+    syncStream(entry);
+  }
   loadingPanes.update(s => {
     if (!s.has(paneId)) return s;
     const next = new Set(s);
@@ -271,16 +307,19 @@ export function cliTurnEnded(paneId: string) {
 
 let listenersReady = false;
 
-/** One entry per pane that produced output in the batch. The backend already
- *  decoded the bytes, so `data` is text, not base64. */
-interface PtyChunk {
-  pane_id: string;
-  data: string;
-}
-
-function applyOutput(paneId: string, text: string) {
+/** `bytes` is the chunk's length as the backend measured it, which is what the
+ *  backend's flow control is owed — not `text.length`, and not the length of
+ *  whatever survives the OSC passes below. Every path here has to settle it. */
+function applyOutput(paneId: string, text: string, bytes: number) {
   const entry = registry.get(paneId);
-  if (!entry) return;
+  if (!entry) {
+    // A pane the backend still has but this frontend does not — a window reload
+    // leaves its PTYs running. Nothing can draw the bytes, but they must still
+    // be acknowledged or the backend parks that pane's reader against a debt
+    // nobody is left to settle.
+    scheduler.discard(paneId, bytes);
+    return;
+  }
 
   if (entry.loading) removeLoading(paneId);
   entry.outputSeq++;
@@ -299,27 +338,137 @@ function applyOutput(paneId: string, text: string) {
     out = carried + text;
   }
   if (carried !== undefined || mayHaveOsc) out = processOsc52(paneId, out);
-  if (out) entry.term.write(out);
+  // Queued rather than written: xterm spends its parse budget per instance, so
+  // handing every pane its output as it lands is what makes typing wait behind
+  // a screenful of agents. See writeScheduler.ts.
+  //
+  // Nothing left to draw — a chunk that was all clipboard escape, or one held
+  // back whole as a split sequence — still owes its acknowledgement.
+  if (out) scheduler.enqueue(paneId, out, bytes);
+  else scheduler.discard(paneId, bytes);
+}
+
+/** Something a *hidden* pane's program did. Its bytes no longer reach us, so
+ *  the backend's screen model reports these in their place; mirrors
+ *  `vt::Signal` in src-tauri/src/vt.rs. */
+type PaneSignal =
+  | { kind: "title"; title: string }
+  | { kind: "bell" }
+  | { kind: "clipboard"; data: string }
+  | { kind: "commandDone"; code: number | null }
+  | { kind: "shellIntegration" };
+
+function applySignal(paneId: string, signal: PaneSignal) {
+  const entry = registry.get(paneId);
+  switch (signal.kind) {
+    case "title":
+      setTitle(paneId, signal.title);
+      return;
+    case "bell":
+      // Same rule the visible path uses: a coding CLI rings for its own
+      // reasons, so only a plain shell's bell means "your turn".
+      if (entry?.launch === null) bell.notifyPane(paneId);
+      return;
+    case "clipboard":
+      try {
+        navigator.clipboard.writeText(atob(signal.data)).catch(() => {});
+      } catch {
+        // invalid base64 payload
+      }
+      return;
+    case "shellIntegration":
+      if (entry) entry.shellIntegration = true;
+      return;
+    case "commandDone":
+      finishRun(paneId, signal.code);
+  }
+}
+
+/** Wire format of a batch; mirrors `encode_batch` in src-tauri/src/pty.rs. */
+const FRAME_VERSION = 1;
+const RECORD_OUTPUT = 0;
+const RECORD_EXIT = 1;
+/** One decoder for every batch: it is stateless here (the backend already
+ *  reassembled characters split across PTY reads), so building one per record
+ *  would only pay for the construction. */
+const decoder = new TextDecoder();
+
+/** Read one batch and replay its records in order.
+ *
+ *  `[u8 version] ( [u8 kind][u16 id_len][id] [u32 data_len][data]? )*`,
+ *  little-endian. Exits and signals arrive in the same frame as output, behind
+ *  the bytes they follow — see the note on `Record` in pty.rs. */
+function readBatch(buffer: ArrayBuffer, onExit: (paneId: string) => void) {
+  const started = performance.now();
+  const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer);
+  if (bytes.length === 0) return;
+  if (bytes[0] !== FRAME_VERSION) {
+    console.error(`[terminals] unknown pty frame version ${bytes[0]}; dropping batch`);
+    return;
+  }
+
+  let at = 1;
+  let records = 0;
+  while (at < bytes.length) {
+    const kind = bytes[at];
+    at += 1;
+    const idLen = view.getUint16(at, true);
+    at += 2;
+    const paneId = decoder.decode(bytes.subarray(at, at + idLen));
+    at += idLen;
+    records++;
+
+    if (kind === RECORD_EXIT) {
+      handleExit(paneId, onExit);
+      continue;
+    }
+    const dataLen = view.getUint32(at, true);
+    at += 4;
+    const text = decoder.decode(bytes.subarray(at, at + dataLen));
+    at += dataLen;
+
+    if (kind !== RECORD_OUTPUT) {
+      applySignal(paneId, JSON.parse(text) as PaneSignal);
+      continue;
+    }
+    perf.note("bytes", dataLen);
+    applyOutput(paneId, text, dataLen);
+  }
+  perf.note("batches", 1);
+  perf.note("paneChunks", records);
+  perf.note("decodeMs", performance.now() - started);
+}
+
+function handleExit(paneId: string, onExit: (paneId: string) => void) {
+  const entry = registry.get(paneId);
+  if (entry) {
+    entry.exited = true;
+    entry.busy = false;
+    clearTimeout(entry.quietTimer);
+  }
+  removeLoading(paneId);
+  onExit(paneId);
 }
 
 export async function initPtyListeners(onExit: (paneId: string) => void) {
   if (listenersReady) return;
   listenersReady = true;
-  // One event carries every pane's output for the last few milliseconds — see
-  // the coalescing note in src-tauri/src/pty.rs.
-  await listen<PtyChunk[]>("pty-output", (e) => {
-    for (const chunk of e.payload) applyOutput(chunk.pane_id, chunk.data);
+
+  scheduler.setPaneLookup((paneId) => {
+    const entry = registry.get(paneId);
+    return entry?.opened ? { term: entry.term, visible: entry.visible } : undefined;
   });
-  await listen<{ pane_id: string }>("pty-exit", (e) => {
-    const entry = registry.get(e.payload.pane_id);
-    if (entry) {
-      entry.exited = true;
-      entry.busy = false;
-      clearTimeout(entry.quietTimer);
-    }
-    removeLoading(e.payload.pane_id);
-    onExit(e.payload.pane_id);
-  });
+  setQueueDepthSource(scheduler.queueDepth);
+  scheduler.startAcks();
+
+  // One batch carries every pane's output for the last few milliseconds, as raw
+  // bytes over a channel rather than as an evaluated script — see the transport
+  // note at the top of src-tauri/src/pty.rs. Attached before anything spawns:
+  // output produced with no stream attached is dropped, not buffered.
+  const stream = new Channel<ArrayBuffer>();
+  stream.onmessage = (buffer) => readBatch(buffer, onExit);
+  await ipc.attachPtyStream(stream);
 }
 
 // Backslash-escape shell-special chars so a dropped path pastes as a single
@@ -376,6 +525,7 @@ settings.subscribe(s => {
 });
 
 function applyAppearance(s: AppSettings) {
+  renderers.setChoice(s.terminal.renderer, (paneId) => !!registry.get(paneId)?.visible);
   const { fonts } = s.appearance.theme;
   const theme = xtermTheme(s.appearance.theme);
   const family = fontStack(fonts.terminal, "mono");
@@ -416,8 +566,10 @@ function create(paneId: string): Entry {
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
-  term.loadAddon(new CanvasAddon());
   term.loadAddon(new WebLinksAddon());
+  // The renderer is not loaded here: it is chosen when the pane is shown, since
+  // which one it gets depends on whether it is visible and on how many WebGL
+  // contexts are already spoken for. See renderers.ts.
 
   const el = document.createElement("div");
   el.className = "h-full w-full";
@@ -431,6 +583,8 @@ function create(paneId: string): Entry {
     opening: false,
     spawned: false,
     exited: false,
+    visible: false,
+    streaming: true,
     loading: false,
     outputSeq: 0,
     busy: false,
@@ -594,7 +748,9 @@ export function attach(
   // Idempotent: re-homing into the same host must not re-run open/onData,
   // else each keystroke replays the whole input history.
   if (entry.el.parentElement !== host) host.appendChild(entry.el);
+  setVisible(entry, true);
   if (entry.opened) {
+    renderers.apply(paneId, entry.term, true);
     fitPane(paneId);
   } else if (!entry.opening) {
     entry.opening = true;
@@ -622,6 +778,9 @@ function openWhenSized(
   entry.opening = false;
   entry.opened = true;
   entry.term.open(entry.el);
+  // After `open`, which is when the screen element the renderer draws into
+  // exists.
+  renderers.apply(paneId, entry.term, entry.visible);
   entry.term.onData((data) => {
     // Keystrokes must reach the PTY even if the run-state bookkeeping trips
     // over an entry that was torn down between keypress and handler.
@@ -729,6 +888,10 @@ function flushPending(paneId: string, launch: string | null) {
     clearTimeout(settleTimer);
     clearTimeout(safetyTimer);
     outputHooks.delete(paneId);
+    // Nothing is watching this pane's raw stream any more; if it is off screen
+    // it can stop being shipped.
+    const entry = registry.get(paneId);
+    if (entry) syncStream(entry);
     if (queued.execute) runInPane(paneId, queued.text);
     else typeInPane(paneId, queued.text);
   };
@@ -762,7 +925,13 @@ function flushPending(paneId: string, launch: string | null) {
  *  it re-attaches when the pane is shown again. */
 export function detach(paneId: string, host: HTMLElement) {
   const entry = registry.get(paneId);
-  if (entry && entry.el.parentElement === host) entry.el.remove();
+  if (!entry || entry.el.parentElement !== host) return;
+  entry.el.remove();
+  setVisible(entry, false);
+  // Hand the GL context back so a pane that is actually on screen can use it.
+  // xterm has already stopped drawing this one (its IntersectionObserver sees
+  // the detached element), so a plain canvas renderer costs it nothing.
+  if (entry.opened) renderers.apply(paneId, entry.term, false);
 }
 
 export function isAlive(paneId: string): boolean {
@@ -770,11 +939,101 @@ export function isAlive(paneId: string): boolean {
   return !!entry && !entry.exited;
 }
 
+// Screens of panes that are not on screen
+// ---------------------------------------
+// A hidden pane's bytes stop crossing the IPC boundary — that is the point of
+// the backend's screen model — so its xterm buffer goes stale the moment it is
+// hidden and cannot answer `readPaneTail`. The backend can: it holds the pane's
+// live screen either way. What arrives here is the text of the last few dozen
+// rows, refreshed by {@link refreshHiddenScreens}, which is all the status scan
+// ever reads.
+
+interface RemoteScreen {
+  /** The backend's version of this pane's screen. Also what {@link outputSeq}
+   *  reports for a hidden pane: the frontend counts batches it received, and it
+   *  is no longer receiving any. */
+  seq: number;
+  text: string;
+}
+
+const remoteScreens = new Map<string, RemoteScreen>();
+let refreshing = false;
+
+function setVisible(entry: Entry, visible: boolean) {
+  if (entry.visible !== visible) {
+    entry.visible = visible;
+    // A pane coming back on screen is handed the output it missed, so whatever
+    // was cached for it is immediately stale — and its xterm buffer, once that
+    // replay lands, is authoritative again.
+    if (visible) remoteScreens.delete(entry.paneId);
+  }
+  syncStream(entry);
+}
+
+/** Bring the backend's idea of whether this pane needs its bytes shipped into
+ *  line with ours.
+ *
+ *  Not simply "is it on screen". Two things watch the raw stream for a pane that
+ *  is still starting: the loading veil, cleared by the first byte, and
+ *  {@link flushPending}, which waits for a launched program to paint its
+ *  interactive UI before typing into it. Neither can see a stream that has
+ *  stopped arriving — so a pane switched away from mid-startup would sit under
+ *  its veil until the 15-second safety timer fired. Such a pane keeps streaming
+ *  until it is up, which is a few seconds, once. */
+function syncStream(entry: Entry) {
+  if (!entry.spawned || entry.exited) return;
+  const wanted = entry.visible || entry.loading || pendingRun.has(entry.paneId);
+  if (wanted === entry.streaming) return;
+  entry.streaming = wanted;
+  ipc.setPaneVisible(entry.paneId, wanted).catch(() => {
+    // The pane died mid-call. Re-reading on the next transition is enough;
+    // failing to hide only costs us the bytes we were trying not to ship.
+  });
+}
+
+/** Pull fresh screens for the hidden panes among `paneIds`.
+ *
+ *  One call for all of them, and the backend leaves out every pane still at the
+ *  version we already hold — with most agents waiting most of the time, the
+ *  reply is usually empty. Overlapping calls are dropped rather than queued:
+ *  the next tick will ask again, and a poller must not be able to pile up. */
+export async function refreshHiddenScreens(paneIds: string[], rows: number) {
+  if (refreshing) return;
+  const queries = paneIds
+    .filter((paneId) => {
+      const entry = registry.get(paneId);
+      return entry && !entry.visible && !entry.exited;
+    })
+    .map((paneId) => ({ paneId, seq: remoteScreens.get(paneId)?.seq ?? 0 }));
+  if (!queries.length) return;
+
+  refreshing = true;
+  try {
+    for (const screen of await ipc.paneScreens(queries, rows)) {
+      // Shown again while the call was in flight: its terminal is being brought
+      // up to date with the real bytes, so a snapshot would only be older.
+      if (registry.get(screen.paneId)?.visible) continue;
+      remoteScreens.set(screen.paneId, { seq: screen.seq, text: screen.text });
+    }
+  } catch {
+    // Backend not up yet, or a pane closed mid-call; the next tick retries.
+  } finally {
+    refreshing = false;
+  }
+}
+
 /** How many batches of output this pane has received. A poller that remembers
  *  the value it last saw can skip the pane entirely while this is unchanged:
- *  nothing has been written, so the screen it would read is the same one. */
+ *  nothing has been written, so the screen it would read is the same one.
+ *
+ *  For a hidden pane this is the backend's count, since no batches arrive here
+ *  for it at all. The two counters are unrelated sequences, but nothing compares
+ *  them across a visibility change: showing a pane clears its cached screen and
+ *  replays its real bytes, so the poller re-reads it either way. */
 export function outputSeq(paneId: string): number {
-  return registry.get(paneId)?.outputSeq ?? 0;
+  const entry = registry.get(paneId);
+  if (entry && !entry.visible) return remoteScreens.get(paneId)?.seq ?? 0;
+  return entry?.outputSeq ?? 0;
 }
 
 /** Milliseconds since this pane last received a keystroke, or Infinity if it
@@ -790,12 +1049,14 @@ export function msSinceInput(paneId: string): number {
  *  For a full-screen TUI (claude/opencode) the active buffer is the alternate
  *  screen, so this is exactly the live UI — no stale scrollback mixed in. */
 export function readPaneTail(paneId: string, rows = 24): string {
-  // Deliberately not gated on `opened`: output is written to the xterm instance
-  // whether or not it is currently homed in a DOM node, so a pane sitting in a
-  // background tab has a perfectly readable buffer — and refusing to read it is
-  // what made the sidebar report "idle" for agents working off-screen.
   const entry = registry.get(paneId);
   if (!entry) return "";
+  // A hidden pane's xterm buffer stopped being fed when the pane left the
+  // screen, so reading it would report whatever was drawn at that moment,
+  // forever. The backend's screen is the live one — see remoteScreens above.
+  // Refusing to answer at all is what once made the sidebar call every
+  // off-screen agent "idle".
+  if (!entry.visible) return remoteScreens.get(paneId)?.text ?? "";
   const buf = entry.term.buffer.active;
   const end = buf.baseY + entry.term.rows;
   const start = Math.max(0, end - rows);
@@ -822,7 +1083,12 @@ export function fitPane(paneId: string) {
 }
 
 export function focusTerminal(paneId: string) {
-  registry.get(paneId)?.term.focus();
+  const entry = registry.get(paneId);
+  if (!entry) return;
+  // Focus is what the WebGL pool is rationed by: the pane you are working in is
+  // the one whose redraw latency you can feel.
+  renderers.noteFocus(paneId);
+  entry.term.focus();
 }
 
 /** Type text into a pane's terminal without submitting it. */
@@ -849,6 +1115,12 @@ export function destroyPane(paneId: string) {
   outputHooks.delete(paneId);
   oscBuffers.delete(paneId);
   statusTails.delete(paneId);
+  pendingTitles.delete(paneId);
+  remoteScreens.delete(paneId);
+  renderers.release(paneId);
+  // Drops whatever was queued for this pane, but still reports those bytes: the
+  // backend parks a pane's reader until they are acknowledged.
+  scheduler.forget(paneId);
   clearRun(paneId);
   paneTitles.update((m) => {
     if (!m.has(paneId)) return m;

@@ -36,6 +36,15 @@
     { style: "bar", blink: true, label: "Blink bar" },
   ];
 
+  // Only worth changing when the default misbehaves — a machine whose GL driver
+  // WebKit refuses, or one where software GL is slower than plain canvas.
+  const RENDERERS: { value: "auto" | "webgl" | "canvas" | "dom"; label: string; hint: string }[] = [
+    { value: "auto", label: "Automatic", hint: "GPU for the panes on screen, canvas for the rest." },
+    { value: "webgl", label: "GPU (WebGL)", hint: "Same as automatic; kept explicit so it can be pinned." },
+    { value: "canvas", label: "Canvas", hint: "No GPU. Use if panes flicker or go blank." },
+    { value: "dom", label: "DOM", hint: "Slowest, but works everywhere. A last resort." },
+  ];
+
   const REPO_URL = "https://github.com/Rainhexer/Termax";
 
   function close() {
@@ -147,6 +156,21 @@
             Cursor colour and the rest of the terminal palette live in
             <button class="text-emerald-400 hover:underline" onclick={() => (section = "appearance")}>Appearance</button>.
           </p>
+          <label class="flex flex-col gap-1">
+            <span class="text-xs text-zinc-400">Renderer <span class="text-zinc-600">(applies immediately)</span></span>
+            <select
+              class="w-56 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-200 outline-none focus:border-emerald-500"
+              value={$settings.terminal.renderer}
+              onchange={(e) => setTerminal("renderer", (e.target as HTMLSelectElement).value as typeof $settings.terminal.renderer)}
+            >
+              {#each RENDERERS as r (r.value)}
+                <option value={r.value}>{r.label}</option>
+              {/each}
+            </select>
+            <span class="text-xs text-zinc-600">
+              {RENDERERS.find((r) => r.value === $settings.terminal.renderer)?.hint}
+            </span>
+          </label>
           <label class="flex flex-col gap-1">
             <span class="text-xs text-zinc-400">Oversized file limit (KB) <span class="text-zinc-600">— max file size for diff/snapshot tracking</span></span>
             <input type="number" min="64" max="65536" step="64"

@@ -74,6 +74,10 @@ export interface TerminalSettings {
   cursorStyle: "block" | "underline" | "bar";
   cursorBlink: boolean;
   oversizedLimitKb: number;
+  /** How panes draw. "auto" gives WebGL to the panes on screen and canvas to
+   *  the rest; the explicit values exist for machines where GL is broken or
+   *  slower than software drawing. See renderers.ts. */
+  renderer: "auto" | "webgl" | "canvas" | "dom";
 }
 
 export interface AppSettings {
@@ -108,6 +112,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     cursorStyle: "underline",
     cursorBlink: true,
     oversizedLimitKb: 1024,
+    renderer: "auto",
   },
   behavior: {
     defaultBell: false,
