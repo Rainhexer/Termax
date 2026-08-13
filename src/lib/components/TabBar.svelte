@@ -6,9 +6,6 @@
     newTab,
     closeTab,
     renameTab,
-    reorderTab,
-    movePaneToTab,
-    movePaneToNewTab,
     draggedPaneId,
     draggedTabId,
     tabsWithAttention,
@@ -16,6 +13,7 @@
     primaryRoot,
     worktrees,
   } from "../stores";
+  import { dropTarget, startTabDrag } from "../paneDrag";
   import { ask } from "@tauri-apps/plugin-dialog";
   import { isAlive } from "../terminals";
   import { branchByRoot, rootForTab } from "../worktrees";
@@ -24,17 +22,25 @@
 
   let editingId = $state<string | null>(null);
   let draft = $state("");
-  /** Insertion slot for a tab drag: index in the pre-move list, or null. */
-  let dropIndex = $state<number | null>(null);
-  /** Tab highlighted as the destination of a dragged pane. */
-  let paneTargetId = $state<string | null>(null);
-  /** True while a dragged pane hovers the "+" button (drop = new tab). */
-  let paneToNewTab = $state(false);
   let menu = $state<{ id: string; x: number; y: number } | null>(null);
 
-  // Spring-loaded tabs: hovering one with a pane in hand switches to it, so the
-  // pane can then be dropped on an exact position inside that tab's grid.
-  let springTimer: ReturnType<typeof setTimeout> | undefined;
+  // Drop feedback is derived from the one pointer-driven gesture in paneDrag.ts
+  // rather than from per-element dragover/dragleave events; spring-loaded tab
+  // switching lives there too, since it needs a timer that actually fires.
+  /** Insertion slot for a tab drag: index in the pre-move list, or null. */
+  const dropIndex = $derived(
+    $draggedTabId && $dropTarget?.kind === "tab"
+      ? $dropTarget.slot
+      : $draggedTabId && $dropTarget?.kind === "newTab"
+        ? $tabs.length
+        : null,
+  );
+  /** Tab highlighted as the destination of a dragged pane. */
+  const paneTargetId = $derived(
+    $draggedPaneId && $dropTarget?.kind === "tab" ? $dropTarget.tabId : null,
+  );
+  /** True while a dragged pane hovers the "+" button (drop = new tab). */
+  const paneToNewTab = $derived(!!$draggedPaneId && $dropTarget?.kind === "newTab");
 
   // The bar hides itself for a single tab, but must appear while a pane is in
   // flight so it can be dropped onto another tab (or torn off into a new one) —
@@ -113,121 +119,18 @@
     closeTab(id);
   }
 
-  function springLoad(id: string) {
-    clearTimeout(springTimer);
-    if (id === $activeTabId) return;
-    springTimer = setTimeout(() => switchTab(id), 550);
-  }
-
-  function cancelSpring() {
-    clearTimeout(springTimer);
-  }
-
-  function onTabDragStart(e: DragEvent, id: string) {
-    draggedTabId.set(id);
-    e.dataTransfer?.setData("text/tab", id);
-    if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
-  }
-
-  function onTabDragEnd() {
-    draggedTabId.set(null);
-    dropIndex = null;
-    paneTargetId = null;
-    cancelSpring();
-  }
-
-  function onDragEndAnywhere() {
-    cancelSpring();
-    dropIndex = null;
-    paneTargetId = null;
-    paneToNewTab = false;
-    draggedTabId.set(null);
-    draggedPaneId.set(null);
-  }
-
-  function onTabDragOver(e: DragEvent, tab: Tab, i: number) {
-    if ($draggedTabId) {
-      e.preventDefault();
-      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-      dropIndex = e.clientX > rect.left + rect.width / 2 ? i + 1 : i;
-    } else if ($draggedPaneId) {
-      e.preventDefault();
-      if (paneTargetId !== tab.id) {
-        paneTargetId = tab.id;
-        springLoad(tab.id);
-      }
-    }
-  }
-
-  function onTabDragLeave(e: DragEvent, tab: Tab) {
-    const related = e.relatedTarget as HTMLElement | null;
-    const target = e.currentTarget as HTMLElement;
-    if (related && target.contains(related)) return;
-    if (paneTargetId === tab.id) {
-      paneTargetId = null;
-      cancelSpring();
-    }
-  }
-
-  function onTabDrop(e: DragEvent, tab: Tab, i: number) {
-    e.preventDefault();
-    cancelSpring();
-    const tabId = $draggedTabId;
-    const paneId = $draggedPaneId;
-    const slot = dropIndex;
-    dropIndex = null;
-    paneTargetId = null;
-    if (tabId) {
-      reorderTab(tabId, slot ?? i);
-      draggedTabId.set(null);
-    } else if (paneId) {
-      movePaneToTab(paneId, tab.id);
-      draggedPaneId.set(null);
-    }
-  }
-
   /** A pane that is alone in its tab is already a tab of its own, so tearing it
-   *  off is a no-op that `movePaneToNewTab` silently ignores. The drop target used
-   *  to accept it anyway and do nothing, which reads as a bug. */
+   *  off is a no-op that `movePaneToNewTab` silently ignores. The drop target
+   *  refuses it (see paneDrag.ts), and the "+" says why. */
   const loneDraggedPane = $derived.by(() => {
     const paneId = $draggedPaneId;
     if (!paneId) return false;
     const owner = $tabs.find((t) => collectTabPanes(t).includes(paneId));
     return !!owner && collectTabPanes(owner).length === 1;
   });
-
-  function onPlusDragOver(e: DragEvent) {
-    if (!$draggedPaneId && !$draggedTabId) return;
-    if ($draggedPaneId && loneDraggedPane) return; // no drop, no highlight
-    e.preventDefault();
-    if ($draggedTabId) dropIndex = $tabs.length;
-    else paneToNewTab = true;
-  }
-
-  function onPlusDrop(e: DragEvent) {
-    e.preventDefault();
-    paneToNewTab = false;
-    const tabId = $draggedTabId;
-    const paneId = $draggedPaneId;
-    const slot = dropIndex;
-    dropIndex = null;
-    if (tabId) {
-      reorderTab(tabId, slot ?? $tabs.length);
-      draggedTabId.set(null);
-    } else if (paneId) {
-      movePaneToNewTab(paneId);
-      draggedPaneId.set(null);
-    }
-  }
 </script>
 
-<!-- A spring-loaded switch unmounts the dragged pane, so its own `dragend` may
-     never fire; clear the drag state globally to avoid a stuck drag. -->
-<svelte:window
-  onclick={() => (menu = null)}
-  ondragend={onDragEndAnywhere}
-  ondrop={onDragEndAnywhere}
-/>
+<svelte:window onclick={() => (menu = null)} />
 
 {#if visible}
   <div class="flex h-9 shrink-0 items-stretch overflow-hidden border-b border-zinc-800 bg-zinc-950">
@@ -245,16 +148,12 @@
           {$draggedTabId === tab.id ? 'opacity-40' : ''}
           {paneTargetId === tab.id ? 'bg-emerald-500/10 ring-1 ring-inset ring-emerald-400' : ''}
           {ringing ? 'bell-pulse-tab' : ''}"
-        draggable={editingId !== tab.id}
+        data-tab-id={tab.id}
         onclick={() => switchTab(tab.id)}
         ondblclick={() => startRename(tab.id, tab.title)}
         onmousedown={(e) => onTabPointerDown(e, tab.id)}
+        onpointerdown={(e) => { if (editingId !== tab.id) startTabDrag(e, tab.id, tab.title); }}
         oncontextmenu={(e) => openMenu(e, tab.id)}
-        ondragstart={(e) => onTabDragStart(e, tab.id)}
-        ondragend={onTabDragEnd}
-        ondragover={(e) => onTabDragOver(e, tab, i)}
-        ondragleave={(e) => onTabDragLeave(e, tab)}
-        ondrop={(e) => onTabDrop(e, tab, i)}
         title={tabHint(tab)}
       >
         {#if active}
@@ -300,10 +199,8 @@
           ? "This pane is already alone in its tab"
           : "Move pane to a new tab"
         : "New tab"}
+      data-new-tab
       onclick={() => newTab()}
-      ondragover={onPlusDragOver}
-      ondragleave={() => (paneToNewTab = false)}
-      ondrop={onPlusDrop}
     >
       {#if dropIndex === $tabs.length}
         <span class="pointer-events-none absolute inset-y-1 left-0 w-0.5 rounded bg-emerald-400"></span>

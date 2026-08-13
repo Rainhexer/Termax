@@ -27,18 +27,14 @@
     fsTick,
     lockFlash,
     maximizedPaneId,
-    movePane,
     sessionReady,
     setPaneDiff,
     setPaneView,
-    splitPaneAt,
-    draggedPaneId,
     toggleMaximizedPane,
   } from "../stores";
+  import { dropTarget, startPaneDrag } from "../paneDrag";
 
   type CodeEditor = import("monaco-editor").editor.ICodeEditor;
-
-  type DropZone = "top" | "bottom" | "left" | "right" | "center";
 
   let { pane }: { pane: PaneNode } = $props();
   // TilingLayout keys panes by id, so this instance is bound to one id for its
@@ -48,7 +44,12 @@
   const paneId = untrack(() => pane.id);
   let host: HTMLDivElement;
   let self: HTMLDivElement;
-  let currentZone = $state<DropZone | null>(null);
+  /** Which edge of this pane the thing in hand would land on, if any. Drags are
+   *  pointer-driven (see paneDrag.ts), so hit-testing is central rather than
+   *  per-element `dragover`. */
+  const currentZone = $derived(
+    $dropTarget?.kind === "pane" && $dropTarget.paneId === paneId ? $dropTarget.zone : null,
+  );
   let binary = $state(false);
   let error = $state<string | null>(null);
   /** Set when the file changed on disk and the view was reloaded. */
@@ -125,53 +126,6 @@
 
   // Guards async loads against pane teardown / file switch mid-request.
   let generation = 0;
-
-  function getDropZone(e: DragEvent): DropZone | null {
-    const rect = self.getBoundingClientRect();
-    const x = (e.clientX - rect.left) / rect.width;
-    const y = (e.clientY - rect.top) / rect.height;
-    const edge = 0.25;
-    if (y < edge) return "top";
-    if (y > 1 - edge) return "bottom";
-    if (x < edge) return "left";
-    if (x > 1 - edge) return "right";
-    return "center";
-  }
-
-  function onDragOver(e: DragEvent) {
-    e.preventDefault();
-    const zone = getDropZone(e);
-    if (zone) currentZone = zone;
-  }
-
-  function onDragLeave(e: DragEvent) {
-    const target = e.currentTarget as HTMLElement;
-    const related = e.relatedTarget as HTMLElement | null;
-    if (!related || !target.contains(related)) {
-      currentZone = null;
-    }
-  }
-
-  function onDrop(e: DragEvent) {
-    e.preventDefault();
-    const fromId = e.dataTransfer?.getData("text/pane") ?? $draggedPaneId;
-    const zone = currentZone;
-    currentZone = null;
-    draggedPaneId.set(null);
-    if (!fromId) return;
-
-    if (zone === "center") {
-      movePane(fromId, paneId);
-    } else if (zone === "left") {
-      splitPaneAt(fromId, paneId, "row", true);
-    } else if (zone === "right") {
-      splitPaneAt(fromId, paneId, "row", false);
-    } else if (zone === "top") {
-      splitPaneAt(fromId, paneId, "col", true);
-    } else if (zone === "bottom") {
-      splitPaneAt(fromId, paneId, "col", false);
-    }
-  }
 
   const editorOptions = () => ({
     theme: MONACO_THEME,
@@ -696,12 +650,10 @@
 <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
 <div
   bind:this={self}
+  data-pane-id={paneId}
   class="relative flex h-full w-full min-w-0 min-h-0 flex-col overflow-hidden rounded-lg border pane-editor-bg transition-colors
     {currentZone && currentZone !== 'center' ? 'border-emerald-400' : focused ? 'border-emerald-500/60' : 'border-zinc-800'}"
   onmousedown={() => focusedPaneId.set(paneId)}
-  ondragover={onDragOver}
-  ondragleave={onDragLeave}
-  ondrop={onDrop}
 >
   {#if currentZone && currentZone !== "center"}
     <div class="pointer-events-none absolute inset-0 z-10 rounded-lg bg-emerald-500/5"></div>
@@ -716,10 +668,8 @@
     {/if}
   {/if}
   <div
-    class="flex h-7 shrink-0 cursor-grab items-center gap-1.5 border-b border-zinc-800 bg-zinc-950 px-2 active:cursor-grabbing"
-    draggable="true"
-    ondragstart={(e) => { e.dataTransfer?.setData("text/pane", paneId); draggedPaneId.set(paneId); }}
-    ondragend={() => draggedPaneId.set(null)}
+    class="flex h-7 shrink-0 touch-none cursor-grab items-center gap-1.5 border-b border-zinc-800 bg-zinc-950 px-2 active:cursor-grabbing"
+    onpointerdown={(e) => startPaneDrag(e, paneId, fileName)}
   >
     <svg
       class="h-3.5 w-3.5 shrink-0 {focused ? 'text-emerald-400' : 'text-zinc-500'}"
