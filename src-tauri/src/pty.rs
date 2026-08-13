@@ -155,15 +155,23 @@ pub struct PtyManager {
     ptys: Mutex<HashMap<String, Arc<PtyHandle>>>,
     /// Created with the first pane, so an app that never opens a terminal never
     /// starts the coalescing thread.
-    signals: OnceLock<Sender<Signal>>,
+    signals: OnceLock<Sender<PaneEvent>>,
     sink: Sink,
     flow: Arc<Flow>,
+    /// Every pane's terminal state, kept whether or not anyone is looking at
+    /// it. This is what lets a hidden pane's output stop crossing the IPC
+    /// boundary without the sidebar losing track of what it is doing.
+    screens: Arc<crate::vt::ScreenStore>,
 }
 
 /// What a pane's reader thread reports to the coalescer.
-enum Signal {
+enum PaneEvent {
     Output { pane_id: String, bytes: Vec<u8> },
     Exit { pane_id: String },
+    /// A pane was shown or hidden. Routed through the coalescer rather than
+    /// applied where it is requested so that it is ordered against that pane's
+    /// output — see `Pending::accept`.
+    Visibility { pane_id: String, visible: bool },
 }
 
 /// One pane's drained-byte report; see [`Flow`].
@@ -180,6 +188,7 @@ const FRAME_VERSION: u8 = 1;
 
 const RECORD_OUTPUT: u8 = 0;
 const RECORD_EXIT: u8 = 1;
+const RECORD_SIGNAL: u8 = 2;
 
 /// One thing that happened to one pane, in the order it happened.
 ///
@@ -193,6 +202,13 @@ const RECORD_EXIT: u8 = 1;
 enum Record {
     /// Decoded output — see [`decode_utf8`].
     Output { pane_id: String, data: String },
+    /// Something a *hidden* pane did that the webview cannot see for itself,
+    /// because it is no longer being sent that pane's bytes. Small and rare, so
+    /// the payload is JSON rather than another binary layout.
+    Signal {
+        pane_id: String,
+        signal: crate::vt::Signal,
+    },
     Exit { pane_id: String },
 }
 
@@ -203,18 +219,19 @@ enum Record {
 ///
 ///   `[u8 version] ( [u8 kind][u16 id_len][id] [u32 data_len][data]? )*`
 fn encode_batch(records: &[Record]) -> Vec<u8> {
-    let size = 1 + records
-        .iter()
-        .map(|record| match record {
-            Record::Output { pane_id, data } => 7 + pane_id.len() + data.len(),
-            Record::Exit { pane_id } => 3 + pane_id.len(),
-        })
-        .sum::<usize>();
-    let mut out = Vec::with_capacity(size);
+    let mut out = Vec::with_capacity(1 + records.len() * 64);
     out.push(FRAME_VERSION);
     for record in records {
         let (kind, pane_id, data) = match record {
-            Record::Output { pane_id, data } => (RECORD_OUTPUT, pane_id, Some(data)),
+            Record::Output { pane_id, data } => (RECORD_OUTPUT, pane_id, Some(data.clone())),
+            Record::Signal { pane_id, signal } => (
+                RECORD_SIGNAL,
+                pane_id,
+                // A signal that cannot be serialized is a bug in this crate, not
+                // a runtime condition; carrying an empty body keeps the frame
+                // well-formed so one bad record cannot desynchronize the rest.
+                Some(serde_json::to_string(signal).unwrap_or_default()),
+            ),
             Record::Exit { pane_id } => (RECORD_EXIT, pane_id, None),
         };
         out.push(kind);
@@ -287,17 +304,45 @@ struct Pending {
     order: Vec<String>,
     data: HashMap<String, Vec<u8>>,
     carries: HashMap<String, Vec<u8>>,
+    /// Things a hidden pane did that the webview has to be told about, since it
+    /// is no longer seeing that pane's bytes. See [`crate::vt`].
+    signals: Vec<(String, crate::vt::Signal)>,
     bytes: usize,
 }
 
 impl Pending {
-    fn accept(&mut self, signal: Signal, exits: &mut Vec<String>) {
-        let (pane_id, bytes) = match signal {
-            Signal::Exit { pane_id } => {
+    /// Take one event from a reader thread (or from a visibility change) and
+    /// fold it into this window.
+    ///
+    /// Every byte goes through the pane's screen model first, and it is that
+    /// model — not this function — that decides whether the webview needs them:
+    /// a pane nobody is looking at keeps its output here in the backend, where
+    /// nothing has to parse it on the thread that handles typing.
+    fn accept(&mut self, event: PaneEvent, exits: &mut Vec<String>, screens: &crate::vt::ScreenStore) {
+        let (pane_id, bytes) = match event {
+            PaneEvent::Exit { pane_id } => {
                 exits.push(pane_id);
                 return;
             }
-            Signal::Output { pane_id, bytes } => (pane_id, bytes),
+            PaneEvent::Visibility { pane_id, visible } => {
+                // Handled here, on the one thread that also feeds the screens,
+                // so a pane being shown cannot race the output arriving for it:
+                // whatever it missed is queued ahead of whatever comes next.
+                match screens.set_visible(&pane_id, visible) {
+                    Some(replay) => (pane_id, replay),
+                    None => return,
+                }
+            }
+            PaneEvent::Output { pane_id, bytes } => {
+                let (send, signals) = screens.feed(&pane_id, &bytes);
+                for signal in signals {
+                    self.signals.push((pane_id.clone(), signal));
+                }
+                if !send {
+                    return;
+                }
+                (pane_id, bytes)
+            }
         };
 
         if !self.data.contains_key(&pane_id) {
@@ -318,7 +363,8 @@ impl Pending {
     /// as one frame. Exits go last so they never overtake a pane's own output.
     fn flush(&mut self, sink: &Sink, flow: &Flow, exits: Vec<String>) {
         self.bytes = 0;
-        let mut records = Vec::with_capacity(self.order.len() + exits.len());
+        let mut records =
+            Vec::with_capacity(self.order.len() + self.signals.len() + exits.len());
         for pane_id in self.order.drain(..) {
             let Some(bytes) = self.data.remove(&pane_id) else {
                 continue;
@@ -330,6 +376,9 @@ impl Pending {
                 continue;
             }
             records.push(Record::Output { pane_id, data });
+        }
+        for (pane_id, signal) in self.signals.drain(..) {
+            records.push(Record::Signal { pane_id, signal });
         }
         for pane_id in exits {
             self.carries.remove(&pane_id);
@@ -372,21 +421,26 @@ impl Pending {
 }
 
 /// Fold every pane's output into one batch per [`FLUSH_INTERVAL`].
-fn run_coalescer(rx: Receiver<Signal>, sink: Sink, flow: Arc<Flow>) {
+fn run_coalescer(
+    rx: Receiver<PaneEvent>,
+    sink: Sink,
+    flow: Arc<Flow>,
+    screens: Arc<crate::vt::ScreenStore>,
+) {
     let mut pending = Pending::default();
     loop {
         // Blocks while every pane is quiet, so an idle app does no work at all.
         let Ok(first) = rx.recv() else { break };
         let deadline = Instant::now() + FLUSH_INTERVAL;
         let mut exits = Vec::new();
-        pending.accept(first, &mut exits);
+        pending.accept(first, &mut exits, &screens);
 
         // An exit cuts the window short: it travels in the frame it arrived
         // with, behind that frame's output, so the pane is not torn down before
         // its last lines have been drawn.
         while exits.is_empty() && pending.bytes < MAX_BATCH_BYTES {
             match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                Ok(signal) => pending.accept(signal, &mut exits),
+                Ok(event) => pending.accept(event, &mut exits, &screens),
                 Err(RecvTimeoutError::Timeout) => break,
                 Err(RecvTimeoutError::Disconnected) => {
                     pending.flush(&sink, &flow, exits);
@@ -412,13 +466,14 @@ fn default_shell() -> String {
 }
 
 impl PtyManager {
-    fn signals(&self) -> Sender<Signal> {
+    fn signals(&self) -> Sender<PaneEvent> {
         self.signals
             .get_or_init(|| {
                 let (tx, rx) = mpsc::channel();
                 let sink = Arc::clone(&self.sink);
                 let flow = Arc::clone(&self.flow);
-                std::thread::spawn(move || run_coalescer(rx, sink, flow));
+                let screens = Arc::clone(&self.screens);
+                std::thread::spawn(move || run_coalescer(rx, sink, flow, screens));
                 tx
             })
             .clone()
@@ -493,7 +548,7 @@ impl PtyManager {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        let sent = signals.send(Signal::Output {
+                        let sent = signals.send(PaneEvent::Output {
                             pane_id: reader_pane.clone(),
                             bytes: buf[..n].to_vec(),
                         });
@@ -503,7 +558,7 @@ impl PtyManager {
                     }
                 }
             }
-            let _ = signals.send(Signal::Exit {
+            let _ = signals.send(PaneEvent::Exit {
                 pane_id: reader_pane,
             });
         });
@@ -522,6 +577,9 @@ impl PtyManager {
                 let _ = writer.flush();
             }
         });
+
+        // A pane only spawns once it has been mounted, so it starts visible.
+        self.screens.open(pane_id.clone(), rows, cols);
 
         let shell_pid = child.process_id();
         self.ptys.lock().unwrap().insert(
@@ -572,6 +630,9 @@ impl PtyManager {
     }
 
     pub fn resize(&self, pane_id: &str, rows: u16, cols: u16) -> Result<(), String> {
+        // The screen has to follow the pty or the rows read out of it stop
+        // matching what the pane actually shows.
+        self.screens.resize(pane_id, rows, cols);
         let handle = self.handle(pane_id).ok_or("no such pane")?;
         let master = handle.master.lock().unwrap();
         master
@@ -593,6 +654,7 @@ impl PtyManager {
         // its outstanding bytes; releasing them lets its reader thread wake and
         // notice the pty is gone instead of parking until the stall guard.
         self.flow.forget(pane_id);
+        self.screens.close(pane_id);
     }
 
     pub fn kill_all(&self) {
@@ -601,6 +663,21 @@ impl PtyManager {
             let _ = handle.child.lock().unwrap().kill();
         }
         self.flow.reset();
+    }
+
+    /// Tell the backend whether a pane is on screen.
+    ///
+    /// Hiding one is what stops its output crossing to the webview; showing it
+    /// again hands back what it missed. Both are routed through the coalescer so
+    /// the change is ordered against that pane's own output.
+    pub fn set_visible(&self, pane_id: String, visible: bool) {
+        let _ = self.signals().send(PaneEvent::Visibility { pane_id, visible });
+    }
+
+    /// Screens for the panes whose contents changed since the caller last read
+    /// them. This is how the sidebar reads a pane it is not showing.
+    pub fn tails(&self, queries: &[crate::vt::TailQuery], rows: u16) -> Vec<crate::vt::PaneTail> {
+        self.screens.tails(queries, rows)
     }
 
     /// Record that the webview has drawn these bytes, freeing the readers of
@@ -632,6 +709,30 @@ pub fn attach_pty_stream(
 ) -> Result<(), String> {
     manager.attach_stream(channel);
     Ok(())
+}
+
+/// Tell the backend a pane was shown or hidden.
+///
+/// Hiding is the whole point of the screen store: a pane nobody is looking at
+/// keeps its output in the backend, where it costs a fast native parse instead
+/// of time on the one thread that also handles typing.
+#[tauri::command(async)]
+pub fn set_pane_visible(manager: tauri::State<PtyManager>, pane_id: String, visible: bool) {
+    manager.set_visible(pane_id, visible);
+}
+
+/// Read the live screen of panes the webview is not being sent bytes for.
+///
+/// Each query carries the version the caller already holds, and panes still at
+/// that version are left out — with most agents waiting most of the time, that
+/// is nearly all of them.
+#[tauri::command(async)]
+pub fn pane_screens(
+    manager: tauri::State<PtyManager>,
+    queries: Vec<crate::vt::TailQuery>,
+    rows: u16,
+) -> Vec<crate::vt::PaneTail> {
+    manager.tails(&queries, rows)
 }
 
 /// Report bytes the webview has finished drawing, per pane.
@@ -693,7 +794,8 @@ pub fn pty_foreground_busy(
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_utf8, encode_batch, Flow, Record, FRAME_VERSION, HIGH_WATERMARK, RECORD_OUTPUT,
+        decode_utf8, encode_batch, Flow, PaneEvent, Pending, Record, FRAME_VERSION,
+        HIGH_WATERMARK, RECORD_EXIT, RECORD_SIGNAL,
     };
     use std::sync::Arc;
 
@@ -717,7 +819,7 @@ mod tests {
             at += 2;
             let pane_id = String::from_utf8(buf[at..at + id_len].to_vec()).unwrap();
             at += id_len;
-            if kind != RECORD_OUTPUT {
+            if kind == RECORD_EXIT {
                 out.push(Record::Exit { pane_id });
                 continue;
             }
@@ -726,7 +828,14 @@ mod tests {
             at += 4;
             let data = String::from_utf8(buf[at..at + data_len].to_vec()).unwrap();
             at += data_len;
-            out.push(Record::Output { pane_id, data });
+            out.push(if kind == RECORD_SIGNAL {
+                Record::Signal {
+                    pane_id,
+                    signal: serde_json::from_str(&data).unwrap(),
+                }
+            } else {
+                Record::Output { pane_id, data }
+            });
         }
         out
     }
@@ -753,6 +862,27 @@ mod tests {
         assert_eq!(decode_batch(&encode_batch(&records)), records);
     }
 
+    /// A hidden pane's bytes never reach the webview, so what its program did
+    /// has to travel in their place — in the same frame, ordered against
+    /// everything else.
+    #[test]
+    fn a_batch_carries_signals_from_hidden_panes() {
+        let records = vec![
+            Record::Signal {
+                pane_id: "pane-a".into(),
+                signal: crate::vt::Signal::Title {
+                    title: "✽ Cogitating…".into(),
+                },
+            },
+            Record::Signal {
+                pane_id: "pane-a".into(),
+                signal: crate::vt::Signal::CommandDone { code: Some(1) },
+            },
+            output("pane-b", "meanwhile"),
+        ];
+        assert_eq!(decode_batch(&encode_batch(&records)), records);
+    }
+
     /// The length prefixes exist because output is arbitrary bytes: a payload
     /// that happens to contain NUL, a newline, or something shaped like the
     /// frame header must not be able to end a record early.
@@ -768,6 +898,70 @@ mod tests {
     #[test]
     fn an_empty_batch_is_just_the_version() {
         assert_eq!(encode_batch(&[]), vec![FRAME_VERSION]);
+    }
+
+    /// The change this whole path exists for: a pane nobody is looking at keeps
+    /// its output in the backend, and what its program *did* travels instead.
+    #[test]
+    fn a_hidden_panes_output_never_reaches_the_frame() {
+        let screens = crate::vt::ScreenStore::default();
+        screens.open("pane".into(), 24, 80);
+        let mut pending = Pending::default();
+        let mut exits = Vec::new();
+
+        pending.accept(output_event("pane", b"visible output"), &mut exits, &screens);
+        assert_eq!(
+            pending.data.get("pane").map(Vec::as_slice),
+            Some(b"visible output".as_slice()),
+            "a pane on screen still gets its bytes"
+        );
+        assert!(pending.signals.is_empty(), "xterm sees these for itself");
+
+        pending.data.clear();
+        pending.order.clear();
+        pending.accept(visibility("pane", false), &mut exits, &screens);
+        pending.accept(
+            output_event("pane", b"\x1b]0;still working\x07hidden output"),
+            &mut exits,
+            &screens,
+        );
+        assert!(
+            pending.data.is_empty(),
+            "a hidden pane's bytes must not cross the boundary"
+        );
+        assert_eq!(
+            pending.signals,
+            vec![(
+                "pane".to_string(),
+                crate::vt::Signal::Title {
+                    title: "still working".into()
+                }
+            )],
+            "but what its program did still has to reach the sidebar"
+        );
+
+        // Shown again: it is handed exactly what it missed, ordered ahead of
+        // anything that arrives next.
+        pending.accept(visibility("pane", true), &mut exits, &screens);
+        let replayed = pending.data.get("pane").cloned().unwrap_or_default();
+        assert!(
+            String::from_utf8_lossy(&replayed).contains("hidden output"),
+            "replay should carry the output produced while away"
+        );
+    }
+
+    fn output_event(pane_id: &str, bytes: &[u8]) -> PaneEvent {
+        PaneEvent::Output {
+            pane_id: pane_id.into(),
+            bytes: bytes.to_vec(),
+        }
+    }
+
+    fn visibility(pane_id: &str, visible: bool) -> PaneEvent {
+        PaneEvent::Visibility {
+            pane_id: pane_id.into(),
+            visible,
+        }
     }
 
     #[test]

@@ -9,6 +9,7 @@ mod session;
 mod settings;
 mod store_io;
 mod trust;
+mod vt;
 
 use tauri::Manager;
 
@@ -42,6 +43,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             pty::attach_pty_stream,
+            pty::set_pane_visible,
+            pty::pane_screens,
             pty::ack_pty_output,
             pty::spawn_pty,
             pty::write_pty,

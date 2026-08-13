@@ -39,6 +39,14 @@ export const ipc = {
   /** Report bytes drawn, per pane, releasing the backend's flow control. */
   ackPtyOutput: (acks: { paneId: string; bytes: number }[]) =>
     invoke<void>("ack_pty_output", { acks }),
+  /** Tell the backend whether a pane is on screen. A hidden pane's output stops
+   *  crossing the IPC boundary; showing it again replays what it missed. */
+  setPaneVisible: (paneId: string, visible: boolean) =>
+    invoke<void>("set_pane_visible", { paneId, visible }),
+  /** Live screen text for panes the webview is not being sent bytes for. Panes
+   *  still at the `seq` passed in are omitted from the reply. */
+  paneScreens: (queries: { paneId: string; seq: number }[], rows: number) =>
+    invoke<{ paneId: string; seq: number; text: string }[]>("pane_screens", { queries, rows }),
   spawnPty: (paneId: string, cwd: string, command: string | null, rows: number, cols: number) =>
     invoke<void>("spawn_pty", { paneId, cwd, command, rows, cols }),
   writePty: (paneId: string, data: string) => invoke<void>("write_pty", { paneId, data }),

@@ -24,6 +24,7 @@ base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
 dirs = "6"
+vt100 = "0.16.2"
 
 [profile.release]
 lto = true
