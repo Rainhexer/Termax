@@ -105,6 +105,8 @@ pub struct TerminalSettings {
     pub cursor_blink: bool,
     /// Max file size (KB) for diff/snapshot tracking.
     pub oversized_limit_kb: u64,
+    /// "auto" | "webgl" | "canvas" | "dom" — how panes draw; see renderers.ts.
+    pub renderer: String,
 }
 
 impl Default for TerminalSettings {
@@ -115,6 +117,7 @@ impl Default for TerminalSettings {
             cursor_style: "underline".into(),
             cursor_blink: true,
             oversized_limit_kb: 1024,
+            renderer: "auto".into(),
         }
     }
 }

@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
   ChangeArea,
   ChangeEntry,
@@ -31,6 +31,14 @@ import type { AppSettings, DetectedAgent } from "./settings";
 
 export const ipc = {
   // PTY
+  /** Hand the backend the channel every pane's output is written to. Must be
+   *  called before any pane spawns: output produced with no stream attached is
+   *  dropped rather than buffered (see `Pending::flush` in pty.rs). */
+  attachPtyStream: (channel: Channel<ArrayBuffer>) =>
+    invoke<void>("attach_pty_stream", { channel }),
+  /** Report bytes drawn, per pane, releasing the backend's flow control. */
+  ackPtyOutput: (acks: { paneId: string; bytes: number }[]) =>
+    invoke<void>("ack_pty_output", { acks }),
   spawnPty: (paneId: string, cwd: string, command: string | null, rows: number, cols: number) =>
     invoke<void>("spawn_pty", { paneId, cwd, command, rows, cols }),
   writePty: (paneId: string, data: string) => invoke<void>("write_pty", { paneId, data }),

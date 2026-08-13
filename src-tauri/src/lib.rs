@@ -41,6 +41,8 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            pty::attach_pty_stream,
+            pty::ack_pty_output,
             pty::spawn_pty,
             pty::write_pty,
             pty::resize_pty,

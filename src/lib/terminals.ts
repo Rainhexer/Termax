@@ -1,14 +1,16 @@
 import { Terminal } from "@xterm/xterm";
-import { CanvasAddon } from "@xterm/addon-canvas";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { listen } from "@tauri-apps/api/event";
+import { Channel } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { get, writable } from "svelte/store";
 import { ipc } from "./ipc";
+import { perf, setQueueDepthSource } from "./perf";
 import { settings, type AppSettings } from "./settings";
 import { fontStack, xtermTheme } from "./theme";
 import * as bell from "./bell";
+import * as renderers from "./renderers";
+import * as scheduler from "./writeScheduler";
 
 export const loadingPanes = writable<Set<string>>(new Set());
 
@@ -51,10 +53,31 @@ function setPaneRoot(paneId: string, root: string) {
   });
 }
 
+// Titles arrive at frame rate, not at human rate: a coding CLI rewrites its
+// OSC title on every state change, several times a second. Each write here
+// wakes the `cliStatus` derived store, which recomputes over *every* pane and
+// re-renders the sidebar — so publishing them as they land makes the UI cost
+// scale with (frames × panes) for information nobody can read that fast.
+// Collect them and publish at most once a frame instead.
+const pendingTitles = new Map<string, string>();
+let titleFlush: number | undefined;
+
 function setTitle(paneId: string, title: string) {
+  pendingTitles.set(paneId, title);
+  titleFlush ??= requestAnimationFrame(flushTitles);
+}
+
+function flushTitles() {
+  titleFlush = undefined;
   paneTitles.update((m) => {
-    if (m.get(paneId) === title) return m;
-    return new Map(m).set(paneId, title);
+    let next: Map<string, string> | null = null;
+    for (const [paneId, title] of pendingTitles) {
+      if (m.get(paneId) === title) continue;
+      next ??= new Map(m);
+      next.set(paneId, title);
+    }
+    pendingTitles.clear();
+    return next ?? m;
   });
 }
 
@@ -83,6 +106,11 @@ interface Entry {
   opening: boolean;
   spawned: boolean;
   exited: boolean;
+  /** The terminal is homed in a mounted host, so it is on screen. Maintained by
+   *  {@link attach}/{@link detach}, which is exactly when it changes — asking
+   *  the DOM instead would force layout on the output hot path. Drives write
+   *  scheduling priority and which panes get a WebGL context. */
+  visible: boolean;
   /** Mirrors membership of {@link loadingPanes}. Output arrives thousands of
    *  times a minute across a screenful of agents and each store write allocates
    *  a Set and wakes every subscriber, so the veil is only cleared once. */
@@ -271,16 +299,19 @@ export function cliTurnEnded(paneId: string) {
 
 let listenersReady = false;
 
-/** One entry per pane that produced output in the batch. The backend already
- *  decoded the bytes, so `data` is text, not base64. */
-interface PtyChunk {
-  pane_id: string;
-  data: string;
-}
-
-function applyOutput(paneId: string, text: string) {
+/** `bytes` is the chunk's length as the backend measured it, which is what the
+ *  backend's flow control is owed — not `text.length`, and not the length of
+ *  whatever survives the OSC passes below. Every path here has to settle it. */
+function applyOutput(paneId: string, text: string, bytes: number) {
   const entry = registry.get(paneId);
-  if (!entry) return;
+  if (!entry) {
+    // A pane the backend still has but this frontend does not — a window reload
+    // leaves its PTYs running. Nothing can draw the bytes, but they must still
+    // be acknowledged or the backend parks that pane's reader against a debt
+    // nobody is left to settle.
+    scheduler.discard(paneId, bytes);
+    return;
+  }
 
   if (entry.loading) removeLoading(paneId);
   entry.outputSeq++;
@@ -299,27 +330,95 @@ function applyOutput(paneId: string, text: string) {
     out = carried + text;
   }
   if (carried !== undefined || mayHaveOsc) out = processOsc52(paneId, out);
-  if (out) entry.term.write(out);
+  // Queued rather than written: xterm spends its parse budget per instance, so
+  // handing every pane its output as it lands is what makes typing wait behind
+  // a screenful of agents. See writeScheduler.ts.
+  //
+  // Nothing left to draw — a chunk that was all clipboard escape, or one held
+  // back whole as a split sequence — still owes its acknowledgement.
+  if (out) scheduler.enqueue(paneId, out, bytes);
+  else scheduler.discard(paneId, bytes);
+}
+
+/** Wire format of a batch; mirrors `encode_batch` in src-tauri/src/pty.rs. */
+const FRAME_VERSION = 1;
+const RECORD_OUTPUT = 0;
+/** One decoder for every batch: it is stateless here (the backend already
+ *  reassembled characters split across PTY reads), so building one per record
+ *  would only pay for the construction. */
+const decoder = new TextDecoder();
+
+/** Read one batch and replay its records in order.
+ *
+ *  `[u8 version] ( [u8 kind][u16 id_len][id] [u32 data_len][data]? )*`,
+ *  little-endian. Exits arrive in the same frame as output, behind the bytes
+ *  they follow — see the note on `Record` in pty.rs. */
+function readBatch(buffer: ArrayBuffer, onExit: (paneId: string) => void) {
+  const started = performance.now();
+  const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer);
+  if (bytes.length === 0) return;
+  if (bytes[0] !== FRAME_VERSION) {
+    console.error(`[terminals] unknown pty frame version ${bytes[0]}; dropping batch`);
+    return;
+  }
+
+  let at = 1;
+  let records = 0;
+  while (at < bytes.length) {
+    const kind = bytes[at];
+    at += 1;
+    const idLen = view.getUint16(at, true);
+    at += 2;
+    const paneId = decoder.decode(bytes.subarray(at, at + idLen));
+    at += idLen;
+    records++;
+
+    if (kind !== RECORD_OUTPUT) {
+      handleExit(paneId, onExit);
+      continue;
+    }
+    const dataLen = view.getUint32(at, true);
+    at += 4;
+    const text = decoder.decode(bytes.subarray(at, at + dataLen));
+    at += dataLen;
+    perf.note("bytes", dataLen);
+    applyOutput(paneId, text, dataLen);
+  }
+  perf.note("batches", 1);
+  perf.note("paneChunks", records);
+  perf.note("decodeMs", performance.now() - started);
+}
+
+function handleExit(paneId: string, onExit: (paneId: string) => void) {
+  const entry = registry.get(paneId);
+  if (entry) {
+    entry.exited = true;
+    entry.busy = false;
+    clearTimeout(entry.quietTimer);
+  }
+  removeLoading(paneId);
+  onExit(paneId);
 }
 
 export async function initPtyListeners(onExit: (paneId: string) => void) {
   if (listenersReady) return;
   listenersReady = true;
-  // One event carries every pane's output for the last few milliseconds — see
-  // the coalescing note in src-tauri/src/pty.rs.
-  await listen<PtyChunk[]>("pty-output", (e) => {
-    for (const chunk of e.payload) applyOutput(chunk.pane_id, chunk.data);
+
+  scheduler.setPaneLookup((paneId) => {
+    const entry = registry.get(paneId);
+    return entry?.opened ? { term: entry.term, visible: entry.visible } : undefined;
   });
-  await listen<{ pane_id: string }>("pty-exit", (e) => {
-    const entry = registry.get(e.payload.pane_id);
-    if (entry) {
-      entry.exited = true;
-      entry.busy = false;
-      clearTimeout(entry.quietTimer);
-    }
-    removeLoading(e.payload.pane_id);
-    onExit(e.payload.pane_id);
-  });
+  setQueueDepthSource(scheduler.queueDepth);
+  scheduler.startAcks();
+
+  // One batch carries every pane's output for the last few milliseconds, as raw
+  // bytes over a channel rather than as an evaluated script — see the transport
+  // note at the top of src-tauri/src/pty.rs. Attached before anything spawns:
+  // output produced with no stream attached is dropped, not buffered.
+  const stream = new Channel<ArrayBuffer>();
+  stream.onmessage = (buffer) => readBatch(buffer, onExit);
+  await ipc.attachPtyStream(stream);
 }
 
 // Backslash-escape shell-special chars so a dropped path pastes as a single
@@ -376,6 +475,7 @@ settings.subscribe(s => {
 });
 
 function applyAppearance(s: AppSettings) {
+  renderers.setChoice(s.terminal.renderer, (paneId) => !!registry.get(paneId)?.visible);
   const { fonts } = s.appearance.theme;
   const theme = xtermTheme(s.appearance.theme);
   const family = fontStack(fonts.terminal, "mono");
@@ -416,8 +516,10 @@ function create(paneId: string): Entry {
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
-  term.loadAddon(new CanvasAddon());
   term.loadAddon(new WebLinksAddon());
+  // The renderer is not loaded here: it is chosen when the pane is shown, since
+  // which one it gets depends on whether it is visible and on how many WebGL
+  // contexts are already spoken for. See renderers.ts.
 
   const el = document.createElement("div");
   el.className = "h-full w-full";
@@ -431,6 +533,7 @@ function create(paneId: string): Entry {
     opening: false,
     spawned: false,
     exited: false,
+    visible: false,
     loading: false,
     outputSeq: 0,
     busy: false,
@@ -594,7 +697,9 @@ export function attach(
   // Idempotent: re-homing into the same host must not re-run open/onData,
   // else each keystroke replays the whole input history.
   if (entry.el.parentElement !== host) host.appendChild(entry.el);
+  entry.visible = true;
   if (entry.opened) {
+    renderers.apply(paneId, entry.term, true);
     fitPane(paneId);
   } else if (!entry.opening) {
     entry.opening = true;
@@ -622,6 +727,9 @@ function openWhenSized(
   entry.opening = false;
   entry.opened = true;
   entry.term.open(entry.el);
+  // After `open`, which is when the screen element the renderer draws into
+  // exists.
+  renderers.apply(paneId, entry.term, entry.visible);
   entry.term.onData((data) => {
     // Keystrokes must reach the PTY even if the run-state bookkeeping trips
     // over an entry that was torn down between keypress and handler.
@@ -762,7 +870,13 @@ function flushPending(paneId: string, launch: string | null) {
  *  it re-attaches when the pane is shown again. */
 export function detach(paneId: string, host: HTMLElement) {
   const entry = registry.get(paneId);
-  if (entry && entry.el.parentElement === host) entry.el.remove();
+  if (!entry || entry.el.parentElement !== host) return;
+  entry.el.remove();
+  entry.visible = false;
+  // Hand the GL context back so a pane that is actually on screen can use it.
+  // xterm has already stopped drawing this one (its IntersectionObserver sees
+  // the detached element), so a plain canvas renderer costs it nothing.
+  if (entry.opened) renderers.apply(paneId, entry.term, false);
 }
 
 export function isAlive(paneId: string): boolean {
@@ -822,7 +936,12 @@ export function fitPane(paneId: string) {
 }
 
 export function focusTerminal(paneId: string) {
-  registry.get(paneId)?.term.focus();
+  const entry = registry.get(paneId);
+  if (!entry) return;
+  // Focus is what the WebGL pool is rationed by: the pane you are working in is
+  // the one whose redraw latency you can feel.
+  renderers.noteFocus(paneId);
+  entry.term.focus();
 }
 
 /** Type text into a pane's terminal without submitting it. */
@@ -849,6 +968,11 @@ export function destroyPane(paneId: string) {
   outputHooks.delete(paneId);
   oscBuffers.delete(paneId);
   statusTails.delete(paneId);
+  pendingTitles.delete(paneId);
+  renderers.release(paneId);
+  // Drops whatever was queued for this pane, but still reports those bytes: the
+  // backend parks a pane's reader until they are acknowledged.
+  scheduler.forget(paneId);
   clearRun(paneId);
   paneTitles.update((m) => {
     if (!m.has(paneId)) return m;
