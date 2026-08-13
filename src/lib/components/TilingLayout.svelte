@@ -47,6 +47,35 @@
     return groups;
   });
 
+  /** Teardown for the splitter gesture in flight, if any. */
+  let stopActiveSplitDrag: (() => void) | null = null;
+
+  // A splitter gesture listens on the window, so it has to be torn down on every
+  // way out — `pointercancel` and a lost window focus fire instead of `pointerup`
+  // when the OS takes the pointer away. A leaked `pointermove` would rewrite the
+  // layout on every mouse move for the rest of the session, remounting panes
+  // under the cursor.
+  function beginSplitDrag(onMove: (ev: PointerEvent) => void, onUp: () => void) {
+    stopActiveSplitDrag?.();
+    stopActiveSplitDrag = onUp;
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    window.addEventListener("blur", onUp);
+  }
+
+  function endSplitDrag(onMove: (ev: PointerEvent) => void, onUp: () => void) {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    window.removeEventListener("pointercancel", onUp);
+    window.removeEventListener("blur", onUp);
+    if (stopActiveSplitDrag === onUp) stopActiveSplitDrag = null;
+  }
+
+  // Every layout write remounts this component; a gesture still in flight when
+  // that happens would otherwise leak its listeners for good.
+  $effect(() => () => stopActiveSplitDrag?.());
+
   function startDrag(e: PointerEvent) {
     if (node.type !== "split" || !container) return;
     e.preventDefault();
@@ -61,11 +90,9 @@
       resizeSplit(splitId, Math.min(0.9, Math.max(0.1, pos)));
     }
     function onUp() {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
+      endSplitDrag(onMove, onUp);
     }
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
+    beginSplitDrag(onMove, onUp);
   }
 
   function startCornerDrag(e: PointerEvent, rowSplitIds: string[], colSplitIds: string[]) {
@@ -83,11 +110,9 @@
       );
     }
     function onUp() {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
+      endSplitDrag(onMove, onUp);
     }
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
+    beginSplitDrag(onMove, onUp);
   }
 </script>
 

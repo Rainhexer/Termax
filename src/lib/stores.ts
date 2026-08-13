@@ -151,10 +151,10 @@ export function toggleMaximizedPane(paneId: string) {
   maximizedPaneId.update((current) => (current === paneId ? null : paneId));
 }
 
-/** Tracks the pane being dragged (WKWebView workaround: dataTransfer.getData
- *  returns empty in drop events on macOS). */
+/** The pane currently in hand, so the UI can react to a drag in flight (the tab
+ *  bar reveals itself, the "+" offers a tear-off). Written only by paneDrag.ts. */
 export const draggedPaneId = writable<string | null>(null);
-/** Tracks the tab being dragged along the tab bar (same WKWebView workaround). */
+/** The tab currently in hand, likewise. */
 export const draggedTabId = writable<string | null>(null);
 
 const untrackedKey = (projectId: string) => `termax.showUntracked.${projectId}`;
