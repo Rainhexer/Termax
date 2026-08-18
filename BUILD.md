@@ -42,6 +42,13 @@ dev server alone (no native shell) is `npm run dev`.
 npm run tauri build && cp src-tauri/target/release/bundle/deb/Termax_0.1.0_amd64/data/usr/share/applications/Termax.desktop ~/.local/share/applications/termax.desktop
 ```
 
+> **AppImage note:** On some networks the `appimagetool` bundled inside tauri's
+> cached `linuxdeploy-plugin-appimage` fails to download the AppImage runtime
+> from GitHub, aborting the bundle step with `failed to run linuxdeploy`. Use
+> `./scripts/build-release.sh` instead of `cargo tauri build` — it fetches the
+> runtime once and passes it to the plugin via `LDAI_RUNTIME_FILE`. Any extra
+> arguments are forwarded, e.g. `./scripts/build-release.sh -- --bundles appimage`.
+
 Output lands in `src-tauri/target/release/bundle/`. Configured bundle targets
 (`src-tauri/tauri.conf.json` → `bundle.targets`):
 
