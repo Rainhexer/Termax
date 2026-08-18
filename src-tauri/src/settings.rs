@@ -287,10 +287,11 @@ const CANDIDATES: &[(&str, &str)] = &[
     ("sweep", "Sweep CLI"),
     ("gpt-engineer", "GPT Engineer"),
     ("continue", "Continue"),
+    ("pi", "Pi"),
 ];
 
 /// Binaries whose `--version` is known to be fast and well-formed.
-const VERSION_CHECK: &[&str] = &["claude", "opencode", "aider"];
+const VERSION_CHECK: &[&str] = &["claude", "opencode", "aider", "pi"];
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -129,7 +129,7 @@ export const detectedAgents = writable<DetectedAgent[]>([]);
 /** Launcher id → detected version string; runtime-only, not persisted. */
 export const launcherVersions = writable<Record<string, string>>({});
 
-const KNOWN_ICONS: Record<string, string> = { claude: "claude", opencode: "opencode" };
+const KNOWN_ICONS: Record<string, string> = { claude: "claude", opencode: "opencode", pi: "pi" };
 
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
 

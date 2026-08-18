@@ -10,7 +10,7 @@
   import { ipc } from "../ipc";
   import TerminalIcon from "./TerminalIcon.svelte";
 
-  const BUILTIN_ICONS = ["shell", "claude", "opencode", "robot", "sparkles", "gear"];
+  const BUILTIN_ICONS = ["shell", "claude", "opencode", "pi", "robot", "sparkles", "gear"];
 
   // --- add / edit form state ---
   let formName = $state("");

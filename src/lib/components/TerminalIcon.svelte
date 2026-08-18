@@ -37,6 +37,11 @@
     <path d="M0 0h24v30H0zM18 6H6v18h12z" fill-rule="evenodd" />
     <rect x="6" y="12" width="12" height="12" />
   </svg>
+{:else if type === "pi"}
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 800" class={className} fill="currentColor">
+    <path fill-rule="evenodd" d="M165.29 165.29H517.36V400H400V517.36H282.65V634.72H165.29Z M282.65 282.65V400H400V282.65Z" />
+    <path d="M517.36 400H634.72V634.72H517.36Z" />
+  </svg>
 {:else if type === "robot"}
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" class={className} fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
     <rect x="4" y="8" width="16" height="12" rx="2" />
