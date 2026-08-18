@@ -1,5 +1,11 @@
 import type { ITerminalAddon, Terminal } from "@xterm/xterm";
 import { CanvasAddon } from "@xterm/addon-canvas";
+// Renderer addons reach into xterm's internals, which are not API and are not
+// versioned like it: they must be kept on the release that ships alongside the
+// installed @xterm/xterm (5.5.0 → canvas 0.7.0, webgl 0.18.0). Later addons
+// build against unreleased xterm and fail where the internals moved — webgl
+// 0.19.0 tore its renderer down through `terminal._core._store`, which 5.5.0
+// does not have, so every pane hidden by a tab switch threw.
 import { WebglAddon } from "@xterm/addon-webgl";
 
 /**
@@ -15,6 +21,16 @@ import { WebglAddon } from "@xterm/addon-webgl";
  *
  * The pane you are working in is the one whose redraw latency you can feel, so
  * the eviction order is by focus rather than by age.
+ *
+ * One platform never gets WebGL from the automatic choice. On Linux the webview
+ * is WebKitGTK, which can back a WebGL context with a software rasterizer with
+ * no error to catch — context creation succeeds and the renderer string is
+ * masked, so the slow path is invisible from inside the app. In practice that
+ * shows up as exactly the latency you can feel in a terminal emulator: keystroke
+ * echoes lag by a frame or more while the rest of the app stays smooth. The
+ * automatic choice stays on the canvas renderer there, which is the responsive,
+ * predictable path; users on a machine where GL really works can still pin
+ * "webgl" in the settings.
  */
 
 /** Live GL contexts to allow. WebKit's ceiling is around sixteen and hitting it
@@ -38,8 +54,14 @@ const glOrder: string[] = [];
 let webglBroken = false;
 let choice: RendererChoice = "auto";
 
+/** The app's webview is WebKitGTK here, whose WebGL can silently land on a slow
+ *  path — see the module note. The automatic choice therefore skips WebGL, and
+ *  only an explicit "webgl" setting overrides that. */
+const isWebkitGtk = /Linux/i.test(navigator.userAgent);
+
 function wantsWebgl(visible: boolean): boolean {
   if (!visible || webglBroken) return false;
+  if (isWebkitGtk && choice === "auto") return false;
   return choice === "auto" || choice === "webgl";
 }
 
@@ -50,12 +72,40 @@ function load(term: Terminal, kind: "webgl" | "canvas" | "dom"): Attached {
   return { term, addon, kind };
 }
 
+/** Attach a non-WebGL renderer, dropping to xterm's built-in DOM renderer if
+ *  even that fails. A pane that draws slowly still beats a pane that is gone. */
+function loadSafely(term: Terminal, kind: "canvas" | "dom"): Attached {
+  if (kind === "dom") return load(term, "dom");
+  try {
+    return load(term, "canvas");
+  } catch (err) {
+    console.error("[renderers] canvas renderer unavailable, using the DOM renderer:", err);
+    return load(term, "dom");
+  }
+}
+
+/** Drop a renderer, and never let its teardown escape.
+ *
+ *  Detaching a renderer means putting xterm's own back, which the addons do by
+ *  reaching into terminal internals — so anything the installed xterm does not
+ *  expose the way an addon expects surfaces here rather than at load time. This
+ *  runs from a pane effect's teardown on every tab switch, where a throw takes
+ *  the pane's error boundary down with it and leaves this map claiming a
+ *  renderer that is already gone, so the pane never gets a working one back. */
+function unload(current: Attached) {
+  try {
+    current.addon?.dispose();
+  } catch (err) {
+    console.error("[renderers] renderer teardown failed:", err);
+  }
+}
+
 /** Give up a pane's GL context so another pane can have it. */
 function demote(paneId: string) {
   const current = attached.get(paneId);
   if (!current || current.kind !== "webgl") return;
-  current.addon?.dispose();
-  attached.set(paneId, load(current.term, "canvas"));
+  unload(current);
+  attached.set(paneId, loadSafely(current.term, "canvas"));
   const at = glOrder.indexOf(paneId);
   if (at !== -1) glOrder.splice(at, 1);
 }
@@ -80,10 +130,10 @@ export function apply(paneId: string, term: Terminal, visible: boolean) {
 
   if (current?.kind === kind) return;
   if (current?.kind === "webgl") releaseGlSlot(paneId);
-  current?.addon?.dispose();
+  if (current) unload(current);
 
   if (kind !== "webgl") {
-    attached.set(paneId, load(term, kind));
+    attached.set(paneId, loadSafely(term, kind));
     return;
   }
 
@@ -96,15 +146,15 @@ export function apply(paneId: string, term: Terminal, visible: boolean) {
       // The context can still be lost later — on a GPU reset, or when the
       // browser reclaims it. Left alone the pane simply stops painting.
       releaseGlSlot(paneId);
-      next.addon.dispose();
-      attached.set(paneId, load(term, "canvas"));
+      unload(next);
+      attached.set(paneId, loadSafely(term, "canvas"));
     });
     attached.set(paneId, next);
   } catch (err) {
     console.warn("[renderers] WebGL unavailable, falling back to canvas:", err);
     webglBroken = true;
     releaseGlSlot(paneId);
-    attached.set(paneId, load(term, "canvas"));
+    attached.set(paneId, loadSafely(term, "canvas"));
   }
 }
 
@@ -141,7 +191,7 @@ export function release(paneId: string) {
   if (!current) return;
   if (current.kind === "webgl") {
     releaseGlSlot(paneId);
-    current.addon?.dispose();
+    unload(current);
   }
   attached.delete(paneId);
 }

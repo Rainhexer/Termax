@@ -39,8 +39,8 @@
   // Only worth changing when the default misbehaves — a machine whose GL driver
   // WebKit refuses, or one where software GL is slower than plain canvas.
   const RENDERERS: { value: "auto" | "webgl" | "canvas" | "dom"; label: string; hint: string }[] = [
-    { value: "auto", label: "Automatic", hint: "GPU for the panes on screen, canvas for the rest." },
-    { value: "webgl", label: "GPU (WebGL)", hint: "Same as automatic; kept explicit so it can be pinned." },
+    { value: "auto", label: "Automatic", hint: "GPU for the panes on screen, canvas for the rest. Canvas only on Linux, where WebGL can lag input." },
+    { value: "webgl", label: "GPU (WebGL)", hint: "Force WebGL. Pin this on Linux only if your machine's GL is genuinely fast." },
     { value: "canvas", label: "Canvas", hint: "No GPU. Use if panes flicker or go blank." },
     { value: "dom", label: "DOM", hint: "Slowest, but works everywhere. A last resort." },
   ];
