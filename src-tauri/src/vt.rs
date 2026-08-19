@@ -236,6 +236,11 @@ impl ScreenStore {
         self.panes.lock().unwrap().remove(pane_id);
     }
 
+    /// Screens currently held, for the diagnostics log.
+    pub fn len(&self) -> usize {
+        self.panes.lock().unwrap().len()
+    }
+
     pub fn resize(&self, pane_id: &str, rows: u16, cols: u16) {
         if let Some(pane) = self.panes.lock().unwrap().get_mut(pane_id) {
             pane.parser.screen_mut().set_size(rows.max(1), cols.max(1));

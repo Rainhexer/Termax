@@ -79,6 +79,9 @@ interface Queued {
   bytes: number;
   /** A slice is with the terminal and its callback has not fired yet. */
   inflight: boolean;
+  /** Whether that slice was counted against the hidden-pane budget, so it is
+   *  released from the same budget however it ends. */
+  inflightHidden: boolean;
   /** Bytes retired since the last report to the backend. */
   retired: number;
 }
@@ -132,7 +135,7 @@ export function enqueue(paneId: string, text: string, bytes: number) {
   if (!text) return;
   let queue = queues.get(paneId);
   if (!queue) {
-    queue = { chunks: [], bytes: 0, inflight: false, retired: 0 };
+    queue = { chunks: [], bytes: 0, inflight: false, inflightHidden: false, retired: 0 };
     queues.set(paneId, queue);
   }
   queue.chunks.push({ text, bytes });
@@ -215,20 +218,32 @@ function drain() {
   if (ready.length && (handed > 0 || inflight === 0)) schedule();
 }
 
+/** Give back the concurrency a pane's in-flight slice was holding. Safe to call
+ *  on a pane that has none. */
+function release(queue: Queued) {
+  if (!queue.inflight) return;
+  queue.inflight = false;
+  inflight--;
+  if (queue.inflightHidden) inflightHidden--;
+  queue.inflightHidden = false;
+}
+
 /** Give one bounded slice to a terminal and wait for it to be parsed. */
 function hand(paneId: string, queue: Queued, target: PaneTarget) {
   const slice = takeSlice(queue);
   if (!slice.text) return;
 
   queue.inflight = true;
+  queue.inflightHidden = !target.visible;
   inflight++;
-  const hidden = !target.visible;
-  if (hidden) inflightHidden++;
+  if (queue.inflightHidden) inflightHidden++;
 
   const retire = () => {
-    queue.inflight = false;
-    inflight--;
-    if (hidden) inflightHidden--;
+    // Already released — the pane was forgotten while this slice was with its
+    // terminal, and xterm called back anyway. Counting it twice would drive the
+    // budget negative and let the scheduler hand out more than MAX_INFLIGHT.
+    if (!queue.inflight) return;
+    release(queue);
     queue.retired += slice.bytes;
     if (queue.chunks.length) enqueueReady(paneId);
     schedule();
@@ -284,7 +299,14 @@ function takeSlice(queue: Queued): { text: string; bytes: number } {
 export function discard(paneId: string, bytes: number) {
   const queue = queues.get(paneId);
   if (queue) queue.retired += bytes;
-  else queues.set(paneId, { chunks: [], bytes: 0, inflight: false, retired: bytes });
+  else
+    queues.set(paneId, {
+      chunks: [],
+      bytes: 0,
+      inflight: false,
+      inflightHidden: false,
+      retired: bytes,
+    });
 }
 
 /** Forget a pane. Its outstanding bytes are still reported, or the backend
@@ -292,6 +314,12 @@ export function discard(paneId: string, bytes: number) {
 export function forget(paneId: string) {
   const queue = queues.get(paneId);
   if (!queue) return;
+  // A slice handed to a terminal that is about to be disposed will never be
+  // reported back: xterm drops the pending callbacks of a `write` when it is
+  // disposed. Released here instead, or the budget it holds is lost for good —
+  // and after MAX_INFLIGHT panes closed mid-write the scheduler would stop
+  // handing anything to anyone, freezing every pane's output.
+  release(queue);
   queue.retired += queue.bytes;
   queue.chunks.length = 0;
   queue.bytes = 0;
@@ -335,4 +363,17 @@ function flushAcks() {
 /** Start reporting retired bytes. Idempotent. */
 export function startAcks() {
   ackTimer ??= setInterval(flushAcks, ACK_INTERVAL_MS);
+}
+
+/** Scheduler bookkeeping, for the diagnostics log. A queue lingers for one ack
+ *  interval after its pane is forgotten and is then dropped, so `queues` should
+ *  track the number of open panes. */
+export function diagCounts(): Record<string, number> {
+  const depth = queueDepth();
+  return {
+    queues: depth.panes,
+    queuedBytes: depth.bytes,
+    queuesReady: ready.length,
+    queuesInflight: inflight,
+  };
 }

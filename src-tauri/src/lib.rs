@@ -1,3 +1,4 @@
+mod diag;
 mod fstree;
 mod git;
 mod github;
@@ -129,6 +130,8 @@ pub fn run() {
             trust::is_trusted,
             trust::trust_folder,
             trust::revoke_trust,
+            diag::diag_sample,
+            diag::diag_enabled,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

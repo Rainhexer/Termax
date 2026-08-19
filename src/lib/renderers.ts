@@ -212,3 +212,10 @@ export function summary(): Record<string, number> {
   for (const current of attached.values()) counts[current.kind]++;
   return counts;
 }
+
+/** Renderer bookkeeping sizes, for the diagnostics log. `attached` is keyed by
+ *  pane id and released in `release`, so it should never exceed the number of
+ *  open panes; `glOrder` should never exceed {@link MAX_WEBGL}. */
+export function diagCounts(): Record<string, number> {
+  return { rendererAttached: attached.size, rendererGlSlots: glOrder.length };
+}

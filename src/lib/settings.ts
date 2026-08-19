@@ -108,7 +108,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   },
   terminal: {
     defaultShell: "",
-    scrollback: 10000,
+    scrollback: 2000,
     cursorStyle: "underline",
     cursorBlink: true,
     oversizedLimitKb: 1024,

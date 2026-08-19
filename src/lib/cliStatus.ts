@@ -587,3 +587,9 @@ export function debugScan(paneId: string) {
 if (typeof window !== "undefined") {
   (window as unknown as Record<string, unknown>).__cliScan = debugScan;
 }
+
+/** Status-scan bookkeeping, for the diagnostics log. Both maps are rebuilt from
+ *  the live pane list, so both should track the number of launched panes. */
+export function diagCounts(): Record<string, number> {
+  return { scans: get(scans).size, turns: turns.size };
+}

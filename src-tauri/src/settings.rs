@@ -113,7 +113,7 @@ impl Default for TerminalSettings {
     fn default() -> Self {
         Self {
             default_shell: String::new(),
-            scrollback: 10000,
+            scrollback: 2000,
             cursor_style: "underline".into(),
             cursor_blink: true,
             oversized_limit_kb: 1024,

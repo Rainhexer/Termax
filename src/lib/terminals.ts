@@ -535,6 +535,17 @@ function applyAppearance(s: AppSettings) {
       entry.term.options.fontSize = fonts.terminalSize;
       entry.term.options.fontFamily = family;
       entry.term.options.theme = theme;
+      entry.term.options.cursorBlink = s.terminal.cursorBlink;
+      entry.term.options.cursorStyle = s.terminal.cursorStyle;
+      // Applied to live panes, not only to ones opened afterwards. Scrollback
+      // is the largest thing a pane owns — xterm holds every line as three
+      // 32-bit words per cell, so a full 10,000-line history is tens of
+      // megabytes of the webview's memory per pane — and lowering the setting
+      // is the one lever a user has over it. Assigning it here trims the
+      // existing buffers straight away, which is the point: a change that only
+      // took effect on the next pane could not relieve the panes that are
+      // already heavy.
+      entry.term.options.scrollback = s.terminal.scrollback;
     } catch (err) {
       console.error("[terminals] failed to restyle a pane:", err);
     }
@@ -1137,11 +1148,65 @@ export function destroyPane(paneId: string) {
   removeLoading(paneId);
   clearTimeout(entry.quietTimer);
   bell.clearAttention(paneId);
-  if (entry.spawned && !entry.exited) ipc.killPty(paneId).catch(() => {});
+  // Called even for a pane whose program already exited. The signal is a no-op
+  // there, but everything else `kill` does is not: the backend still holds that
+  // pane's handle (with its pty master fd and its unreaped child), its screen
+  // model, and its flow-control entry until someone asks for them to go. Left
+  // out, every pane that ended by itself leaked all three for the life of the
+  // app — which is most of them, since closing a pane usually means quitting
+  // the program in it first.
+  if (entry.spawned) ipc.killPty(paneId).catch(() => {});
   entry.term.dispose();
   entry.el.remove();
 }
 
 export function destroyAll() {
   for (const id of [...registry.keys()]) destroyPane(id);
+}
+
+/** Per-pane bookkeeping sizes, for the diagnostics log. Every one of these is
+ *  keyed by pane id and cleared in `destroyPane`, so each should sit at the
+ *  number of open panes: one that keeps climbing across a session of opening
+ *  and closing panes is the leak. `terms` counts xterm instances still alive,
+ *  which is the expensive thing to leak. */
+export function diagCounts(): Record<string, number> {
+  let opened = 0;
+  let visible = 0;
+  let exited = 0;
+  let bufferLines = 0;
+  let bufferCells = 0;
+  for (const entry of registry.values()) {
+    if (entry.opened) opened++;
+    if (entry.visible) visible++;
+    if (entry.exited) exited++;
+    try {
+      // Lines held, and the cells they amount to. xterm stores a line as a
+      // Uint32Array of three words per cell, so cells × 12 bytes is very nearly
+      // what a pane's history costs — which is the number to hold next to the
+      // webview's resident size.
+      const lines = entry.term.buffer.active.length;
+      bufferLines += lines;
+      bufferCells += lines * entry.term.cols;
+    } catch {
+      // A terminal disposed under us contributes nothing.
+    }
+  }
+  return {
+    terms: registry.size,
+    termsOpened: opened,
+    termsVisible: visible,
+    termsExited: exited,
+    termBufferLines: bufferLines,
+    termBufferKb: Math.round((bufferCells * 12) / 1024),
+    pendingRun: pendingRun.size,
+    outputHooks: outputHooks.size,
+    oscBuffers: oscBuffers.size,
+    statusTails: statusTails.size,
+    pendingTitles: pendingTitles.size,
+    remoteScreens: remoteScreens.size,
+    paneTitles: get(paneTitles).size,
+    paneRoots: get(paneRoots).size,
+    paneRuns: get(paneRuns).size,
+    loadingPanes: get(loadingPanes).size,
+  };
 }

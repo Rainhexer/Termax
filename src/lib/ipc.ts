@@ -57,6 +57,13 @@ export const ipc = {
    *  running; null when the platform cannot tell. */
   ptyForegroundBusy: (paneId: string) => invoke<boolean | null>("pty_foreground_busy", { paneId }),
 
+  // Diagnostics (see src/lib/diag.ts). Both are no-ops unless the app was
+  // started with TERMAX_DIAG set.
+  /** Whether the backend is writing a diagnostics log this run. */
+  diagEnabled: () => invoke<boolean>("diag_enabled"),
+  /** Append one sample line, with the backend's own counters added to it. */
+  diagSample: (fields: string) => invoke<void>("diag_sample", { fields }),
+
   // Projects
   listProjects: () => invoke<Project[]>("list_projects"),
   addProject: (name: string, path: string) => invoke<Project>("add_project", { name, path }),

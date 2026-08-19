@@ -126,15 +126,20 @@
             />
           </label>
           <label class="flex flex-col gap-1">
-            <span class="text-xs text-zinc-400">Scrollback lines <span class="text-zinc-600">(applies to new panes)</span></span>
+            <span class="text-xs text-zinc-400">Scrollback lines <span class="text-zinc-600">(applies immediately)</span></span>
             <input type="number" min="1000" max="100000" step="1000"
               class="w-32 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-200 outline-none focus:border-emerald-500"
               value={$settings.terminal.scrollback}
               onchange={(e) => setTerminal("scrollback", Math.min(100000, Math.max(1000, num(e))))}
             />
+            <span class="text-xs text-zinc-600">
+              Each pane keeps its history in memory, about 12 bytes per character
+              cell — so 10,000 lines across a wide pane is tens of megabytes, per
+              pane. Lowering this trims the panes already open.
+            </span>
           </label>
           <label class="flex flex-col gap-1">
-            <span class="text-xs text-zinc-400">Cursor style <span class="text-zinc-600">(applies to new panes)</span></span>
+            <span class="text-xs text-zinc-400">Cursor style <span class="text-zinc-600">(applies immediately)</span></span>
             <select
               class="w-56 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-200 outline-none focus:border-emerald-500"
               value={cursorLabel}

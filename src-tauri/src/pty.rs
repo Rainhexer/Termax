@@ -100,6 +100,11 @@ impl Flow {
         self.drained.notify_all();
     }
 
+    /// Panes currently carrying a debt, for the diagnostics log.
+    fn tracked(&self) -> usize {
+        self.unacked.lock().unwrap().len()
+    }
+
     /// Forget every pane's debt. Used when a stream is (re)attached: the webview
     /// that owed the acknowledgements is gone, so waiting for them would park
     /// every reader forever.
@@ -648,13 +653,36 @@ impl PtyManager {
     pub fn kill(&self, pane_id: &str) {
         let handle = self.ptys.lock().unwrap().remove(pane_id);
         if let Some(handle) = handle {
-            let _ = handle.child.lock().unwrap().kill();
+            // Reaped on a thread of its own. `kill` only delivers the signal:
+            // a child nobody waits on stays in the process table as a zombie,
+            // one per pane ever closed, and each of those still holds its slot
+            // (and its pty master fd, released when this last handle drops)
+            // for as long as the app runs. The wait is off this thread because
+            // this runs on the window's event loop, and a program that ignores
+            // the signal must not stall the UI while it goes.
+            std::thread::spawn(move || {
+                let mut child = handle.child.lock().unwrap();
+                let _ = child.kill();
+                let _ = child.wait();
+            });
         }
         // A closed pane will never be drawn again, so nothing will acknowledge
         // its outstanding bytes; releasing them lets its reader thread wake and
         // notice the pty is gone instead of parking until the stall guard.
         self.flow.forget(pane_id);
         self.screens.close(pane_id);
+    }
+
+    /// Sizes of the three per-pane maps, for the diagnostics log: live pty
+    /// handles, screen models, and panes with bytes outstanding. All three
+    /// should track the number of open panes and nothing else — one of them
+    /// climbing past that is a pane the backend never let go of.
+    pub fn counts(&self) -> (usize, usize, usize) {
+        (
+            self.ptys.lock().unwrap().len(),
+            self.screens.len(),
+            self.flow.tracked(),
+        )
     }
 
     pub fn kill_all(&self) {

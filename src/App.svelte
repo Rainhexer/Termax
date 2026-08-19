@@ -23,6 +23,7 @@
   import { initPrListeners } from "./lib/pr";
   import { initIssueListeners } from "./lib/issues";
   import { initWorktreeListeners } from "./lib/worktrees";
+  import { initDiag } from "./lib/diag";
   import HomeScreen from "./lib/components/HomeScreen.svelte";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import TabBar from "./lib/components/TabBar.svelte";
@@ -57,6 +58,8 @@
     initIssueListeners();
     loadSettings();
     loadProjects();
+    // Only samples when TERMAX_DIAG is set; see src/lib/diag.ts.
+    void initDiag();
 
     // Folders the desktop shell asked us to open (KDE task-manager recents,
     // Windows jump lists, macOS Dock). The backend only emits after it heard
