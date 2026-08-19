@@ -94,24 +94,45 @@
   }
 
   // --- drag reorder ---
+  // Pointer events, not HTML5 drag-and-drop: this app's native OS file-drop
+  // handling (dragDropEnabled, see terminals.ts initFileDrop) takes over the
+  // webview's drag subsystem, which starves plain `dragstart`/`drop` here on
+  // some platforms — the same reason panes and tabs moved off HTML5 DnD for
+  // issue #34. Pointer capture keeps the gesture reporting to this element
+  // regardless of what it started or ends over.
   let dragIndex = $state<number | null>(null);
   let dropIndex = $state<number | null>(null);
+  let dragPointerId: number | null = null;
 
-  function onDrop(e: DragEvent) {
-    e.preventDefault();
-    if (dragIndex === null || dropIndex === null || dragIndex === dropIndex) {
-      dragIndex = dropIndex = null;
-      return;
-    }
+  function startReorder(e: PointerEvent, i: number) {
+    if (e.button !== 0) return;
+    dragIndex = i;
+    dropIndex = i;
+    dragPointerId = e.pointerId;
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  }
+
+  function onReorderMove(e: PointerEvent) {
+    if (dragIndex === null || e.pointerId !== dragPointerId) return;
+    const row = document
+      .elementFromPoint(e.clientX, e.clientY)
+      ?.closest<HTMLElement>("[data-launcher-index]");
+    if (row) dropIndex = Number(row.dataset.launcherIndex);
+  }
+
+  function endReorder(e: PointerEvent) {
+    if (dragIndex === null || e.pointerId !== dragPointerId) return;
     const from = dragIndex;
     const to = dropIndex;
+    dragIndex = dropIndex = null;
+    dragPointerId = null;
+    if (to === null || to === from) return;
     updateSettings((s) => {
       const list = [...s.launchers];
       const [moved] = list.splice(from, 1);
       list.splice(to > from ? to - 1 : to, 0, moved);
       return { ...s, launchers: list };
     });
-    dragIndex = dropIndex = null;
   }
 
   function onSvgUpload(e: Event) {
@@ -180,14 +201,14 @@
       <div
         class="group flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900/60 px-2 py-1.5"
         class:opacity-50={dragIndex === i}
-        ondragover={(e) => { e.preventDefault(); e.dataTransfer!.dropEffect = 'move'; dropIndex = i; }}
-        ondrop={(e) => onDrop(e)}
+        data-launcher-index={i}
       >
         <span
-          class="cursor-grab select-none text-zinc-600 hover:text-zinc-400 active:cursor-grabbing"
-          draggable="true"
-          ondragstart={(e) => { e.dataTransfer!.setData('text/plain', ''); e.dataTransfer!.effectAllowed = 'move'; dragIndex = i; }}
-          ondragend={() => { dragIndex = dropIndex = null; }}
+          class="cursor-grab touch-none select-none text-zinc-600 hover:text-zinc-400 active:cursor-grabbing"
+          onpointerdown={(e) => startReorder(e, i)}
+          onpointermove={onReorderMove}
+          onpointerup={endReorder}
+          onpointercancel={endReorder}
           title="Drag to reorder"
         >⠿</span>
 
@@ -239,11 +260,7 @@
       <div class="h-0.5 rounded bg-emerald-400"></div>
     {/if}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      class="h-2"
-      ondragover={(e) => { e.preventDefault(); e.dataTransfer!.dropEffect = 'move'; dropIndex = launchers.length; }}
-      ondrop={(e) => onDrop(e)}
-    ></div>
+    <div class="h-2" data-launcher-index={launchers.length}></div>
   </div>
 
   <!-- Add / edit form -->
