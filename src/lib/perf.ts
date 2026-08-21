@@ -10,6 +10,18 @@
  *
  *     __termaxPerf()          // totals and rates since the last reset
  *     __termaxPerf(true)      // …and reset the window
+ *
+ * The three latency counters — {@link Counters.lateMs}, {@link Counters.frameMs}
+ * and {@link Counters.ipcMs} — are what a user actually feels, and they are the
+ * only ones that can tell the three candidate causes of "it got slow" apart:
+ *
+ *  - the main thread is busy → event-loop lateness climbs;
+ *  - drawing is slow → frame interval climbs while lateness stays flat;
+ *  - the IPC bridge has degraded → round-trip time climbs while both of the
+ *    others stay flat.
+ *
+ * The first two need a monitor running, which costs a timer and a rAF chain, so
+ * they are started only by {@link startMonitors} (see diag.ts).
  */
 
 interface Counters {
@@ -30,6 +42,35 @@ interface Counters {
   worstDrainMs: number;
   /** Time spent decoding batches off the wire. */
   decodeMs: number;
+
+  /** IPC calls issued, and the wall time they took to come back. Counted for
+   *  every `invoke`, because the volume is itself a suspect: each one is a
+   *  `fetch` across the webview's process boundary. */
+  invokes: number;
+  ipcMs: number;
+  worstIpcMs: number;
+
+  /** The same, for `write_pty` alone — the call a keystroke makes. Separated
+   *  because the average over every command is not a latency anyone feels: it
+   *  is dominated by the handful that do real work (a `git status`, a directory
+   *  read), and those say nothing about how the terminal responds. */
+  writes: number;
+  writeMs: number;
+  worstWriteMs: number;
+
+  /** Event-loop lateness: how much later than asked a fixed-period timer
+   *  actually ran. This is main-thread contention measured directly — the
+   *  keystroke queued behind the same work waits exactly as long. */
+  lateSamples: number;
+  lateMs: number;
+  worstLateMs: number;
+  /** Lateness samples over {@link JANK_MS}, i.e. hitches a user notices. */
+  janks: number;
+
+  /** Frame intervals, from a rAF chain. 16.7 on an idle 60Hz display. */
+  frames: number;
+  frameMs: number;
+  worstFrameMs: number;
 }
 
 function empty(): Counters {
@@ -42,13 +83,37 @@ function empty(): Counters {
     drainMs: 0,
     worstDrainMs: 0,
     decodeMs: 0,
+    invokes: 0,
+    ipcMs: 0,
+    worstIpcMs: 0,
+    writes: 0,
+    writeMs: 0,
+    worstWriteMs: 0,
+    lateSamples: 0,
+    lateMs: 0,
+    worstLateMs: 0,
+    janks: 0,
+    frames: 0,
+    frameMs: 0,
+    worstFrameMs: 0,
   };
 }
 
 let counters = empty();
 let since = performance.now();
 
-type Counter = "batches" | "bytes" | "paneChunks" | "dropped" | "acked" | "drainMs" | "decodeMs";
+type Counter =
+  | "batches"
+  | "bytes"
+  | "paneChunks"
+  | "dropped"
+  | "acked"
+  | "drainMs"
+  | "decodeMs"
+  | "invokes"
+  | "ipcMs"
+  | "writes"
+  | "writeMs";
 
 export const perf = {
   note(key: Counter, n: number) {
@@ -56,6 +121,8 @@ export const perf = {
     // The drain is the number that matters most — it is what a keystroke can
     // end up queued behind — so it is tracked at its worst, not only summed.
     if (key === "drainMs" && n > counters.worstDrainMs) counters.worstDrainMs = n;
+    if (key === "ipcMs" && n > counters.worstIpcMs) counters.worstIpcMs = n;
+    if (key === "writeMs" && n > counters.worstWriteMs) counters.worstWriteMs = n;
   },
   reset() {
     counters = empty();
@@ -63,6 +130,7 @@ export const perf = {
   },
   report() {
     const seconds = (performance.now() - since) / 1000 || 1;
+    const avg = (total: number, n: number) => (n ? Number((total / n).toFixed(2)) : 0);
     return {
       windowSeconds: Number(seconds.toFixed(1)),
       batchesPerSecond: Math.round(counters.batches / seconds),
@@ -76,9 +144,58 @@ export const perf = {
       drainMsPerSecond: Number((counters.drainMs / seconds).toFixed(1)),
       worstDrainMs: Number(counters.worstDrainMs.toFixed(2)),
       decodeMsPerSecond: Number((counters.decodeMs / seconds).toFixed(1)),
+      invokesPerSecond: Math.round(counters.invokes / seconds),
+      ipcMs: avg(counters.ipcMs, counters.invokes),
+      worstIpcMs: Number(counters.worstIpcMs.toFixed(2)),
+      writesPerSecond: Math.round(counters.writes / seconds),
+      writeMs: avg(counters.writeMs, counters.writes),
+      worstWriteMs: Number(counters.worstWriteMs.toFixed(2)),
+      lateMs: avg(counters.lateMs, counters.lateSamples),
+      worstLateMs: Number(counters.worstLateMs.toFixed(2)),
+      janksPerSecond: Number((counters.janks / seconds).toFixed(2)),
+      frameMs: avg(counters.frameMs, counters.frames),
+      worstFrameMs: Number(counters.worstFrameMs.toFixed(2)),
     };
   },
 };
+
+/** Period of the lateness probe. Short enough to catch a hitch, long enough
+ *  that the probe is not itself a contributor. */
+const PROBE_MS = 250;
+/** Lateness a user perceives as the app "stopping". */
+const JANK_MS = 100;
+
+let monitoring = false;
+
+/** Start the event-loop and frame monitors. Idempotent, and deliberately not
+ *  automatic: a permanent rAF chain keeps the compositor awake, which is not
+ *  something an ordinary run should pay for. */
+export function startMonitors() {
+  if (monitoring || typeof window === "undefined") return;
+  monitoring = true;
+
+  let expected = performance.now() + PROBE_MS;
+  setInterval(() => {
+    const now = performance.now();
+    const late = Math.max(0, now - expected);
+    expected = now + PROBE_MS;
+    counters.lateSamples++;
+    counters.lateMs += late;
+    if (late > counters.worstLateMs) counters.worstLateMs = late;
+    if (late > JANK_MS) counters.janks++;
+  }, PROBE_MS);
+
+  let last = performance.now();
+  const frame = (now: number) => {
+    const delta = now - last;
+    last = now;
+    counters.frames++;
+    counters.frameMs += delta;
+    if (delta > counters.worstFrameMs) counters.worstFrameMs = delta;
+    requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+}
 
 /** Queue depth is owned by the scheduler; it registers a reader here so the
  *  console report can include it without this module importing it (which would

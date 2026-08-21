@@ -1,4 +1,5 @@
-import { Channel, invoke } from "@tauri-apps/api/core";
+import { Channel, invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { perf } from "./perf";
 import type {
   ChangeArea,
   ChangeEntry,
@@ -28,6 +29,27 @@ import type {
   WorktreeEntry,
 } from "./types";
 import type { AppSettings, DetectedAgent } from "./settings";
+
+/** Every backend call, timed.
+ *
+ *  Each `invoke` is a `fetch` across the webview's process boundary, so both
+ *  how many are made and how long each takes are load-bearing for how the app
+ *  feels — and neither was visible before. The wrapper is one closure and two
+ *  integer adds per call; the calls it wraps are orders of magnitude dearer. */
+function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const started = performance.now();
+  perf.note("invokes", 1);
+  const hot = cmd === "write_pty";
+  if (hot) perf.note("writes", 1);
+  const settle = () => {
+    const took = performance.now() - started;
+    perf.note("ipcMs", took);
+    if (hot) perf.note("writeMs", took);
+  };
+  const call = tauriInvoke<T>(cmd, args);
+  call.then(settle, settle);
+  return call;
+}
 
 export const ipc = {
   // PTY

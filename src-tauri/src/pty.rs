@@ -40,6 +40,29 @@ const FLUSH_INTERVAL: Duration = Duration::from_millis(8);
 /// handed over in digestible pieces rather than one enormous buffer.
 const MAX_BATCH_BYTES: usize = 256 * 1024;
 
+/// A batch this small, following a keystroke into a window that was otherwise
+/// quiet, is sent without waiting out [`FLUSH_INTERVAL`].
+///
+/// The interval buys coalescing, and coalescing is worth having only when there
+/// is something to coalesce. The case it costs rather than saves is the one the
+/// app is judged on: you press a key in an idle pane, the shell echoes a single
+/// character back, and that character sits here for up to eight milliseconds
+/// waiting for company that is not coming.
+const ECHO_BATCH_BYTES: usize = 512;
+
+/// How soon after a keystroke a small batch is still assumed to be its echo.
+///
+/// Size and silence alone are not enough to identify one, which is worth being
+/// exact about because getting it wrong is not free: a program that dribbles a
+/// few bytes at a time — a spinner, a title update between frames — is small and
+/// often lands after a gap too, and handing each of those over on its own is the
+/// storm the coalescer exists to prevent. Measured, a size-and-silence test cost
+/// about a tenth of the UI thread in steady state for output nobody was waiting
+/// on. What actually distinguishes an echo is that somebody just typed, so that
+/// is what is asked. The window is generous because it only has to cover a
+/// round trip through the pty and back.
+const ECHO_INPUT_WINDOW: Duration = Duration::from_millis(250);
+
 /// Ceiling on the output buffered for one pane between flushes. With flow
 /// control in place this is only reachable while the webview is not draining at
 /// all (no stream attached yet, or a reload in flight); dropping the oldest
@@ -59,7 +82,21 @@ const READ_BUF: usize = 64 * 1024;
 // what the watermark below reproduces: the reader thread parks while the pane
 // has more than this many bytes handed over but not yet drawn, and the agent
 // throttles itself.
-const HIGH_WATERMARK: u64 = 1024 * 1024;
+//
+// How much is a latency question, not a memory one. Every byte outstanding is a
+// byte the webview has still to draw, and a keystroke typed into that pane
+// echoes back *behind* all of them — so the watermark is the longest the pane
+// you are typing in can be made to lag, expressed in bytes. A megabyte of it,
+// at the rate a terminal actually retires output, is most of a second, which is
+// the delay this was set to and which was duly reported as one. A quarter of
+// that is a frame or two, and still four times the buffering a pty itself gives
+// a native terminal before the writer blocks.
+//
+// Throughput does not pay for the reduction, because reports are no longer
+// bound to a timer: a pane retiring in bulk is acknowledged as it goes
+// (`ACK_EAGER_BYTES` in src/lib/writeScheduler.ts), so its reader resumes at
+// the rate the pane is drawn rather than at the rate it is reported on.
+const HIGH_WATERMARK: u64 = 256 * 1024;
 
 /// How long a parked reader waits before re-checking its pane's debt.
 const FLOW_POLL: Duration = Duration::from_millis(500);
@@ -69,6 +106,44 @@ const FLOW_POLL: Duration = Duration::from_millis(500);
 /// be able to freeze a running agent indefinitely; ten seconds of total silence
 /// is well past any legitimate backlog.
 const STALL_LIMIT: u32 = 20;
+
+/// When a keystroke was last sent to any pane.
+///
+/// Read by the coalescer to tell an echo from a program's own output (see
+/// [`is_echo`]); written by every `write_pty`, which is on the input path and so
+/// must not take a lock. Deliberately global rather than per-pane: an echo
+/// follows its keystroke within milliseconds, so "somebody typed just now" is as
+/// discriminating as "this pane was typed into just now" and costs one atomic
+/// store instead of a map.
+#[derive(Default)]
+struct InputClock {
+    /// Milliseconds since [`InputClock::base`], or 0 for "never".
+    at_ms: std::sync::atomic::AtomicU64,
+    base: OnceLock<Instant>,
+}
+
+impl InputClock {
+    fn base(&self) -> Instant {
+        *self.base.get_or_init(Instant::now)
+    }
+
+    fn note(&self) {
+        let ms = self.base().elapsed().as_millis() as u64;
+        // Saturating at zero would read as "never"; one millisecond in is close
+        // enough and keeps the sentinel unambiguous.
+        self.at_ms
+            .store(ms.max(1), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// How long ago that was, or `None` if nothing has ever been typed.
+    fn elapsed(&self) -> Option<Duration> {
+        let ms = self.at_ms.load(std::sync::atomic::Ordering::Relaxed);
+        if ms == 0 {
+            return None;
+        }
+        Some(self.base().elapsed().saturating_sub(Duration::from_millis(ms)))
+    }
+}
 
 /// Bytes handed to the webview but not yet reported as drawn, per pane.
 #[derive(Default)]
@@ -163,6 +238,8 @@ pub struct PtyManager {
     signals: OnceLock<Sender<PaneEvent>>,
     sink: Sink,
     flow: Arc<Flow>,
+    /// Shared with the coalescer so it can recognise an echo. See [`InputClock`].
+    input_clock: Arc<InputClock>,
     /// Every pane's terminal state, kept whether or not anyone is looking at
     /// it. This is what lets a hidden pane's output stop crossing the IPC
     /// boundary without the sidebar losing track of what it is doing.
@@ -425,25 +502,65 @@ impl Pending {
     }
 }
 
+/// Whether this window should go out now rather than wait out [`FLUSH_INTERVAL`].
+///
+/// Every part earns its place. Small, because a batch with a screenful of redraw
+/// in it has company coming and gains from waiting for it. Recently typed into,
+/// because that is what an echo actually is — see [`ECHO_INPUT_WINDOW`] for what
+/// leaving it out cost. Quiet, because under a sustained stream a flush has
+/// always just happened and there is nothing to gain by cutting the window
+/// short. `None` for either duration means "never", which passes: no keystroke
+/// has been sent means nothing to echo, and no flush yet is as quiet as it gets.
+fn is_echo(
+    bytes: usize,
+    no_exits: bool,
+    since_last_flush: Option<Duration>,
+    since_input: Option<Duration>,
+) -> bool {
+    let quiet = since_last_flush.is_none_or(|elapsed| elapsed >= FLUSH_INTERVAL);
+    let typed = since_input.is_some_and(|elapsed| elapsed <= ECHO_INPUT_WINDOW);
+    no_exits && bytes <= ECHO_BATCH_BYTES && typed && quiet
+}
+
 /// Fold every pane's output into one batch per [`FLUSH_INTERVAL`].
 fn run_coalescer(
     rx: Receiver<PaneEvent>,
     sink: Sink,
     flow: Arc<Flow>,
     screens: Arc<crate::vt::ScreenStore>,
+    input_clock: Arc<InputClock>,
 ) {
     let mut pending = Pending::default();
+    let mut last_flush: Option<Instant> = None;
     loop {
         // Blocks while every pane is quiet, so an idle app does no work at all.
         let Ok(first) = rx.recv() else { break };
-        let deadline = Instant::now() + FLUSH_INTERVAL;
+        let woke = Instant::now();
+        let deadline = woke + FLUSH_INTERVAL;
         let mut exits = Vec::new();
         pending.accept(first, &mut exits, &screens);
+
+        // Anything already queued costs nothing to take, and taking it first is
+        // what makes the echo test below mean what it says: "this is all there
+        // is" rather than "this is all that has been looked at".
+        while exits.is_empty() && pending.bytes < MAX_BATCH_BYTES {
+            match rx.try_recv() {
+                Ok(event) => pending.accept(event, &mut exits, &screens),
+                Err(_) => break,
+            }
+        }
+
+        let echo = is_echo(
+            pending.bytes,
+            exits.is_empty(),
+            last_flush.map(|at| woke - at),
+            input_clock.elapsed(),
+        );
 
         // An exit cuts the window short: it travels in the frame it arrived
         // with, behind that frame's output, so the pane is not torn down before
         // its last lines have been drawn.
-        while exits.is_empty() && pending.bytes < MAX_BATCH_BYTES {
+        while !echo && exits.is_empty() && pending.bytes < MAX_BATCH_BYTES {
             match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
                 Ok(event) => pending.accept(event, &mut exits, &screens),
                 Err(RecvTimeoutError::Timeout) => break,
@@ -455,6 +572,7 @@ fn run_coalescer(
         }
 
         pending.flush(&sink, &flow, exits);
+        last_flush = Some(Instant::now());
     }
     pending.flush(&sink, &flow, Vec::new());
 }
@@ -478,7 +596,8 @@ impl PtyManager {
                 let sink = Arc::clone(&self.sink);
                 let flow = Arc::clone(&self.flow);
                 let screens = Arc::clone(&self.screens);
-                std::thread::spawn(move || run_coalescer(rx, sink, flow, screens));
+                let input_clock = Arc::clone(&self.input_clock);
+                std::thread::spawn(move || run_coalescer(rx, sink, flow, screens, input_clock));
                 tx
             })
             .clone()
@@ -627,6 +746,9 @@ impl PtyManager {
     /// Queue input for the pane. Returns once the bytes are handed to the
     /// pane's writer thread, without waiting for the pty to accept them.
     pub fn write(&self, pane_id: &str, data: &str) -> Result<(), String> {
+        // Before the send, so the echo can never beat the timestamp that
+        // identifies it.
+        self.input_clock.note();
         let handle = self.handle(pane_id).ok_or("no such pane")?;
         handle
             .input
@@ -822,10 +944,62 @@ pub fn pty_foreground_busy(
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_utf8, encode_batch, Flow, PaneEvent, Pending, Record, FRAME_VERSION,
-        HIGH_WATERMARK, RECORD_EXIT, RECORD_SIGNAL,
+        decode_utf8, encode_batch, is_echo, Flow, PaneEvent, Pending, Record, ECHO_BATCH_BYTES,
+        FLUSH_INTERVAL, FRAME_VERSION, HIGH_WATERMARK, RECORD_EXIT, RECORD_SIGNAL,
     };
     use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Just typed, quiet before it, a few bytes back: that is an echo, and
+    /// nothing is coming to coalesce it with.
+    #[test]
+    fn a_keystrokes_echo_goes_out_at_once() {
+        let typed = Some(Duration::from_millis(2));
+        assert!(is_echo(1, true, None, typed));
+        assert!(is_echo(8, true, Some(FLUSH_INTERVAL), typed));
+        assert!(is_echo(8, true, Some(Duration::from_secs(30)), typed));
+    }
+
+    /// The case that made the test worth tightening. A program dribbling a few
+    /// bytes between frames is small, and lands after a gap, and is not an echo
+    /// — handing each one over on its own is the storm the coalescer exists to
+    /// prevent, and it measurably cost the UI thread.
+    #[test]
+    fn a_program_dribbling_while_nobody_types_is_not_an_echo() {
+        assert!(!is_echo(8, true, None, None));
+        assert!(!is_echo(8, true, None, Some(Duration::from_secs(5))));
+    }
+
+    /// Under a sustained stream a flush has just happened, so there is nothing
+    /// to gain by cutting the window short — even right after a keystroke.
+    #[test]
+    fn a_steady_stream_still_gets_coalesced() {
+        let typed = Some(Duration::from_millis(2));
+        assert!(!is_echo(8, true, Some(Duration::from_millis(1)), typed));
+        assert!(!is_echo(8, true, Some(FLUSH_INTERVAL / 2), typed));
+    }
+
+    #[test]
+    fn a_redrawing_frame_is_never_an_echo() {
+        assert!(!is_echo(ECHO_BATCH_BYTES + 1, true, None, Some(Duration::ZERO)));
+    }
+
+    /// An exit ends the window on its own, and must not be mistaken for one:
+    /// the batch it rides in still has to carry the pane's last output.
+    #[test]
+    fn an_exit_is_not_an_echo() {
+        assert!(!is_echo(1, false, None, Some(Duration::ZERO)));
+    }
+
+    /// The clock the echo test reads: "never" must not read as "just now", or
+    /// every small batch before the first keystroke takes the fast path.
+    #[test]
+    fn the_input_clock_starts_at_never() {
+        let clock = super::InputClock::default();
+        assert_eq!(clock.elapsed(), None);
+        clock.note();
+        assert!(clock.elapsed().is_some_and(|d| d < Duration::from_secs(1)));
+    }
 
     fn output(pane_id: &str, data: &str) -> Record {
         Record::Output {

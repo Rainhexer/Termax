@@ -27,6 +27,11 @@ import { perf } from "./perf";
  *    looking at (and typing into) is served before the fifty that are merely
  *    running, and background panes still drain — just behind them.
  *
+ * With one exception, which is the case a terminal is judged on: a small slice
+ * for a pane that is on screen and has nothing queued is handed over on the
+ * spot rather than a task later. That is the echo of a keystroke, and there is
+ * nothing for it to be fair to — see {@link FAST_SLICE}.
+ *
  * ## Backpressure
  *
  * Retired bytes are reported to the backend, which parks a pane's reader thread
@@ -55,10 +60,36 @@ const MAX_INFLIGHT_HIDDEN = 1;
  *  holds its own, larger, buffer and stops reading long before this. */
 const MAX_QUEUE_BYTES = 8 * 1024 * 1024;
 
+/** A slice small enough that handing it over costs less than deferring it.
+ *
+ *  Below this, and with the pane on screen and nothing queued for it, the write
+ *  happens inside the call that received the bytes. That case is the echo of a
+ *  keystroke, and every hop it skips is latency a user feels directly: the
+ *  deferral, and the frame xterm would otherwise wait for — `write` parses
+ *  synchronously when the last thing that happened was the user typing, so
+ *  reaching it in the same turn is what puts the character on screen this
+ *  frame instead of the next one.
+ *
+ *  It cannot make the app less fair, which is the reason it is safe: the slice
+ *  is counted against the same {@link MAX_INFLIGHT} budget and marks the pane
+ *  in-flight exactly as a scheduled one does, so the second chunk to arrive for
+ *  a pane queues normally. Only the first, on an idle pane, skips the queue. */
+const FAST_SLICE = 4 * 1024;
+
 /** How often retired byte counts are reported. Batched because each report is
- *  an IPC call, and the watermark it feeds is measured in megabytes — reporting
+ *  an IPC call, and the watermark it feeds is measured in kilobytes — reporting
  *  per slice would spend more on the accounting than on the output. */
 const ACK_INTERVAL_MS = 50;
+
+/** Report immediately once a pane has retired this much, rather than waiting
+ *  out the interval.
+ *
+ *  The watermark exists to bound latency, so it wants to be small; the reporting
+ *  interval is what stops a small watermark from also bounding *throughput*,
+ *  since a parked reader cannot resume until a report lands. Reporting on volume
+ *  as well as on time separates the two: a pane drawing hard is acknowledged as
+ *  fast as it retires, and an idle one still costs nothing. */
+const ACK_EAGER_BYTES = 64 * 1024;
 
 /** One batch's worth of a pane's output, still to be handed over.
  *
@@ -138,6 +169,25 @@ export function enqueue(paneId: string, text: string, bytes: number) {
     queue = { chunks: [], bytes: 0, inflight: false, inflightHidden: false, retired: 0 };
     queues.set(paneId, queue);
   }
+  // The interactive case: this pane is on screen, it has nothing outstanding,
+  // and the slice is small. Nothing is gained by making the echo of a keystroke
+  // wait for a task that exists to share the thread out between panes that are
+  // all busy — there is nobody to share with. See FAST_SLICE.
+  if (
+    !queue.inflight &&
+    queue.chunks.length === 0 &&
+    text.length <= FAST_SLICE &&
+    inflight < MAX_INFLIGHT
+  ) {
+    const target = lookup(paneId);
+    if (target?.visible) {
+      queue.chunks.push({ text, bytes });
+      queue.bytes += bytes;
+      hand(paneId, queue, target);
+      return;
+    }
+  }
+
   queue.chunks.push({ text, bytes });
   queue.bytes += bytes;
 
@@ -157,12 +207,42 @@ export function enqueue(paneId: string, text: string, bytes: number) {
   schedule();
 }
 
+/** The port {@link nextTask} posts to, built on first use. */
+let hop: MessagePort | undefined;
+
+/** Run `drain` on the next turn of the event loop.
+ *
+ *  `setTimeout(…, 0)` is the obvious way to yield and the wrong one here.
+ *  Browsers clamp a timeout scheduled from inside a timer callback to 4ms once
+ *  the chain is a few deep, and this chain is exactly that: one round per
+ *  slice, for as long as any pane is behind. At {@link MAX_CHUNK} a round that
+ *  turns the backend's watermark into a wall-clock delay — every byte a pane is
+ *  behind is time a keystroke queued behind it waits — and it is the difference
+ *  between a backlog draining in a tenth of a second and in a whole one.
+ *
+ *  A `MessageChannel` message is a task like any other, dispatched on the next
+ *  turn with no clamp, and still a task rather than a microtask: the browser
+ *  gets to render and to deliver input between rounds, which is the entire
+ *  point of scheduling at all. */
+function nextTask(): void {
+  if (hop === undefined) {
+    if (typeof MessageChannel === "undefined") {
+      // No MessageChannel (a non-browser test host): the timer is correct, just
+      // slower, so fall back rather than refusing to drain at all.
+      setTimeout(drain, 0);
+      return;
+    }
+    const channel = new MessageChannel();
+    channel.port1.onmessage = () => drain();
+    hop = channel.port2;
+  }
+  hop.postMessage(0);
+}
+
 function schedule() {
   if (draining || !ready.length || inflight >= MAX_INFLIGHT) return;
   draining = true;
-  // A macrotask, not a microtask: the browser gets to render and to deliver
-  // input between rounds, which is the entire point of scheduling at all.
-  setTimeout(drain, 0);
+  nextTask();
 }
 
 /** Hand out as many slices as the concurrency rules allow. */
@@ -245,6 +325,9 @@ function hand(paneId: string, queue: Queued, target: PaneTarget) {
     if (!queue.inflight) return;
     release(queue);
     queue.retired += slice.bytes;
+    // A pane far enough behind that its reader may be parked is reported at
+    // once; see ACK_EAGER_BYTES. Everything else rides the interval.
+    if (queue.retired >= ACK_EAGER_BYTES) flushAcks();
     if (queue.chunks.length) enqueueReady(paneId);
     schedule();
   };

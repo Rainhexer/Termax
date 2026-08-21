@@ -24,13 +24,21 @@ import { WebglAddon } from "@xterm/addon-webgl";
  *
  * One platform never gets WebGL from the automatic choice. On Linux the webview
  * is WebKitGTK, which can back a WebGL context with a software rasterizer with
- * no error to catch — context creation succeeds and the renderer string is
- * masked, so the slow path is invisible from inside the app. In practice that
- * shows up as exactly the latency you can feel in a terminal emulator: keystroke
- * echoes lag by a frame or more while the rest of the app stays smooth. The
- * automatic choice stays on the canvas renderer there, which is the responsive,
- * predictable path; users on a machine where GL really works can still pin
- * "webgl" in the settings.
+ * no error to catch, and a software WebGL renderer is slower than the canvas
+ * one. That was reported here as exactly the latency you can feel in a terminal
+ * emulator, so the automatic choice stays on canvas; users on a machine where GL
+ * really works can still pin "webgl" in the settings.
+ *
+ * That rule is a guess, and it is worth saying which parts of it have since been
+ * checked. Measured on an Intel iGPU under Wayland, at four panes redrawing
+ * 25 KB/s, WebGL and canvas came out within noise of each other — so the rule is
+ * not currently costing anything measurable here, and it is also not earning
+ * anything. What it rests on — "GL on this machine is a software rasterizer" —
+ * is now at least askable rather than assumed: {@link probeGl} reports the driver
+ * behind a context into the diagnostics log (`glRenderer`), alongside a count of
+ * which renderer each pane actually got. A heavier workload than the one above,
+ * on a machine whose log names a real GPU, is what would settle it; until then
+ * the conservative rule stands rather than being flipped on a hunch.
  */
 
 /** Live GL contexts to allow. WebKit's ceiling is around sixteen and hitting it
@@ -53,6 +61,45 @@ const glOrder: string[] = [];
  *  WebKit refuses) stops paying for a failed context creation per pane. */
 let webglBroken = false;
 let choice: RendererChoice = "auto";
+
+/** Renderer names that mean "this GL context is being drawn by the CPU".
+ *  Matched case-insensitively against the unmasked renderer string. */
+const SOFTWARE_GL = /llvmpipe|softpipe|swiftshader|swrast|soft|virgl|lavapipe|microsoft basic/i;
+
+/** What the probe found, once. `null` until it has run. `glIsSoftware` is only
+ *  ever set by a driver naming itself; "we could not tell" leaves it false. */
+let glDriver: string | null = null;
+let glIsSoftware = false;
+
+/** Ask a throwaway context which driver is behind it.
+ *
+ *  Diagnostic only: nothing here chooses a renderer by it, because on this
+ *  webview the answer is often a masked string that names no driver at all. It
+ *  is recorded because when it *does* answer — "llvmpipe" — that single word is
+ *  the whole explanation for a slow session, and is not otherwise knowable from
+ *  a release build.
+ *
+ *  Runs at most once, and the context is released immediately: this must not
+ *  spend one of the handful of live contexts the pool is rationing. */
+function probeGl(): void {
+  if (glDriver !== null) return;
+  glDriver = "";
+  try {
+    const probe = document.createElement("canvas");
+    const gl =
+      (probe.getContext("webgl2") as WebGL2RenderingContext | null) ??
+      (probe.getContext("webgl") as WebGLRenderingContext | null);
+    if (!gl) return;
+    const info = gl.getExtension("WEBGL_debug_renderer_info");
+    glDriver = info
+      ? String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL) ?? "")
+      : "";
+    glIsSoftware = SOFTWARE_GL.test(glDriver);
+    gl.getExtension("WEBGL_lose_context")?.loseContext();
+  } catch (err) {
+    console.warn("[renderers] could not probe the WebGL driver:", err);
+  }
+}
 
 /** The app's webview is WebKitGTK here, whose WebGL can silently land on a slow
  *  path — see the module note. The automatic choice therefore skips WebGL, and
@@ -217,5 +264,22 @@ export function summary(): Record<string, number> {
  *  pane id and released in `release`, so it should never exceed the number of
  *  open panes; `glOrder` should never exceed {@link MAX_WEBGL}. */
 export function diagCounts(): Record<string, number> {
-  return { rendererAttached: attached.size, rendererGlSlots: glOrder.length };
+  const kinds = summary();
+  return {
+    rendererAttached: attached.size,
+    rendererGlSlots: glOrder.length,
+    rendererWebgl: kinds.webgl,
+    rendererCanvas: kinds.canvas,
+    rendererDom: kinds.dom,
+    glSoftware: glIsSoftware ? 1 : 0,
+  };
+}
+
+/** The GL driver the probe found, as one log-safe token. Worth writing down
+ *  next to the frame times: "this machine is drawing terminals on llvmpipe" is
+ *  the whole explanation for a slow session, and is not otherwise knowable from
+ *  a release build. */
+export function diagDriver(): string {
+  probeGl();
+  return (glDriver || "unknown").replace(/\s+/g, "_").replace(/[^\w.:/()-]/g, "");
 }

@@ -140,6 +140,9 @@ interface Entry {
    *  the check tracks this pane's commands and can veto a "finished" verdict. */
   foregroundKnown: boolean;
   foregroundProbing: boolean;
+  /** performance.now() of the last foreground probe, so the output path cannot
+   *  issue one per chunk. See {@link probeForeground}. */
+  foregroundProbedAt: number;
   quietTimer?: ReturnType<typeof setTimeout>;
   /** The program this pane was launched with (null = plain shell). A coding CLI
    *  never returns to a shell prompt, so none of the shell run heuristics below
@@ -606,6 +609,7 @@ function create(paneId: string): Entry {
     shellIntegration: false,
     foregroundKnown: false,
     foregroundProbing: false,
+    foregroundProbedAt: 0,
     launch: null,
   };
   // A program asking for attention (BEL) rings straight away — no heuristics.
@@ -697,8 +701,33 @@ async function settleRun(paneId: string) {
 // shell never changes pgid, and there "busy" would be a permanent false alarm.
 // Output arriving while nothing is running means a prompt is being drawn, which
 // is exactly the moment the shell should be in the foreground: probe there.
+//
+// Two limits on when that probe is allowed to run, and both of them are about
+// cost rather than correctness. Every probe is an IPC call — a `fetch` across
+// the webview's process boundary, handled on the same thread that dispatches
+// key presses — and this is called from the output path, so an unguarded probe
+// costs one round trip per chunk of output, forever, on every pane that never
+// answers. That is not a small number: a redrawing coding CLI produces tens of
+// chunks a second.
+//
+//  - A launched pane is never asked at all. Its program replaced the shell in
+//    the foreground, so the pgid can never come back equal and `foregroundKnown`
+//    can never latch — and nothing reads the answer either, because every run
+//    heuristic that would consume it (`noteOutput`, `finishRun`, `settleRun`)
+//    returns early for a launched pane. It was a call whose reply was thrown
+//    away, made forever, on exactly the panes that produce the most output.
+//  - A shell pane is asked at most once per {@link PROBE_INTERVAL_MS}. One
+//    answer is all this needs (it only ever latches `foregroundKnown`), so the
+//    rest were re-asking a question already in flight or already answered "not
+//    yet" a millisecond ago.
+const PROBE_INTERVAL_MS = 1000;
+
 function probeForeground(paneId: string, entry: Entry) {
+  if (entry.launch !== null) return;
   if (entry.foregroundKnown || entry.foregroundProbing) return;
+  const now = performance.now();
+  if (now - entry.foregroundProbedAt < PROBE_INTERVAL_MS) return;
+  entry.foregroundProbedAt = now;
   entry.foregroundProbing = true;
   ipc
     .ptyForegroundBusy(paneId)

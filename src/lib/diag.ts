@@ -1,6 +1,6 @@
 import { get } from "svelte/store";
 import { ipc } from "./ipc";
-import { perf } from "./perf";
+import { perf, startMonitors } from "./perf";
 import * as terminals from "./terminals";
 import * as renderers from "./renderers";
 import * as scheduler from "./writeScheduler";
@@ -67,6 +67,7 @@ function sample(): string {
   perf.reset();
   const fields = Object.entries(counts).map(([key, value]) => `${key}=${value}`);
   for (const [key, value] of Object.entries(report)) fields.push(`${key}=${value}`);
+  fields.push(`glRenderer=${renderers.diagDriver()}`);
   fields.push(`uptimeS=${Math.round(performance.now() / 1000)}`);
   return fields.join(" ");
 }
@@ -77,6 +78,7 @@ let timer: ReturnType<typeof setInterval> | undefined;
 export async function initDiag() {
   if (timer) return;
   if (!(await ipc.diagEnabled().catch(() => false))) return;
+  startMonitors();
   timer = setInterval(() => {
     ipc.diagSample(sample()).catch(() => {
       // A failed sample is a missing line in a log, and nothing more.
