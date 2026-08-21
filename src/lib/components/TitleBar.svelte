@@ -3,7 +3,6 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { activeProject } from "../stores";
   import ErrorBoundary from "./ErrorBoundary.svelte";
-  import logoUrl from "../assets/termax-logo.svg";
   import TabBar from "./TabBar.svelte";
 
   const win = getCurrentWindow();
@@ -26,27 +25,15 @@
   });
 </script>
 
-<!-- The whole window chrome lives in this one strip: brand, tabs, and window
-     controls share a single 36px row, which is what buys back the vertical
-     space the native titlebar used to take above the tab bar.
-
+<!-- The strip spans only the content area: the sidebar stretches to the top of
+     the window beside it, so its own header is the window's top-left corner.
      Every pixel that is not a control carries `data-tauri-drag-region` — the
-     attribute must sit on the exact element under the pointer, so children
-     that merely decorate a handle (the logo image) disable their own pointer
-     events rather than relying on inheritance. -->
+     attribute must sit on the exact element under the pointer, never inherited. -->
 <header class="flex h-9 shrink-0 items-stretch border-b border-zinc-800 bg-zinc-950" data-tauri-drag-region>
-  <div class="flex w-10 shrink-0 items-center justify-center" data-tauri-drag-region>
-    <img src={logoUrl} alt="" class="pointer-events-none h-4 w-4" draggable="false" />
-  </div>
-
   {#if $activeProject}
     <ErrorBoundary label="Tab bar" compact>
       <TabBar />
     </ErrorBoundary>
-  {:else}
-    <div class="flex items-center" data-tauri-drag-region>
-      <span class="select-none text-xs font-semibold tracking-wide text-zinc-400">Termax</span>
-    </div>
   {/if}
 
   <!-- All leftover width is grabbable; without it the window could only be

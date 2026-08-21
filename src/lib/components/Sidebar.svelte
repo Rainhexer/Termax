@@ -198,7 +198,8 @@
     ></div>
   {/if}
   {#if $sidebarCollapsed}
-    <div class="flex flex-col items-center gap-2 py-2">
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="flex flex-col items-center gap-2 py-2" data-tauri-drag-region>
       <button
         class="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-sm text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
         title="Back to projects"
@@ -282,19 +283,24 @@
       </div>
     </div>
   {:else}
-    <div class="flex items-start gap-2 p-3 pb-2">
+    <!-- This row is the window's top-left corner now that the sidebar stretches
+         to the top, so its text and gaps drag the window like a titlebar would;
+         the buttons stay clickable because the drag attribute must sit on the
+         exact element under the pointer. -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="flex items-start gap-2 p-3 pb-2" data-tauri-drag-region>
       <button
         class="mt-0.5 rounded-md px-1.5 py-0.5 text-sm text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
         title="Back to projects"
         onclick={closeProject}
       >←</button>
-      <div class="min-w-0 flex-1">
-        <h1 class="truncate text-sm font-semibold text-zinc-100">{$activeProject?.name}</h1>
+      <div class="min-w-0 flex-1" data-tauri-drag-region>
+        <h1 class="truncate text-sm font-semibold text-zinc-100" data-tauri-drag-region>{$activeProject?.name}</h1>
         <!-- Line two is the orientation zone: it already showed a path, so making
              it show the *active* root costs no vertical space and answers "which
              tree am I looking at" without a new panel. -->
-        <div class="flex min-w-0 items-center gap-1">
-          <p class="min-w-0 flex-1 truncate font-mono text-[10px] text-zinc-600">
+        <div class="flex min-w-0 items-center gap-1" data-tauri-drag-region>
+          <p class="min-w-0 flex-1 truncate font-mono text-[10px] text-zinc-600" data-tauri-drag-region>
             {$activeRoot ?? $activeProject?.path}
           </p>
           <WorktreeChip root={$activeRoot} compact />
