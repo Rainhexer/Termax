@@ -26,10 +26,10 @@
   import { initDiag } from "./lib/diag";
   import HomeScreen from "./lib/components/HomeScreen.svelte";
   import Sidebar from "./lib/components/Sidebar.svelte";
-  import TabBar from "./lib/components/TabBar.svelte";
   import TilingLayout from "./lib/components/TilingLayout.svelte";
   import SettingsModal from "./lib/components/SettingsModal.svelte";
   import ErrorBoundary from "./lib/components/ErrorBoundary.svelte";
+  import TitleBar from "./lib/components/TitleBar.svelte";
 
   /** Whether a keystroke is being typed into an editable field.
    *
@@ -119,21 +119,19 @@
   });
 </script>
 
-<div class="h-screen w-screen overflow-hidden bg-zinc-950 text-zinc-200">
+<div class="flex h-screen w-screen flex-col overflow-hidden bg-zinc-950 text-zinc-200">
   <!-- Outermost net. The per-region boundaries below contain crashes to their
        own panel; this one only catches what falls through them (a throwing
        store read in this template, a broken region boundary) so the window
        still shows something instead of going white. -->
   <ErrorBoundary label="Termax">
+  <TitleBar />
   {#if $activeProject}
-    <div class="flex h-full">
+    <div class="flex min-h-0 flex-1">
       <ErrorBoundary label="Sidebar">
         <Sidebar />
       </ErrorBoundary>
       <main class="flex min-w-0 flex-1 flex-col">
-        <ErrorBoundary label="Tab bar" compact>
-          <TabBar />
-        </ErrorBoundary>
         {#if $sessionError}
           <!-- Without this, a project whose folder was deleted or unmounted still
                rendered a complete, working-looking UI whose editor panes sat on
@@ -178,9 +176,11 @@
       </main>
     </div>
   {:else}
-    <ErrorBoundary label="Home screen">
-      <HomeScreen />
-    </ErrorBoundary>
+    <div class="min-h-0 flex-1">
+      <ErrorBoundary label="Home screen">
+        <HomeScreen />
+      </ErrorBoundary>
+    </div>
   {/if}
 
   {#if $settingsOpen}

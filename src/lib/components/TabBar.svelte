@@ -133,8 +133,9 @@
 <svelte:window onclick={() => (menu = null)} />
 
 {#if visible}
-  <div class="flex h-9 shrink-0 items-stretch overflow-hidden border-b border-zinc-800 bg-zinc-950">
-    {#each $tabs as tab, i (tab.id)}
+  <!-- Renders as a fragment of the TitleBar's flex row: no bar chrome of its
+       own, so tabs and window controls share one strip and its height. -->
+  {#each $tabs as tab, i (tab.id)}
       {@const active = tab.id === $activeTabId}
       {@const ringing = $tabsWithAttention.has(tab.id)}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -207,7 +208,6 @@
       {/if}
       +
     </button>
-  </div>
 {/if}
 
 {#if menu}
