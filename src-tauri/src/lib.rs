@@ -5,6 +5,7 @@ mod github;
 mod home;
 mod open_folder;
 mod projects;
+mod preview;
 mod pty;
 mod session;
 mod settings;
@@ -25,6 +26,7 @@ pub fn run() {
             app.manage(trust::TrustStore::load(app.handle()));
             app.manage(pty::PtyManager::default());
             app.manage(session::SessionManager::default());
+            app.manage(preview::PreviewManager::default());
             app.manage(open_folder::PendingFolder::default());
             app.manage(open_folder::FrontendReady::default());
             open_folder::on_frontend_ready(app.handle());
@@ -119,6 +121,8 @@ pub fn run() {
             fstree::write_file,
             fstree::reveal_in_file_manager,
             fstree::open_in_default_app,
+            preview::preview_server,
+            preview::preview_set_overlay,
             settings::get_settings,
             settings::save_settings,
             settings::detect_agents,

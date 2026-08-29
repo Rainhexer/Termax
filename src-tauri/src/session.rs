@@ -399,6 +399,7 @@ fn start_watcher(
 pub fn start_session(
     app: AppHandle,
     manager: tauri::State<SessionManager>,
+    preview: tauri::State<crate::preview::PreviewManager>,
     project_path: String,
     trusted: bool,
 ) -> Result<SessionInfo, String> {
@@ -414,7 +415,8 @@ pub fn start_session(
     session.refs = 1;
 
     // Opening a project replaces everything: any worktree sessions still open
-    // belong to the project being closed.
+    // belong to the project being closed, and so do their preview servers.
+    preview.stop_all();
     let mut sessions = manager.sessions.lock().unwrap();
     sessions.clear();
     sessions.insert(root.clone(), session);
@@ -423,7 +425,11 @@ pub fn start_session(
 }
 
 #[tauri::command]
-pub fn stop_session(manager: tauri::State<SessionManager>) {
+pub fn stop_session(
+    manager: tauri::State<SessionManager>,
+    preview: tauri::State<crate::preview::PreviewManager>,
+) {
+    preview.stop_all();
     manager.sessions.lock().unwrap().clear();
     *manager.primary.lock().unwrap() = None;
 }
@@ -491,7 +497,11 @@ pub fn open_worktree_session(
 /// Never touches the worktree on disk: it can hold the only copy of uncommitted
 /// work, so removal is always a separate, explicit action.
 #[tauri::command]
-pub fn close_worktree_session(manager: tauri::State<SessionManager>, path: String) {
+pub fn close_worktree_session(
+    manager: tauri::State<SessionManager>,
+    preview: tauri::State<crate::preview::PreviewManager>,
+    path: String,
+) {
     let key = canonical(Path::new(&path));
     if manager.primary.lock().unwrap().as_ref() == Some(&key) {
         return; // the primary outlives individual tabs
@@ -501,6 +511,9 @@ pub fn close_worktree_session(manager: tauri::State<SessionManager>, path: Strin
         session.refs = session.refs.saturating_sub(1);
         if session.refs == 0 {
             sessions.remove(&key);
+            // The preview server holds a watcher on the root; it must not
+            // outlive the session that authorized serving it.
+            preview.stop(&key);
         }
     }
 }

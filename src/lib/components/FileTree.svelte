@@ -19,6 +19,7 @@
   import { collectPanes } from "../layout";
   import { typeInPane } from "../terminals";
   import { ipc } from "../ipc";
+  import { hasPreview } from "../preview";
   import type { TreeEntry } from "../types";
   import FileTreeNode from "./FileTreeNode.svelte";
 
@@ -163,6 +164,16 @@
       <button class="menu-item" onclick={() => act(() => openFile(entry.path))}>
         Open
       </button>
+      {#if hasPreview(entry.path)}
+        <!-- A second pane on the same file, so the source and its rendered
+             preview can sit side by side. -->
+        <button
+          class="menu-item"
+          onclick={() => act(() => openFile(entry.path, { view: "preview", newPane: true }))}
+        >
+          Open preview beside
+        </button>
+      {/if}
       <button class="menu-item" onclick={() => act(() => openInTerminal(entry))}>
         Open in terminal
       </button>

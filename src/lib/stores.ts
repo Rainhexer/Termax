@@ -8,6 +8,7 @@ import * as terminals from "./terminals";
 import { loadDir, resetTree } from "./filetree";
 import { attentionPanes, bellPanes, setFocusedPane } from "./bell";
 import { clearPaneScroll } from "./paneScroll";
+import { clearPreviewServers } from "./previewServer";
 
 export const projects = writable<Project[]>([]);
 export const activeProject = writable<Project | null>(null);
@@ -491,6 +492,7 @@ export async function loadProjects() {
 export async function openProject(project: Project) {
   await closeProject();
   sessionReady.set(false);
+  clearPreviewServers();
   activeProject.set(project);
   gitByRoot.set(new Map());
   activeRoot.set(null);
@@ -617,6 +619,8 @@ export async function closeProject() {
   vaultRuns.set(new Map());
   await ipc.stopSession().catch(() => {});
   sessionReady.set(false);
+  // The backend tore down every preview server with the sessions.
+  clearPreviewServers();
   activeProject.set(null);
   tabs.set([]);
   activeTabId.set(null);
@@ -775,18 +779,27 @@ export function splitFocused(dir: "row" | "col") {
 }
 
 /** Open a file in an editor pane; focuses the existing pane if already open.
- *  `diff` opens (or flips an already-open pane) straight to the changes view. */
-export function openFile(path: string, opts: { diff?: boolean } = {}) {
+ *
+ *  `diff` opens (or flips an already-open pane) straight to the changes view,
+ *  and `view` picks edit or preview. `newPane` skips the reuse of an already-open
+ *  pane, which is what makes a file and its preview sit side by side: the second
+ *  pane splits off the focused one rather than landing wherever there is room. */
+export function openFile(
+  path: string,
+  opts: { diff?: boolean; view?: "edit" | "preview"; newPane?: boolean } = {},
+) {
   const tree = get(layout);
-  const existing = layoutOps
-    .collectPanes(tree)
-    .find((p) => p.kind === "editor" && p.file === path);
-  if (existing) {
-    if (opts.diff && !existing.diff) {
-      setLayout(layoutOps.setPaneDiff(tree!, existing.id, true));
+  if (!opts.newPane) {
+    const existing = layoutOps
+      .collectPanes(tree)
+      .find((p) => p.kind === "editor" && p.file === path);
+    if (existing) {
+      if (opts.diff && !existing.diff) {
+        setLayout(layoutOps.setPaneDiff(tree!, existing.id, true));
+      }
+      focusedPaneId.set(existing.id);
+      return;
     }
-    focusedPaneId.set(existing.id);
-    return;
   }
   const name = path.split("/").pop() ?? path;
   const pane: PaneNode = {
@@ -797,9 +810,16 @@ export function openFile(path: string, opts: { diff?: boolean } = {}) {
     kind: "editor",
     file: path,
     diff: opts.diff,
+    view: opts.view,
   };
   if (!tree) {
     setLayout(pane);
+  } else if (opts.newPane) {
+    // Beside the pane it was opened from, and beside means beside: a "row"
+    // split puts the two views next to each other rather than stacked.
+    const focus = get(focusedPaneId);
+    const target = focus && layoutOps.findPane(tree, focus) ? focus : autoPlacement(tree).target;
+    setLayout(layoutOps.splitPane(tree, target, pane, "row"));
   } else {
     const { target, dir } = autoPlacement(tree);
     setLayout(layoutOps.splitPane(tree, target, pane, dir));

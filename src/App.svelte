@@ -16,9 +16,11 @@
     addPane,
     fsTick,
     cycleTab,
+    focusedPaneId,
     moveActiveTab,
     paneAreaSize,
   } from "./lib/stores";
+  import { savePaneFile } from "./lib/editorSave";
   import { loadSettings, settingsOpen } from "./lib/settings";
   import { initPrListeners } from "./lib/pr";
   import { initIssueListeners } from "./lib/issues";
@@ -107,6 +109,12 @@
         e.preventDefault();
         if (e.shiftKey) moveActiveTab(1);
         else cycleTab(1);
+      } else if (key === "s" && !e.shiftKey) {
+        // Save the file open in the focused pane. Skipped when the editor
+        // itself has focus (Monaco handles its own Ctrl+S above via the
+        // text-entry guard) and inside terminals, where Ctrl+S is XOFF flow
+        // control. A non-editor focused pane leaves the key untouched.
+        if (savePaneFile(get(focusedPaneId) ?? "")) e.preventDefault();
       }
     };
     window.addEventListener("keydown", onKeydown, true);

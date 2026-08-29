@@ -29,6 +29,7 @@ import type {
   WorktreeEntry,
 } from "./types";
 import type { AppSettings, DetectedAgent } from "./settings";
+import type { PreviewServerInfo } from "./previewServer";
 
 /** Every backend call, timed.
  *
@@ -273,4 +274,11 @@ export const ipc = {
     invoke<void>("reveal_in_file_manager", { path, root }),
   openInDefaultApp: (path: string, root?: string) =>
     invoke<void>("open_in_default_app", { path, root }),
+
+  // Live preview. The backend serves the root over loopback HTTP so a previewed
+  // page gets a real origin — see previewServer.ts and src-tauri/src/preview.rs.
+  previewServer: (root?: string) => invoke<PreviewServerInfo>("preview_server", { root }),
+  /** Publish an unsaved buffer to the preview server, or retract it with null. */
+  previewSetOverlay: (path: string, content: string | null, root?: string) =>
+    invoke<void>("preview_set_overlay", { path, content, root }),
 };

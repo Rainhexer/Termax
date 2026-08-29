@@ -27,13 +27,27 @@ function escapeHtml(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
+/** Resolve a Markdown reference against the preview server, so a relative
+ *  image or link in a note points at the file next to it on disk. Absolute
+ *  URLs, protocol-relative URLs and in-page anchors are left alone. */
+function resolveRef(url: string, base: string): string {
+  if (!base || /^[a-z][a-z0-9+.-]*:/i.test(url) || url.startsWith("//") || url.startsWith("#")) {
+    return url;
+  }
+  try {
+    return new URL(url, base).href;
+  } catch {
+    return url;
+  }
+}
+
 // Inline: applied AFTER the text is already HTML-escaped, so no raw HTML injection.
-function inline(text: string): string {
+function inline(text: string, base: string): string {
   return text
     // images: ![alt](src)
-    .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_m, alt, src) => `<img alt="${alt}" src="${src}">`)
+    .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_m, alt, src) => `<img alt="${alt}" src="${resolveRef(src, base)}">`)
     // links: [text](href)
-    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_m, txt, href) => `<a href="${href}" target="_blank" rel="noreferrer">${txt}</a>`)
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_m, txt, href) => `<a href="${resolveRef(href, base)}" target="_blank" rel="noreferrer">${txt}</a>`)
     // inline code
     .replace(/`([^`]+)`/g, (_m, code) => `<code>${code}</code>`)
     // bold
@@ -50,8 +64,11 @@ function inline(text: string): string {
  *
  *  Every block carries `data-line` with the 1-based source line it came from.
  *  EditorPane uses those to map a scroll position in the preview back to a
- *  line in the raw text, so both views can be scrolled to the same place. */
-export function renderMarkdown(src: string): string {
+ *  line in the raw text, so both views can be scrolled to the same place.
+ *
+ *  `baseUrl` is the preview server URL of the directory holding the file;
+ *  relative images and links are resolved against it so they actually load. */
+export function renderMarkdown(src: string, baseUrl = ""): string {
   const lines = src.replace(/\r\n?/g, "\n").split("\n");
   const out: string[] = [];
   let i = 0;
@@ -64,7 +81,7 @@ export function renderMarkdown(src: string): string {
 
   const flushPara = () => {
     if (para.length) {
-      out.push(`<p data-line="${paraStart + 1}">${inline(escapeHtml(para.join(" ")))}</p>`);
+      out.push(`<p data-line="${paraStart + 1}">${inline(escapeHtml(para.join(" ")), baseUrl)}</p>`);
       para = [];
     }
   };
@@ -114,7 +131,7 @@ export function renderMarkdown(src: string): string {
       flushPara();
       closeList();
       const level = h[1].length;
-      out.push(`<h${level} data-line="${i + 1}">${inline(escapeHtml(h[2].trim()))}</h${level}>`);
+      out.push(`<h${level} data-line="${i + 1}">${inline(escapeHtml(h[2].trim()), baseUrl)}</h${level}>`);
       i++;
       continue;
     }
@@ -132,7 +149,7 @@ export function renderMarkdown(src: string): string {
     if (/^\s*>\s?/.test(line)) {
       flushPara();
       closeList();
-      out.push(`<blockquote data-line="${i + 1}">${inline(escapeHtml(line.replace(/^\s*>\s?/, "")))}</blockquote>`);
+      out.push(`<blockquote data-line="${i + 1}">${inline(escapeHtml(line.replace(/^\s*>\s?/, "")), baseUrl)}</blockquote>`);
       i++;
       continue;
     }
@@ -148,7 +165,7 @@ export function renderMarkdown(src: string): string {
         listType = want;
         out.push(`<${want} data-line="${i + 1}">`);
       }
-      out.push(`<li data-line="${i + 1}">${inline(escapeHtml((ul ?? ol)![1]))}</li>`);
+      out.push(`<li data-line="${i + 1}">${inline(escapeHtml((ul ?? ol)![1]), baseUrl)}</li>`);
       i++;
       continue;
     }
@@ -164,33 +181,4 @@ export function renderMarkdown(src: string): string {
   flushPara();
   closeList();
   return out.join("\n");
-}
-
-// Scroll bridge for html/svg previews.
-//
-// Those render in a sandboxed iframe without `allow-same-origin`, so its
-// document lives in an opaque origin and the parent cannot touch
-// `contentWindow.scrollY` at all — reading it throws. This script is appended
-// to the srcdoc so the frame reports its own scroll position and accepts a
-// position back, over postMessage.
-const SCROLL_BRIDGE = `<script>(function(){
-  function max(){return Math.max(0,document.documentElement.scrollHeight-window.innerHeight);}
-  var pending=null;
-  window.addEventListener("scroll",function(){
-    if(pending)return;
-    pending=setTimeout(function(){
-      pending=null;
-      parent.postMessage({__tmx:"scroll",pct:max()>0?window.scrollY/max():0},"*");
-    },80);
-  },{passive:true});
-  window.addEventListener("message",function(e){
-    var d=e.data;
-    if(d&&d.__tmx==="scrollTo")window.scrollTo(0,d.pct*max());
-  });
-  parent.postMessage({__tmx:"ready"},"*");
-})();</script>`;
-
-/** Build the srcdoc for an html/svg preview: the file plus the scroll bridge. */
-export function previewDocument(src: string): string {
-  return src + SCROLL_BRIDGE;
 }

@@ -11,9 +11,16 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import { get } from "svelte/store";
-  import type { ChangeArea, PaneNode } from "../types";
-  import { getMonaco, languageForPath, MONACO_THEME } from "../monaco";
-  import { hasPreview, previewDocument, previewKindForPath, renderMarkdown } from "../preview";
+import type { ChangeArea, PaneNode } from "../types";
+import { registerSave } from "../editorSave";
+import { getMonaco, languageForPath, MONACO_THEME } from "../monaco";
+  import { hasPreview, previewKindForPath, renderMarkdown } from "../preview";
+  import {
+    previewBaseUrl,
+    previewServer,
+    previewUrl,
+    type PreviewServerInfo,
+  } from "../previewServer";
   import { flushPaneScroll, getPaneScroll, setPaneScroll, type PaneScroll } from "../paneScroll";
   import { fontStack } from "../theme";
   import { ipc } from "../ipc";
@@ -27,6 +34,7 @@
     fsTick,
     lockFlash,
     maximizedPaneId,
+    openFile,
     sessionReady,
     setPaneDiff,
     setPaneView,
@@ -67,10 +75,15 @@
   let viewMode = $state<"edit" | "preview">(initialView());
   /** Live buffer text mirrored for markdown/html/svg previews. */
   let previewText = $state("");
-  /** Debounced copy of `previewText` feeding the iframe: rebuilding srcdoc
-   *  reloads the frame, so it must not happen on every keystroke. */
-  let previewSrc = $state("");
-  let previewSrcTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The loopback server serving this pane's root, once it has started. */
+  let previewSrv = $state<PreviewServerInfo | null>(null);
+  /** Path the preview frame is on. Diverges from the file once a link inside
+   *  the page is followed, which is when the "back to file" control appears. */
+  let framePath = $state("");
+  /** Set while this pane's unsaved buffer is published to the preview server,
+   *  so teardown only retracts an overlay this pane actually put there. */
+  let overlaySet = false;
+  let overlayTimer: ReturnType<typeof setTimeout> | undefined;
   /** data: URL for raster-image previews. */
   let imageData = $state<string | null>(null);
   /** Kebab (⋯) menu open state. */
@@ -105,16 +118,23 @@
   /** Image files have no editable text view. */
   const imageOnly = $derived(previewKind === "image");
   const markdownHtml = $derived(
-    viewMode === "preview" && previewKind === "markdown" ? renderMarkdown(previewText) : "",
-  );
-  /** srcdoc for html/svg preview (rendered live in a sandboxed iframe). Built
-   *  from the debounced text and kept mounted while editing, so the frame is
-   *  not reloaded — and its scroll position lost — on every mode switch. */
-  const frameDoc = $derived(
-    (previewKind === "html" || previewKind === "svg") && previewSrc
-      ? previewDocument(previewSrc)
+    viewMode === "preview" && previewKind === "markdown"
+      ? renderMarkdown(previewText, previewSrv ? previewBaseUrl(previewSrv, path) : "")
       : "",
   );
+  /** URL the preview frame loads.
+   *
+   *  Served over loopback HTTP rather than built as a `srcdoc`, because a
+   *  srcdoc document has an opaque origin and no base URL: relative assets,
+   *  module scripts, `fetch`, links, audio and video are all broken there and
+   *  all work here. It also gives the backend somewhere to push reloads from. */
+  const frameUrl = $derived(
+    previewSrv && (previewKind === "html" || previewKind === "svg")
+      ? previewUrl(previewSrv, path)
+      : "",
+  );
+  /** True once the frame has followed a link away from the previewed file. */
+  const frameNavigated = $derived(framePath !== "" && framePath !== `/${path}`);
 
   // The buffer model is shared between the plain and diff editors so text,
   // cursor-adjacent state and undo history survive view toggles.
@@ -341,14 +361,76 @@
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Live preview.
+  //
+  // The frame shows what the server serves, which is what is on disk. An
+  // unsaved buffer is therefore published to the server as an "overlay" it
+  // serves in place of the file, so preview and editor stay in step while
+  // typing without this pane having to own the rendering.
+  // ---------------------------------------------------------------------------
+
+  function servedByPreview(): boolean {
+    return previewKind === "html" || previewKind === "svg";
+  }
+
+  function scheduleOverlay() {
+    if (!servedByPreview()) return;
+    clearTimeout(overlayTimer);
+    overlayTimer = setTimeout(pushOverlay, 300);
+  }
+
+  /** Publish the buffer while it is dirty; retract it once it matches disk. */
+  function pushOverlay() {
+    if (!servedByPreview()) return;
+    const content = dirty ? previewText : null;
+    if (content === null && !overlaySet) return;
+    overlaySet = content !== null;
+    ipc.previewSetOverlay(path, content, $activeRoot ?? undefined).catch(() => {});
+  }
+
+  /** Retract on teardown, against the file and root this pane was showing —
+   *  by then the reactive values may already point somewhere else. */
+  function dropOverlay(filePath: string, root: string | null) {
+    if (!overlaySet) return;
+    overlaySet = false;
+    ipc.previewSetOverlay(filePath, null, root ?? undefined).catch(() => {});
+  }
+
+  function reloadFrame() {
+    previewFrame?.contentWindow?.postMessage({ __tmx: "reload" }, "*");
+  }
+
+  /** Navigate the frame back to the file this pane is previewing. */
+  function frameHome() {
+    if (frameUrl) previewFrame?.contentWindow?.postMessage({ __tmx: "navigate", url: frameUrl }, "*");
+  }
+
+  function openInBrowser() {
+    menuOpen = false;
+    if (frameUrl) ipc.openUrl(frameUrl).catch((err) => (saveError = String(err)));
+  }
+
+  /** Second pane on the same file, so the source and its preview sit side by
+   *  side. `newPane` is what stops openFile from just focusing this one. */
+  function openPreviewBeside() {
+    menuOpen = false;
+    openFile(path, { view: "preview", newPane: true });
+  }
+
   function onFrameMessage(e: MessageEvent) {
     if (!previewFrame || e.source !== previewFrame.contentWindow) return;
-    const data = e.data as { __tmx?: string; pct?: number } | null;
+    const data = e.data as { __tmx?: string; pct?: number; path?: string; url?: string } | null;
     if (!data?.__tmx) return;
     if (data.__tmx === "ready") {
+      framePath = data.path ?? "";
       // The frame stays mounted while editing, so only restore it when it is
       // the visible view; otherwise this would move the editor instead.
       if (viewMode === "preview") applyScroll();
+    } else if (data.__tmx === "open" && data.url) {
+      // A link leaving the project. The preview is not a browser, so hand it to
+      // the real one instead of stranding the pane on a page it cannot leave.
+      ipc.openUrl(data.url).catch(() => {});
     } else if (data.__tmx === "scroll" && viewMode === "preview") {
       if (performance.now() < suppressUntil) return;
       // No line mapping exists for a rendered page, so drop any stale line:
@@ -396,15 +478,13 @@
       }
       loadedContent = file.content;
       previewText = file.content;
-      previewSrc = file.content;
       const [m, lang] = await Promise.all([getMonaco(), languageForPath(filePath)]);
       if (gen !== generation) return;
       model = m.editor.createModel(file.content, lang);
       model.onDidChangeContent(() => {
         dirty = model!.getValue() !== loadedContent;
         previewText = model!.getValue();
-        clearTimeout(previewSrcTimer);
-        previewSrcTimer = setTimeout(() => (previewSrc = previewText), 300);
+        scheduleOverlay();
       });
       createPlainEditor(m);
       modelReady++;
@@ -490,6 +570,10 @@
       conflict = false;
       externallyChanged = false;
       saveError = null;
+      // The file now *is* the buffer: retract the overlay so the preview goes
+      // back to reading the same bytes as everything else.
+      clearTimeout(overlayTimer);
+      pushOverlay();
     } catch (err) {
       saveError = String(err);
     }
@@ -508,6 +592,8 @@
           model.setValue(file.content);
           dirty = false;
           externallyChanged = true;
+          clearTimeout(overlayTimer);
+          pushOverlay();
           // setValue scrolls Monaco back to the top — put it back.
           applyScrollSoon();
         }
@@ -542,7 +628,6 @@
     binary = false;
     error = null;
     imageData = null;
-    previewSrc = "";
     load(path);
   }
 
@@ -551,6 +636,7 @@
   // start_session resolves, and loading then would fail with "no active session".
   $effect(() => {
     const p = path;
+    const root = $activeRoot;
     const ready = $sessionReady;
     binary = false;
     error = null;
@@ -562,13 +648,14 @@
     viewMode = initialView();
     anchor = getPaneScroll(paneId);
     previewText = "";
-    previewSrc = "";
+    framePath = "";
     imageData = null;
     menuOpen = false;
     if (ready) load(p);
     return () => {
       generation++;
-      clearTimeout(previewSrcTimer);
+      clearTimeout(overlayTimer);
+      dropOverlay(p, root);
       saveEditorState();
       captureScroll();
       flushPaneScroll();
@@ -600,6 +687,11 @@
     diffEditor?.updateOptions({ readOnly });
   });
 
+  // Ctrl+S works app-wide: when the editor itself has focus Monaco handles it,
+  // and App.svelte's global keydown handler reaches `save` through this
+  // registration for every other focus target (tree, buttons, preview).
+  $effect(() => registerSave(paneId, save));
+
   // Scroll the preview to the anchor once its content is actually laid out —
   // on mount, and again whenever a re-render moves the blocks around.
   $effect(() => {
@@ -609,7 +701,23 @@
     applyScrollSoon();
   });
 
-  // html/svg previews live in a cross-origin sandbox and talk over postMessage.
+  // Bring up the loopback server backing this pane's previews. Markdown needs
+  // it too: it is what makes a relative image in a note actually resolve.
+  $effect(() => {
+    if (!$sessionReady || !previewable || imageOnly) return;
+    const root = $activeRoot;
+    let live = true;
+    previewServer(root)
+      .then((server) => {
+        if (live) previewSrv = server;
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  });
+
+  // The preview frame has its own origin and talks over postMessage.
   $effect(() => {
     window.addEventListener("message", onFrameMessage);
     return () => window.removeEventListener("message", onFrameMessage);
@@ -687,6 +795,13 @@
     {#if showDiff}
       <span class="shrink-0 rounded bg-emerald-950/60 px-1 py-px font-mono text-[9px] font-semibold uppercase tracking-wide text-emerald-400">diff</span>
     {/if}
+    {#if frameNavigated && viewMode === "preview"}
+      <!-- The frame followed a link; say where it went, since the tab still
+           carries the name of the file the preview started from. -->
+      <span class="hidden min-w-0 truncate font-mono text-[10px] text-emerald-500/80 sm:inline" title={framePath}
+        >→ {framePath}</span
+      >
+    {/if}
     {#if conflict}
       <span
         class="h-1.5 w-1.5 shrink-0 rounded-full bg-red-400"
@@ -735,6 +850,20 @@
           >Preview</button>
         </div>
       {/if}
+      {#if (previewKind === "html" || previewKind === "svg") && viewMode === "preview"}
+        {#if frameNavigated}
+          <button
+            class="rounded px-1.5 py-0.5 text-[11px] leading-none text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+            title="Back to {fileName}"
+            onclick={(e) => { e.stopPropagation(); frameHome(); }}
+          >↩</button>
+        {/if}
+        <button
+          class="rounded px-1.5 py-0.5 text-[11px] leading-none text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+          title="Reload preview"
+          onclick={(e) => { e.stopPropagation(); reloadFrame(); }}
+        >↻</button>
+      {/if}
       {#if !imageOnly && viewMode === "edit"}
         <button
           class="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold {showDiff
@@ -760,6 +889,25 @@
             tabindex="-1"
             onmouseleave={() => (menuOpen = false)}
           >
+            {#if previewable && !imageOnly}
+              <button
+                class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-zinc-200 hover:bg-zinc-800"
+                onclick={(e) => { e.stopPropagation(); openPreviewBeside(); }}
+              >
+                <span class="text-zinc-400">⧉</span> Open preview beside
+              </button>
+            {/if}
+            {#if frameUrl}
+              <button
+                class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-zinc-200 hover:bg-zinc-800"
+                onclick={(e) => { e.stopPropagation(); openInBrowser(); }}
+              >
+                <span class="text-zinc-400">🌐</span> Open in browser
+              </button>
+            {/if}
+            {#if previewable && !imageOnly}
+              <div class="my-1 h-px bg-zinc-800"></div>
+            {/if}
             <button
               class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-zinc-200 hover:bg-zinc-800"
               onclick={(e) => { e.stopPropagation(); openExternally(); }}
@@ -821,16 +969,29 @@
         <div class="md-preview">{@html markdownHtml}</div>
       </div>
     {:else if previewKind === "html" || previewKind === "svg"}
-      <!-- The frame reports and restores its own scroll over postMessage; the
-           sandbox has no allow-same-origin, so the parent cannot read it. -->
-      <iframe
-        bind:this={previewFrame}
-        class:hidden={viewMode !== "preview"}
-        class="min-h-0 flex-1 border-0 bg-[var(--tmx-pv-page)]"
-        title="Preview of {fileName}"
-        sandbox="allow-scripts allow-forms allow-popups allow-modals"
-        srcdoc={frameDoc}
-      ></iframe>
+      <!-- Served by the loopback preview server, so the page runs on a real
+           origin: scripts, modules, fetch, relative assets, audio and video all
+           behave as they would in a browser, and the server pushes reloads into
+           it when anything it uses changes on disk.
+
+           `allow-same-origin` grants the frame its *own* 127.0.0.1 origin, not
+           ours — without it the document is opaque again and none of the above
+           works. That origin is still not the app's, so the parent cannot read
+           the frame; scroll position is exchanged over postMessage as before. -->
+      {#if frameUrl}
+        <iframe
+          bind:this={previewFrame}
+          class:hidden={viewMode !== "preview"}
+          class="min-h-0 flex-1 border-0 bg-[var(--tmx-pv-page)]"
+          title="Preview of {fileName}"
+          sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
+          src={frameUrl}
+        ></iframe>
+      {:else if viewMode === "preview"}
+        <div class="flex min-h-0 flex-1 items-center justify-center text-sm text-zinc-500">
+          Starting preview server…
+        </div>
+      {/if}
     {/if}
   {/if}
 </div>
