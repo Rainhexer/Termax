@@ -144,6 +144,11 @@ interface Entry {
    *  issue one per chunk. See {@link probeForeground}. */
   foregroundProbedAt: number;
   quietTimer?: ReturnType<typeof setTimeout>;
+  /** The backend screen version this pane was last settled against while
+   *  hidden, or -1 when there is no baseline yet. A hidden pane's bytes never
+   *  reach us, so this — not {@link lastOutputAt} — is how a settle attempt
+   *  tells "it drew something since I last looked". See {@link settleRun}. */
+  hiddenSeq: number;
   /** The program this pane was launched with (null = plain shell). A coding CLI
    *  never returns to a shell prompt, so none of the shell run heuristics below
    *  — quiet windows, foreground pgid, OSC 133, BEL — mean "the turn ended"
@@ -610,6 +615,7 @@ function create(paneId: string): Entry {
     foregroundKnown: false,
     foregroundProbing: false,
     foregroundProbedAt: 0,
+    hiddenSeq: -1,
     launch: null,
   };
   // A program asking for attention (BEL) rings straight away — no heuristics.
@@ -664,15 +670,52 @@ function quietWindow(entry: Entry): number {
   return Math.min(QUIET_MAX_MS, Math.max(QUIET_MS, elapsed * QUIET_RATIO));
 }
 
+/** The backend's screen version for a pane, when it changed since `seq`; null
+ *  when nothing was drawn (or the pane is gone). One row is asked for because
+ *  only the version is read — the text is what `refreshHiddenScreens` fetches. */
+async function screenSeqSince(paneId: string, seq: number): Promise<number | null> {
+  try {
+    const [screen] = await ipc.paneScreens([{ paneId, seq }], 1);
+    return screen?.seq ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // Settle the run once the pane has gone quiet: confirm against the tty's
 // foreground process group, and keep polling for as long as it says a command
 // is still running.
 async function settleRun(paneId: string) {
   const entry = registry.get(paneId);
   if (!entry?.busy) return;
-  const echoOnly =
-    entry.outputSinceSubmit <= ECHO_BYTES && entry.lastOutputAt - entry.submittedAt < ECHO_MS;
-  if (echoOnly) return;
+  if (entry.visible) {
+    const echoOnly =
+      entry.outputSinceSubmit <= ECHO_BYTES && entry.lastOutputAt - entry.submittedAt < ECHO_MS;
+    if (echoOnly) return;
+  } else {
+    // Nothing arrives for a hidden pane — that is the point of syncStream — so
+    // the quiet window it was armed with measured nothing, and the echo test
+    // above has no bytes to weigh. The backend parses that pane's output into
+    // its screen model regardless and bumps a version per chunk: ask for that
+    // instead. This is what once left a vault command run into a pane in
+    // another tab spinning "running" for the rest of the session, since the
+    // only other way out is the OSC 133 marker most shells never send.
+    // -1 is this side's "no baseline yet"; the backend's version is unsigned,
+    // and 0 there means the pane has processed nothing, so it asks the same.
+    const seq = await screenSeqSince(paneId, Math.max(entry.hiddenSeq, 0));
+    if (registry.get(paneId) !== entry || !entry.busy) return;
+    if (seq !== null) {
+      const drew = entry.hiddenSeq >= 0;
+      entry.hiddenSeq = seq;
+      entry.lastOutputAt = performance.now();
+      if (drew) {
+        // Output is still landing: wait it out, exactly as noteOutput would.
+        clearTimeout(entry.quietTimer);
+        entry.quietTimer = setTimeout(() => settleRun(paneId), quietWindow(entry));
+        return;
+      }
+    }
+  }
 
   let busy: boolean | null = null;
   try {
@@ -684,7 +727,12 @@ async function settleRun(paneId: string) {
   if (registry.get(paneId) !== entry || !entry.busy) return;
 
   if (busy === false) entry.foregroundKnown = true;
-  if (busy === true && entry.foregroundKnown) {
+  // A hidden pane is trusted without the latch: the latch guards against a
+  // launcher program that replaced the shell (permanently "busy"), and those
+  // panes never reach here — `finishRun` and `noteOutput` both bail on a
+  // launched pane. Waiting for a latch that only output can produce would just
+  // put the run back to being declared finished the moment it goes quiet.
+  if (busy === true && (entry.foregroundKnown || !entry.visible)) {
     // A command really is still running (a silent compile, a build stage).
     // Keep waiting rather than declaring the run finished.
     clearTimeout(entry.quietTimer);
@@ -767,7 +815,17 @@ function noteInput(paneId: string, data: string) {
   entry.busy = true;
   entry.submittedAt = performance.now();
   entry.outputSinceSubmit = 0;
+  entry.hiddenSeq = -1;
   setRun(paneId, "running");
+  // Arriving output is what normally arms the settle timer, and a hidden pane
+  // gets none: a run submitted into one (the command vault re-running in a
+  // pane that lives in another tab) would never have a settle path at all.
+  // Arming here gives every submitted line one of its own; a visible pane's
+  // first chunk of echo re-arms it a few milliseconds later anyway.
+  if (entry.launch === null) {
+    clearTimeout(entry.quietTimer);
+    entry.quietTimer = setTimeout(() => settleRun(paneId), quietWindow(entry));
+  }
 }
 
 /** Mount pane terminal into host element; spawn the PTY on first attach. */
@@ -1006,6 +1064,10 @@ function setVisible(entry: Entry, visible: boolean) {
     // was cached for it is immediately stale — and its xterm buffer, once that
     // replay lands, is authoritative again.
     if (visible) remoteScreens.delete(entry.paneId);
+    // Either direction invalidates the settle baseline: going hidden means the
+    // next check has not looked yet, and coming back means real bytes take
+    // over from the version poll.
+    entry.hiddenSeq = -1;
   }
   syncStream(entry);
 }

@@ -730,9 +730,16 @@ terminals.paneRuns.subscribe((runs) => {
 export function runVaultCommand(cmd: VaultCommand) {
   const linked = get(vaultRuns).get(cmd.id)?.paneId;
   if (linked && terminals.isAlive(linked)) {
-    focusedPaneId.set(linked);
-    terminals.runInPane(linked, cmd.command);
-    return;
+    // Reveal rather than only focus: the linked pane may sit in another tab, and
+    // focusing one there points every pane action (split, close) at something
+    // off screen while the command it was just handed runs where nobody sees it.
+    if (revealPane(linked)) {
+      terminals.runInPane(linked, cmd.command);
+      return;
+    }
+    // The terminal outlived its pane (closed from a tab we no longer hold):
+    // drop the stale link and open a fresh pane below.
+    unlinkPane(linked);
   }
   const paneId = addPane(launchFor(cmd.terminalType), launcherById(cmd.terminalType).name);
   updateRun(cmd.id, { paneId, state: "starting", exitCode: null });
