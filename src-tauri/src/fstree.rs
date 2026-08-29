@@ -32,7 +32,7 @@ pub struct FileContent {
 /// root and the target and require the resolved path to stay contained. All
 /// callers operate on paths that already exist, so `canonicalize` (which
 /// requires existence) is safe here.
-fn resolve(root: &Path, rel: &str) -> Result<PathBuf, String> {
+pub(crate) fn resolve(root: &Path, rel: &str) -> Result<PathBuf, String> {
     let rel_path = Path::new(rel);
     if rel_path.is_absolute()
         || rel_path

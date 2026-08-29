@@ -233,6 +233,51 @@ optgroup {
   animation: termax-bell-pulse-tab 1.4s ease-in-out infinite;
 }
 
+/* Lines an agent wrote into a file while it was open in the editor. The point
+   is to be *seen arriving*: without it a file changing under the cursor is
+   indistinguishable from having mis-remembered what it said. Applied by
+   EditorPane as Monaco decorations and removed again ~1.4s later. */
+@keyframes termax-agent-flash {
+  0% {
+    background-color: color-mix(in srgb, var(--tmx-ui-accent) 42%, transparent);
+  }
+  35% {
+    background-color: color-mix(in srgb, var(--tmx-ui-accent) 30%, transparent);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+.tmx-agent-flash {
+  animation: termax-agent-flash 1.4s ease-out forwards;
+}
+
+/* A deletion leaves no lines to highlight, so the seam it closed is marked
+   instead — a rule between the two lines that are now neighbours. */
+@keyframes termax-agent-flash-cut {
+  0% {
+    box-shadow: inset 0 2px 0 -1px color-mix(in srgb, var(--tmx-ui-accent) 75%, transparent);
+  }
+  100% {
+    box-shadow: inset 0 2px 0 -1px transparent;
+  }
+}
+.tmx-agent-flash-cut {
+  animation: termax-agent-flash-cut 1.4s ease-out forwards;
+}
+
+@keyframes termax-agent-flash-gutter {
+  0% {
+    border-left: 2px solid var(--tmx-ui-accent);
+  }
+  100% {
+    border-left: 2px solid transparent;
+  }
+}
+.tmx-agent-flash-gutter {
+  animation: termax-agent-flash-gutter 1.4s ease-out forwards;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .bell-pulse {
     animation: none;
@@ -241,6 +286,19 @@ optgroup {
   .bell-pulse-tab {
     animation: none;
     background-color: color-mix(in srgb, var(--tmx-ui-warn) 15%, transparent);
+  }
+  /* Still marked, just not animated: the highlight is information, not
+     decoration, and it is removed on a timer either way. */
+  .tmx-agent-flash {
+    animation: none;
+    background-color: color-mix(in srgb, var(--tmx-ui-accent) 30%, transparent);
+  }
+  .tmx-agent-flash-cut,
+  .tmx-agent-flash-gutter {
+    animation: none;
+  }
+  .tmx-agent-flash-gutter {
+    border-left: 2px solid var(--tmx-ui-accent);
   }
 }
 

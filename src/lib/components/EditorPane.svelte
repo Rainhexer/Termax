@@ -12,7 +12,9 @@
   import { untrack } from "svelte";
   import { get } from "svelte/store";
 import type { ChangeArea, PaneNode } from "../types";
+  import { agentClock, agentFileOps, pendingRead } from "../agentFiles";
 import { registerSave } from "../editorSave";
+  import { lineHunks } from "../lineDiff";
 import { getMonaco, languageForPath, MONACO_THEME } from "../monaco";
   import { hasPreview, previewKindForPath, renderMarkdown } from "../preview";
   import {
@@ -35,6 +37,7 @@ import { getMonaco, languageForPath, MONACO_THEME } from "../monaco";
     lockFlash,
     maximizedPaneId,
     openFile,
+    paneInstances,
     sessionReady,
     setPaneDiff,
     setPaneView,
@@ -64,8 +67,14 @@ import { getMonaco, languageForPath, MONACO_THEME } from "../monaco";
   let externallyChanged = $state(false);
   /** Unsaved edits in the buffer. */
   let dirty = $state(false);
-  /** File changed on disk while the buffer had unsaved edits. */
+  /** Both this buffer and the file on disk changed the same lines, so the last
+   *  save was refused — writing either side would delete the other's work. */
   let conflict = $state(false);
+  /** Diff3-marked text carrying both sides of that conflict, from the backend
+   *  merge, and the disk content it was merged against. */
+  let conflictText: string | null = null;
+  let conflictDisk: string | null = null;
+  let conflictCount = $state(0);
   /** Diff view (changes vs git base / session snapshot) instead of plain content. */
   let showDiff = $state(false);
   let saveError = $state<string | null>(null);
@@ -115,6 +124,24 @@ import { getMonaco, languageForPath, MONACO_THEME } from "../monaco";
   const locked = $derived($explorerLocked);
   const previewKind = $derived(previewKindForPath(path));
   const previewable = $derived(hasPreview(path));
+  /** An agent has this file's contents in its context and has not written it
+   *  back yet — so whatever it writes was composed without the line you are
+   *  typing. Nothing is lost either way (a save merges), but it is worth
+   *  seeing before you type, so it goes in the title bar. See agentFiles.ts. */
+  const agentRead = $derived.by(() => {
+    $agentClock; // re-evaluates as the read ages out
+    return pendingRead($agentFileOps, path);
+  });
+  const agentReadAge = $derived.by(() => {
+    $agentClock;
+    return agentRead ? Math.max(0, Math.round((Date.now() - agentRead.readAt) / 1000)) : 0;
+  });
+  /** What to call the agent that did the reading. */
+  const agentName = $derived(
+    agentRead
+      ? ($paneInstances.find((p) => p.paneId === agentRead.paneId)?.launch ?? "An agent")
+      : "",
+  );
   /** Image files have no editable text view. */
   const imageOnly = $derived(previewKind === "image");
   const markdownHtml = $derived(
@@ -560,42 +587,228 @@ import { getMonaco, languageForPath, MONACO_THEME } from "../monaco";
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Text arriving from somewhere other than the keyboard.
+  //
+  // An agent writing this file is not a reload — it is an edit, made by someone
+  // else, to the document being read. `setValue` would throw away the undo
+  // stack, drop the selection, scroll to the top and, worst of all, say nothing
+  // about *what* changed. Diffing the two versions first turns it back into
+  // what it is: a few edits, applied at their real positions, with the changed
+  // lines flashed so the change is watched rather than discovered.
+  // ---------------------------------------------------------------------------
+
+  /** How long an agent's lines stay highlighted after they land. */
+  const FLASH_MS = 1400;
+  let flashIds: string[] = [];
+  let flashTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** One Monaco edit for one changed line range. Positions are all in the
+   *  pre-edit document: Monaco applies a batch against the original text. */
+  function editFor(
+    m: typeof import("monaco-editor"),
+    buffer: import("monaco-editor").editor.ITextModel,
+    hunk: import("../lineDiff").LineHunk,
+    lines: string[],
+  ) {
+    const count = buffer.getLineCount();
+    const insert = lines.slice(hunk.newStart, hunk.newEnd);
+    if (hunk.oldStart >= count) {
+      // Appended past the last line: there is no line to anchor a range on, so
+      // extend the last one instead.
+      const col = buffer.getLineMaxColumn(count);
+      return {
+        range: new m.Range(count, col, count, col),
+        text: insert.map((line) => "\n" + line).join(""),
+      };
+    }
+    if (hunk.oldEnd >= count) {
+      return {
+        range: new m.Range(hunk.oldStart + 1, 1, count, buffer.getLineMaxColumn(count)),
+        text: insert.join("\n"),
+      };
+    }
+    return {
+      range: new m.Range(hunk.oldStart + 1, 1, hunk.oldEnd + 1, 1),
+      text: insert.length ? insert.join("\n") + "\n" : "",
+    };
+  }
+
+  /** Highlight the lines someone else just wrote, then let it fade. */
+  function flash(
+    m: typeof import("monaco-editor"),
+    hunks: import("../lineDiff").LineHunk[],
+    lineCount: number,
+  ) {
+    if (!model) return;
+    const clamp = (line: number) => Math.min(Math.max(line, 1), lineCount);
+    const decorations = hunks.map((h) => {
+      const start = clamp(h.newStart + 1);
+      // A deletion has no lines of its own: mark the seam it left behind.
+      const end = clamp(Math.max(h.newEnd, h.newStart + 1));
+      return {
+        range: new m.Range(start, 1, end, 1),
+        options: {
+          isWholeLine: true,
+          className: h.newEnd > h.newStart ? "tmx-agent-flash" : "tmx-agent-flash-cut",
+          linesDecorationsClassName: "tmx-agent-flash-gutter",
+        },
+      };
+    });
+    flashIds = model.deltaDecorations(flashIds, decorations);
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => {
+      if (model) flashIds = model.deltaDecorations(flashIds, []);
+    }, FLASH_MS);
+  }
+
+  /** Bring the buffer to `next`, keeping the cursor, the undo stack and the
+   *  viewport, and flashing whatever moved. Returns true when it had to fall
+   *  back to a wholesale replace, which the caller answers by re-anchoring the
+   *  scroll — the one case where the viewport does not survive. */
+  async function applyExternalText(next: string): Promise<boolean> {
+    if (!model) return false;
+    const current = model.getValue();
+    if (current === next) return false;
+    const m = await getMonaco();
+    if (!model) return false;
+    const hunks = lineHunks(current, next);
+    const lines = next.split("\n");
+    if (!hunks || !hunks.length) {
+      model.setValue(next);
+      return true;
+    }
+    const buffer = model;
+    model.pushEditOperations(
+      [],
+      hunks.map((h) => editFor(m, buffer, h, lines)),
+      () => null,
+    );
+    if (model.getValue() !== next) {
+      // A hunk landed somewhere the range arithmetic did not expect. The text
+      // is what matters; take the blunt path rather than leaving the buffer
+      // disagreeing with the file.
+      model.setValue(next);
+      return true;
+    }
+    flash(m, hunks, model.getLineCount());
+    return false;
+  }
+
+  /** After a save or a merge: the buffer's base is now `base`, and everything
+   *  derived from "what is on disk" has to follow. */
+  function rebase(base: string) {
+    loadedContent = base;
+    dirty = model ? model.getValue() !== base : false;
+    clearTimeout(overlayTimer);
+    pushOverlay();
+  }
+
+  function clearConflict() {
+    conflict = false;
+    conflictText = null;
+    conflictDisk = null;
+    conflictCount = 0;
+  }
+
+  /** Save through a three-way merge, never a straight overwrite.
+   *
+   *  The bytes on disk are not the ones this buffer was loaded from whenever an
+   *  agent has been working, and writing the buffer over them would silently
+   *  delete whatever it wrote. So the backend merges (base = what this pane
+   *  loaded, ours = the buffer, theirs = the file) and writes only when the two
+   *  sides touched different lines. When they touched the same lines nothing is
+   *  written at all: see the conflict banner. */
   async function save() {
     if (!model || !dirty) return;
+    const gen = generation;
     const content = model.getValue();
     try {
-      await ipc.writeFile(path, content, $activeRoot ?? undefined);
-      loadedContent = content;
-      dirty = false;
-      conflict = false;
-      externallyChanged = false;
+      const result = await ipc.saveFileMerged(
+        path,
+        loadedContent ?? content,
+        content,
+        $activeRoot ?? undefined,
+      );
+      if (gen !== generation || !model) return;
+      if (result.status === "conflict") {
+        conflict = true;
+        conflictText = result.merged;
+        conflictDisk = result.disk;
+        conflictCount = result.conflicts;
+        saveError = null;
+        return; // nothing written — the agent's lines are still on disk
+      }
+      // A clean merge means the file gained lines this buffer never had; show
+      // them, flashed, so the save is not a silent content swap.
+      if (result.merged !== content) await applyExternalText(result.merged);
+      if (gen !== generation || !model) return;
+      rebase(result.merged);
+      externallyChanged = result.status === "clean";
+      clearConflict();
       saveError = null;
-      // The file now *is* the buffer: retract the overlay so the preview goes
-      // back to reading the same bytes as everything else.
-      clearTimeout(overlayTimer);
-      pushOverlay();
     } catch (err) {
       saveError = String(err);
     }
   }
 
+  /** Take both sides of a conflict into the buffer, marked, so the person can
+   *  settle it by hand. Nothing is written here either: this only replaces the
+   *  buffer with text that contains everything both sides wrote. */
+  async function keepBothSides() {
+    if (!model || !conflictText) return;
+    const text = conflictText;
+    const disk = conflictDisk;
+    const scrolled = await applyExternalText(text);
+    if (!model) return;
+    // The agent's version is what is on disk now, so that is the base the next
+    // save merges from.
+    if (disk !== null) rebase(disk);
+    clearConflict();
+    if (scrolled) applyScrollSoon();
+  }
+
+  /** The watcher says the file moved. Bring the buffer to it.
+   *
+   *  With no unsaved edits this is the agent's version, applied and flashed.
+   *  With unsaved edits it is a merge: the agent's lines land in the buffer
+   *  around the person's, live, instead of the two versions sitting apart until
+   *  someone hits save. Only lines both sides changed hold it up. */
   async function reloadFromDisk() {
     const gen = generation;
     try {
-      const file = await ipc.readFile(path, $activeRoot ?? undefined);
-      if (gen !== generation || !model || file.binary) return;
-      if (file.content !== loadedContent) {
-        if (dirty) {
-          conflict = true; // keep the user's edits; disk moved on
-        } else {
-          loadedContent = file.content;
-          model.setValue(file.content);
-          dirty = false;
+      if (dirty && model) {
+        const merged = await ipc.mergeFile(
+          path,
+          loadedContent ?? "",
+          model.getValue(),
+          $activeRoot ?? undefined,
+        );
+        if (gen !== generation || !model) return;
+        if (merged.status === "conflict") {
+          conflict = true;
+          conflictText = merged.merged;
+          conflictDisk = merged.disk;
+          conflictCount = merged.conflicts;
+        } else if (merged.status === "clean") {
+          const scrolled = await applyExternalText(merged.merged);
+          if (gen !== generation || !model) return;
+          rebase(merged.disk);
           externallyChanged = true;
-          clearTimeout(overlayTimer);
-          pushOverlay();
-          // setValue scrolls Monaco back to the top — put it back.
-          applyScrollSoon();
+          clearConflict();
+          if (scrolled) applyScrollSoon();
+        }
+      } else {
+        const file = await ipc.readFile(path, $activeRoot ?? undefined);
+        if (gen !== generation || !model || file.binary) return;
+        if (file.content !== loadedContent) {
+          const scrolled = await applyExternalText(file.content);
+          if (gen !== generation || !model) return;
+          rebase(file.content);
+          externallyChanged = true;
+          clearConflict();
+          // Only a fallback replace loses the viewport; a diffed apply keeps it.
+          if (scrolled) applyScrollSoon();
         }
       }
       if (showDiff && originalModel) {
@@ -643,6 +856,9 @@ import { getMonaco, languageForPath, MONACO_THEME } from "../monaco";
     externallyChanged = false;
     dirty = false;
     conflict = false;
+    conflictText = null;
+    conflictDisk = null;
+    conflictCount = 0;
     showDiff = false;
     saveError = null;
     viewMode = initialView();
@@ -655,6 +871,8 @@ import { getMonaco, languageForPath, MONACO_THEME } from "../monaco";
     return () => {
       generation++;
       clearTimeout(overlayTimer);
+      clearTimeout(flashTimer);
+      flashIds = [];
       dropOverlay(p, root);
       saveEditorState();
       captureScroll();
@@ -802,11 +1020,23 @@ import { getMonaco, languageForPath, MONACO_THEME } from "../monaco";
         >→ {framePath}</span
       >
     {/if}
+    {#if agentRead}
+      <!-- The agent is holding this file's contents and has not written back
+           yet, so anything you type now is not in what it will write. -->
+      <span
+        class="shrink-0 rounded bg-amber-950/60 px-1 py-px font-mono text-[9px] font-semibold uppercase tracking-wide text-amber-400"
+        title="{agentName} read this file {agentReadAge}s ago and has not written it back yet — what it writes will not contain edits you make now. Your save will be merged into its version, never written over it."
+        >agent read · {agentReadAge}s</span
+      >
+    {/if}
     {#if conflict}
       <span
-        class="h-1.5 w-1.5 shrink-0 rounded-full bg-red-400"
-        title="File changed on disk while you have unsaved edits"
-      ></span>
+        class="shrink-0 rounded bg-red-950/60 px-1 py-px font-mono text-[9px] font-semibold uppercase tracking-wide text-red-400"
+        title="You and the agent changed the same {conflictCount === 1
+          ? 'region'
+          : 'regions'} of this file. Nothing was written: saving would have deleted one side. Use “Keep both” to bring both versions into the buffer."
+        >conflict{conflictCount > 1 ? ` ×${conflictCount}` : ""} · not saved</span
+      >
     {:else if dirty}
       <span
         class="h-1.5 w-1.5 shrink-0 rounded-full bg-zinc-300"
@@ -822,6 +1052,13 @@ import { getMonaco, languageForPath, MONACO_THEME } from "../monaco";
       <span class="truncate text-[10px] text-red-400" title={saveError}>save failed</span>
     {/if}
     <div class="ml-auto flex items-center gap-0.5">
+      {#if conflict}
+        <button
+          class="rounded px-1.5 py-0.5 text-[11px] text-red-300 hover:bg-zinc-800"
+          title="Put both versions in the buffer, marked, so you can settle it by hand"
+          onclick={(e) => { e.stopPropagation(); keepBothSides(); }}
+        >Keep both</button>
+      {/if}
       {#if dirty}
         <button
           class="rounded px-1.5 py-0.5 text-[11px] text-emerald-400 hover:bg-zinc-800"

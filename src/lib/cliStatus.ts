@@ -1,4 +1,5 @@
 import { derived, get, writable } from "svelte/store";
+import { forgetPane, noteAgentScreen } from "./agentFiles";
 import { attentionPanes } from "./bell";
 import { paneInstances } from "./stores";
 import {
@@ -270,6 +271,11 @@ function scanPane(paneId: string, prev: Scan | undefined, seq: number): Scan {
   // rather than reporting a confident "idle" from an empty screen.
   if (!tail.trim()) return { ...before, blank: true, seq };
 
+  // The same text also says which files this agent just read or wrote; see
+  // agentFiles.ts. Done here because this is the one place that holds a fresh
+  // screen for every pane, and only when the pane actually drew something.
+  noteAgentScreen(paneId, tail);
+
   const timer = findTimer(tail);
   // A status-line timer that advanced since the last poll means a turn is in
   // flight. Guard against the transcript: only an increase counts, and only up
@@ -368,6 +374,10 @@ paneInstances.subscribe((panes) => {
   const key = ids.join(",");
   if (key === watched) return;
   watched = key;
+  const live = new Set(ids);
+  for (const gone of get(scans).keys()) {
+    if (!live.has(gone)) forgetPane(gone);
+  }
   clearInterval(timer);
   timer = undefined;
   if (!ids.length) {

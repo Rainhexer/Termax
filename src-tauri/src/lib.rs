@@ -3,6 +3,7 @@ mod fstree;
 mod git;
 mod github;
 mod home;
+mod merge;
 mod open_folder;
 mod projects;
 mod preview;
@@ -119,6 +120,8 @@ pub fn run() {
             fstree::read_file,
             fstree::read_file_data_url,
             fstree::write_file,
+            merge::merge_file,
+            merge::save_file_merged,
             fstree::reveal_in_file_manager,
             fstree::open_in_default_app,
             preview::preview_server,

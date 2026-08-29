@@ -14,6 +14,7 @@ import type {
   IssueListResult,
   LayoutNode,
   LockReason,
+  MergeOutcome,
   Milestone,
   PrDetail,
   PrListResult,
@@ -270,6 +271,16 @@ export const ipc = {
     invoke<string>("read_file_data_url", { path, root }),
   writeFile: (path: string, content: string, root?: string) =>
     invoke<void>("write_file", { path, content, root }),
+  /** Merge `ours` (the buffer) with what is on disk, both derived from `base`,
+   *  and write the result unless both sides changed the same lines. An agent
+   *  editing the same file as the person is the normal case here, so no editor
+   *  write goes straight to disk. */
+  saveFileMerged: (path: string, base: string, ours: string, root?: string) =>
+    invoke<MergeOutcome>("save_file_merged", { path, base, ours, root }),
+  /** The same merge without writing: used to fold an agent's changes into a
+   *  buffer that has unsaved edits, live. */
+  mergeFile: (path: string, base: string, ours: string, root?: string) =>
+    invoke<MergeOutcome>("merge_file", { path, base, ours, root }),
   revealInFileManager: (path: string, root?: string) =>
     invoke<void>("reveal_in_file_manager", { path, root }),
   openInDefaultApp: (path: string, root?: string) =>

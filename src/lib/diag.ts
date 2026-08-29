@@ -5,6 +5,7 @@ import * as terminals from "./terminals";
 import * as renderers from "./renderers";
 import * as scheduler from "./writeScheduler";
 import * as cliStatus from "./cliStatus";
+import * as agentFiles from "./agentFiles";
 import { attentionPanes, bellPanes } from "./bell";
 import { tabs, vaultRuns, gitByRoot } from "./stores";
 
@@ -58,6 +59,7 @@ function sample(): string {
     ...renderers.diagCounts(),
     ...scheduler.diagCounts(),
     ...cliStatus.diagCounts(),
+    ...agentFiles.diagCounts(),
     ...storeCounts(),
     ...domCounts(),
   };

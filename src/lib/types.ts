@@ -428,3 +428,19 @@ export interface FileContent {
   content: string;
   binary: boolean;
 }
+
+/** Result of merging an editor buffer with what is on disk. See merge.rs. */
+export interface MergeOutcome {
+  /** "unchanged": disk still matched the buffer's base, nothing to merge.
+   *  "clean": both sides changed the file, in different places.
+   *  "conflict": both sides changed the same lines — nothing was written. */
+  status: "unchanged" | "clean" | "conflict";
+  /** What the buffer should hold: the merge, or the conflict-marked text. */
+  merged: string;
+  /** Disk content at the moment of the merge; the buffer's new base. */
+  disk: string;
+  /** Regions where both sides changed the same lines. */
+  conflicts: number;
+  /** Whether `merged` reached the disk. */
+  written: boolean;
+}
