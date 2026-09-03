@@ -80,6 +80,9 @@ export const ipc = {
   /** True/false when the pane's tty reports whether a foreground command is
    *  running; null when the platform cannot tell. */
   ptyForegroundBusy: (paneId: string) => invoke<boolean | null>("pty_foreground_busy", { paneId }),
+  /** Whether the pane's program has taken the tty into raw mode, i.e. is
+   *  reading keystrokes itself. Null means it cannot be told. */
+  ptyInputIsRaw: (paneId: string) => invoke<boolean | null>("pty_input_is_raw", { paneId }),
 
   // Diagnostics (see src/lib/diag.ts). Both are no-ops unless the app was
   // started with TERMAX_DIAG set.

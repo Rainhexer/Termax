@@ -951,74 +951,192 @@ export function queueType(paneId: string, text: string) {
   pendingRun.set(paneId, { text, execute: false, focus: true });
 }
 
-// A TUI (claude/opencode) is NOT ready for input the moment it enters the
-// alternate screen: it first paints a splash, then does async startup (e.g.
-// opencode connecting to a provider) with the screen quiet, and only later
-// renders its interactive UI and starts reading input. Typing during that quiet
-// gap gets dropped, so a plain output-settle (or alt-screen entry) fires too
-// early. What reliably marks the interactive render is the synchronized-output
-// frame the app emits when it draws real content: DECSET 2026 (`\x1b[?2026h`).
-// Both claude and opencode emit it only once their live UI paints — measured on
-// opencode this lands ~2.6s in, well after alt-screen (~0.8s). We treat the
-// first such frame as "the UI is up", then wait for the render to settle before
-// typing. A plain shell never emits this, so for a null launch we fall back to
-// pure output-settle.
+// A TUI is NOT ready for input the moment it enters the alternate screen: it
+// first paints a splash, then does async startup (a provider connection, a
+// config load) with the screen quiet, and only later renders its interactive UI
+// and starts reading. Input sent during that gap is not queued, it is
+// discarded — every launcher measured drops it, because entering raw mode
+// flushes the tty's input queue.
+//
+// How long that takes is a property of the agent and of the machine it is
+// starting on, and no escape sequence marks it for everyone: claude never emits
+// the synchronized-output frame (DECSET 2026) at all, opencode emits it three
+// seconds after it takes the alt screen, pi emits it without ever taking the
+// alt screen. Waiting a tuned number of milliseconds per agent would be wrong
+// for the next agent, and wrong for a cold cache.
+//
+// So nothing here is timed against a particular program. Two agent-independent
+// facts drive it instead:
+//
+//   * The tty is in raw mode. Until the program takes it there, it is not
+//     reading keystrokes at all — and worse, the *kernel* echoes whatever we
+//     write, so the text appears on screen exactly as if it had been accepted,
+//     and is then discarded when raw mode flushes the input queue. Writing
+//     before this is both useless and undetectable.
+//   * The screen changed right after we wrote. Typing into a program that is
+//     listening always redraws something. A screen that did not change means
+//     the bytes went nowhere, so we say it again, backing off as we go.
+//
+// That converges whether the agent is up in 200ms or in 30 seconds.
 const READY_FRAME = /\x1b\[\?2026h/;
+const ALT_SCREEN = /\x1b\[\?1049h/;
+const BRACKETED_PASTE = /\x1b\[\?2004h/;
+
+/** What the pane is showing, for comparison against itself a moment later.
+ *
+ *  Deliberately not {@link readPaneTail}, which refuses a hidden pane's xterm
+ *  buffer as stale. That rule does not hold here: a pane with an output hook
+ *  keeps streaming (see {@link syncStream}), so its buffer is live either way. */
+function screenSnapshot(paneId: string): string {
+  const entry = registry.get(paneId);
+  if (!entry) return "";
+  const buf = entry.term.buffer.active;
+  const end = buf.baseY + entry.term.rows;
+  const lines: string[] = [];
+  for (let i = Math.max(0, end - entry.term.rows); i < end; i++) {
+    lines.push(buf.getLine(i)?.translateToString(true).trimEnd() ?? "");
+  }
+  return lines.join("\n");
+}
 
 function flushPending(paneId: string, launch: string | null) {
   const queued = pendingRun.get(paneId);
   if (queued === undefined) return;
   pendingRun.delete(paneId);
 
-  // Once the program is "ready" (alt screen entered, or shell), wait for output
-  // to go quiet for SETTLE_MS so we don't type mid-render. SAFETY_MS forces a
-  // send if we never detect readiness (e.g. a program that skips the alt screen).
-  const SETTLE_MS = 200;
-  const SAFETY_MS = 15000;
+  // How still the screen must be before we write, so that a change just after
+  // the write is attributable to the write.
+  const QUIET_MS = 120;
+  // How long a program gets to show that it took the text.
+  const RESPONSE_MS = 400;
+  // Between attempts, growing, so an agent that takes a while to start is not
+  // written to dozens of times.
+  const RETRY_MS = 300;
+  const RETRY_GROWTH = 1.6;
+  const RETRY_MAX_MS = 2000;
+  // A screen that never holds still is a program that is running and drawing,
+  // which is the state we were waiting for: write into it rather than wait for
+  // a stillness that is not coming.
+  const BUSY_MS = 1500;
+  // A program that paints nothing recognisable ever: write once and stop
+  // watching rather than hold the text forever.
+  const GIVE_UP_MS = 60000;
+  const TICK_MS = 50;
 
-  // A launched TUI must paint its interactive UI first; a shell is ready now.
-  let ready = launch === null;
+  // A launched program has to paint its UI first; a shell is ready now. This is
+  // only the gate on the *first* attempt — the retry loop is what actually
+  // establishes that the program took the text.
+  let painted = launch === null;
+  let alt = false;
+  let bytes = 0;
   let carry = "";
-  let settleTimer: ReturnType<typeof setTimeout>;
+  // Set once the program enables bracketed paste, which says it will take the
+  // text as one paste rather than as a keystroke storm.
+  let bracketed = false;
+
+  // Null until the first answer arrives, and on platforms that cannot tell.
+  let inputRaw: boolean | null = null;
+  let probing = false;
+  const probeInputMode = () => {
+    if (probing) return;
+    probing = true;
+    ipc
+      .ptyInputIsRaw(paneId)
+      .then((raw) => {
+        inputRaw = raw;
+      })
+      .catch(() => {
+        // The pane died, or the platform has no answer. Either way the screen
+        // check below is left to carry it alone.
+        inputRaw = null;
+      })
+      .finally(() => {
+        probing = false;
+      });
+  };
+
+  const startedAt = performance.now();
+  let lastScreen = screenSnapshot(paneId);
+  let lastChangeAt = startedAt;
+  let baseline: string | null = null;
+  let wroteAt = 0;
+  let nextAttemptAt = 0;
+  let backoff = RETRY_MS;
+  let ticker: ReturnType<typeof setInterval>;
   let done = false;
 
-  const go = () => {
+  const finish = () => {
     if (done) return;
     done = true;
-    clearTimeout(settleTimer);
-    clearTimeout(safetyTimer);
+    clearInterval(ticker);
     outputHooks.delete(paneId);
     // Nothing is watching this pane's raw stream any more; if it is off screen
     // it can stop being shipped.
     const entry = registry.get(paneId);
     if (entry) syncStream(entry);
+  };
+
+  const write = (screen: string) => {
+    baseline = screen;
+    wroteAt = performance.now();
     if (queued.execute) runInPane(paneId, queued.text, { focus: queued.focus });
-    else typeInPane(paneId, queued.text);
+    else typeInPane(paneId, queued.text, { paste: bracketed });
   };
 
-  const arm = () => {
-    clearTimeout(settleTimer);
-    settleTimer = setTimeout(go, SETTLE_MS);
-  };
-
+  // Only used to gate the first attempt, and only as a hint: a program that
+  // claims the screen and then paints a real UI has emitted a burst of output,
+  // whatever escape sequences it chose to do it with.
   outputHooks.set(paneId, (text) => {
     if (done) return;
-    if (!ready) {
-      // Keep a small tail so the frame marker is still matched if it's split
-      // across PTY read chunks; ignore output until the UI actually paints.
-      carry = (carry + text).slice(-256);
-      if (!READY_FRAME.test(carry)) return;
-      ready = true;
-      carry = "";
-    }
-    arm();
+    carry = (carry + text).slice(-256);
+    if (!bracketed && BRACKETED_PASTE.test(carry)) bracketed = true;
+    if (painted) return;
+    bytes += text.length;
+    if (ALT_SCREEN.test(carry)) alt = true;
+    if (READY_FRAME.test(carry) || (alt && bytes >= 512)) painted = true;
   });
 
-  // Shell prints its prompt immediately; start the settle window now for it.
-  if (ready) arm();
+  ticker = setInterval(() => {
+    const now = performance.now();
+    probeInputMode();
+    const screen = screenSnapshot(paneId);
+    if (screen !== lastScreen) {
+      lastScreen = screen;
+      lastChangeAt = now;
+    }
+    const entry = registry.get(paneId);
+    if (!entry || entry.exited) return finish();
 
-  // Safety: proceed no matter what after SAFETY_MS
-  const safetyTimer = setTimeout(go, SAFETY_MS);
+    if (baseline !== null) {
+      // The program redrew after being written to: it was listening, and what
+      // it drew is our text going in.
+      if (screen !== baseline) return finish();
+      if (now - wroteAt < RESPONSE_MS) return;
+      // Dropped. The program was still starting up, so say it again later.
+      baseline = null;
+      nextAttemptAt = now + backoff;
+      backoff = Math.min(backoff * RETRY_GROWTH, RETRY_MAX_MS);
+      return;
+    }
+
+    if (now - startedAt > GIVE_UP_MS) {
+      write(screen);
+      return finish();
+    }
+    if (now < nextAttemptAt) return;
+    // The program has not started reading keystrokes. Anything written now
+    // would be echoed by the tty, look accepted, and be thrown away.
+    if (inputRaw === false) return;
+    // Nothing about the program is recognisable yet, and nothing has been drawn
+    // for a while: it may be a program that paints no UI at all, so stop
+    // waiting for a paint that will not come and let the retry loop decide.
+    if (!painted && now - startedAt < BUSY_MS) return;
+    const busy = now - lastChangeAt < QUIET_MS;
+    // A screen that has been churning for BUSY_MS is a live UI; write into it.
+    if (busy && now - startedAt < BUSY_MS) return;
+    write(screen);
+    if (busy) finish();
+  }, TICK_MS);
 }
 
 /** Un-home a pane's terminal from `host`, leaving the terminal itself alive so
@@ -1080,13 +1198,15 @@ function setVisible(entry: Entry, visible: boolean) {
  *  Not simply "is it on screen". Two things watch the raw stream for a pane that
  *  is still starting: the loading veil, cleared by the first byte, and
  *  {@link flushPending}, which waits for a launched program to paint its
- *  interactive UI before typing into it. Neither can see a stream that has
+ *  interactive UI before typing into it — the latter having taken its queue
+ *  entry already, so its output hook is what marks it as still watching. Neither can see a stream that has
  *  stopped arriving — so a pane switched away from mid-startup would sit under
  *  its veil until the 15-second safety timer fired. Such a pane keeps streaming
  *  until it is up, which is a few seconds, once. */
 function syncStream(entry: Entry) {
   if (!entry.spawned || entry.exited) return;
-  const wanted = entry.visible || entry.loading || pendingRun.has(entry.paneId);
+  const wanted =
+    entry.visible || entry.loading || pendingRun.has(entry.paneId) || outputHooks.has(entry.paneId);
   if (wanted === entry.streaming) return;
   entry.streaming = wanted;
   ipc.setPaneVisible(entry.paneId, wanted).catch(() => {
@@ -1195,11 +1315,18 @@ export function focusTerminal(paneId: string) {
   entry.term.focus();
 }
 
-/** Type text into a pane's terminal without submitting it. */
-export function typeInPane(paneId: string, text: string) {
+/** Type text into a pane's terminal without submitting it.
+ *
+ *  `paste` wraps the text in bracketed-paste markers, which is both faster and
+ *  safer for a TUI: it arrives as one paste event rather than a keystroke
+ *  storm, and the newlines in a multi-line prompt insert as newlines instead of
+ *  submitting the half-written prompt line by line. Only pass it for a program
+ *  that has actually enabled bracketed paste (DECSET 2004) — anything else
+ *  would read the markers as literal characters. */
+export function typeInPane(paneId: string, text: string, opts: { paste?: boolean } = {}) {
   const entry = registry.get(paneId);
   if (!entry || entry.exited) return;
-  ipc.writePty(paneId, text);
+  ipc.writePty(paneId, opts.paste ? `\x1b[200~${text}\x1b[201~` : text);
   entry.term.focus();
 }
 
