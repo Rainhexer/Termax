@@ -728,8 +728,15 @@ terminals.paneRuns.subscribe((runs) => {
 });
 
 export function runVaultCommand(cmd: VaultCommand) {
+  const jump = (get(appSettings).behavior.vaultRunBehavior ?? "stay") === "jump";
   const linked = get(vaultRuns).get(cmd.id)?.paneId;
   if (linked && terminals.isAlive(linked)) {
+    // A live link is always reused — never open a second terminal for the
+    // same command. Only the reveal is governed by the setting.
+    if (!jump) {
+      terminals.runInPane(linked, cmd.command, { focus: false });
+      return;
+    }
     // Reveal rather than only focus: the linked pane may sit in another tab, and
     // focusing one there points every pane action (split, close) at something
     // off screen while the command it was just handed runs where nobody sees it.
@@ -740,6 +747,18 @@ export function runVaultCommand(cmd: VaultCommand) {
     // The terminal outlived its pane (closed from a tab we no longer hold):
     // drop the stale link and open a fresh pane below.
     unlinkPane(linked);
+  }
+  if (!jump) {
+    // Stay in place: open the pane in the background and keep the current
+    // focus/tab. addPane focuses the new pane, so restore the previous focus.
+    const previousFocus = get(focusedPaneId);
+    const paneId = addPane(launchFor(cmd.terminalType), launcherById(cmd.terminalType).name);
+    if (previousFocus && layoutOps.findPane(get(layout), previousFocus)) {
+      focusedPaneId.set(previousFocus);
+    }
+    updateRun(cmd.id, { paneId, state: "starting", exitCode: null });
+    terminals.queueRun(paneId, cmd.command, { focus: false });
+    return;
   }
   const paneId = addPane(launchFor(cmd.terminalType), launcherById(cmd.terminalType).name);
   updateRun(cmd.id, { paneId, state: "starting", exitCode: null });

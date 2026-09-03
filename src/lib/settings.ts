@@ -50,6 +50,10 @@ export interface Behavior {
    *  `{title}`, `{url}` and `{body}` are substituted; "" uses
    *  {@link DEFAULT_ISSUE_PROMPT}. */
   issuePromptTemplate: string;
+  /** What happens in the UI when a vault command runs: `"stay"` keeps the
+   *  current view (reuses the linked terminal without revealing it), `"jump"`
+   *  switches to the command's terminal. Defaults to `"stay"`. */
+  vaultRunBehavior: "stay" | "jump";
 }
 
 /** The prompt an agent receives when an issue is handed to it.
@@ -120,6 +124,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     worktreeSetupCommand: "",
     issueLauncherId: "",
     issuePromptTemplate: "",
+    vaultRunBehavior: "stay",
   },
 };
 
@@ -179,6 +184,18 @@ function normalizeAppearance(raw: unknown): Appearance {
   return { sidebarWidth: width, themeId, theme, customThemes };
 }
 
+/** Fill in defaults for behavior fields added after a settings file was
+ *  written (e.g. `vaultRunBehavior`). Old files simply lack the key, so
+ *  merge over the defaults and coerce unknown values back to `"stay"`. */
+function normalizeBehavior(raw: unknown): Behavior {
+  const b = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  return {
+    ...DEFAULT_SETTINGS.behavior,
+    ...b,
+    vaultRunBehavior: b.vaultRunBehavior === "jump" ? "jump" : "stay",
+  };
+}
+
 export async function loadSettings() {
   try {
     const loaded = await ipc.getSettings();
@@ -186,6 +203,7 @@ export async function loadSettings() {
       ...DEFAULT_SETTINGS,
       ...loaded,
       appearance: normalizeAppearance((loaded as { appearance?: unknown }).appearance),
+      behavior: normalizeBehavior((loaded as { behavior?: unknown }).behavior),
     });
   } catch (err) {
     console.error("get_settings failed", err);

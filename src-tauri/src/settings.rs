@@ -80,6 +80,15 @@ pub struct Behavior {
     /// command Termax puts in a pane.
     #[serde(default)]
     pub issue_prompt_template: String,
+    /// What happens in the UI when a vault command runs: `"stay"` keeps the
+    /// current view (reuses the linked terminal without revealing it), `"jump"`
+    /// switches to the command's terminal. Defaults to `"stay"`.
+    #[serde(default = "default_vault_run_behavior")]
+    pub vault_run_behavior: String,
+}
+
+fn default_vault_run_behavior() -> String {
+    "stay".into()
 }
 
 impl Default for Behavior {
@@ -90,6 +99,7 @@ impl Default for Behavior {
             worktree_setup_command: String::new(),
             issue_launcher_id: String::new(),
             issue_prompt_template: String::new(),
+            vault_run_behavior: default_vault_run_behavior(),
         }
     }
 }

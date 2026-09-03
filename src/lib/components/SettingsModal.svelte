@@ -204,6 +204,29 @@
           </label>
 
           <label class="flex flex-col gap-1">
+            <span class="text-xs text-zinc-400">When a vault command runs</span>
+            <select
+              class="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-200 focus:border-emerald-500 focus:outline-none"
+              value={$settings.behavior.vaultRunBehavior ?? "stay"}
+              onchange={(e) =>
+                updateSettings((s) => ({
+                  ...s,
+                  behavior: {
+                    ...s.behavior,
+                    vaultRunBehavior: (e.target as HTMLSelectElement).value as "stay" | "jump",
+                  },
+                }))}
+            >
+              <option value="stay">Stay in current view</option>
+              <option value="jump">Jump to its terminal</option>
+            </select>
+            <span class="text-[11px] text-zinc-600">
+              A command already linked to a terminal reuses it either way — this
+              only controls whether running it pulls that terminal into view.
+            </span>
+          </label>
+
+          <label class="flex flex-col gap-1">
             <span class="text-xs text-zinc-400">Agent to open for a pull request</span>
             <select
               class="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-200 focus:border-emerald-500 focus:outline-none"

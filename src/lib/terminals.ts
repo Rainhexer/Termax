@@ -173,6 +173,8 @@ const pendingRun = new Map<string, PendingInput>();
 interface PendingInput {
   text: string;
   execute: boolean;
+  /** False = run/type without stealing DOM focus (vault "stay" mode). */
+  focus: boolean;
 }
 
 // Per-pane buffer for OSC sequences split across PTY read chunks.
@@ -936,8 +938,8 @@ function patchWebkitgtkComposition(entry: Entry, paneId: string) {
 }
 
 /** Queue a command to run once the pane's PTY has spawned. */
-export function queueRun(paneId: string, command: string) {
-  pendingRun.set(paneId, { text: command, execute: true });
+export function queueRun(paneId: string, command: string, opts: { focus?: boolean } = {}) {
+  pendingRun.set(paneId, { text: command, execute: true, focus: opts.focus ?? true });
   setRun(paneId, "starting");
 }
 
@@ -946,7 +948,7 @@ export function queueRun(paneId: string, command: string) {
  *  Deliberately does not set a run state: nothing is running, the user is being
  *  handed a command to inspect. */
 export function queueType(paneId: string, text: string) {
-  pendingRun.set(paneId, { text, execute: false });
+  pendingRun.set(paneId, { text, execute: false, focus: true });
 }
 
 // A TUI (claude/opencode) is NOT ready for input the moment it enters the
@@ -990,7 +992,7 @@ function flushPending(paneId: string, launch: string | null) {
     // it can stop being shipped.
     const entry = registry.get(paneId);
     if (entry) syncStream(entry);
-    if (queued.execute) runInPane(paneId, queued.text);
+    if (queued.execute) runInPane(paneId, queued.text, { focus: queued.focus });
     else typeInPane(paneId, queued.text);
   };
 
@@ -1201,12 +1203,12 @@ export function typeInPane(paneId: string, text: string) {
   entry.term.focus();
 }
 
-export function runInPane(paneId: string, command: string) {
+export function runInPane(paneId: string, command: string, opts: { focus?: boolean } = {}) {
   const entry = registry.get(paneId);
   if (!entry || entry.exited) return;
   noteInput(paneId, "\r");
   ipc.writePty(paneId, command + "\r");
-  entry.term.focus();
+  if (opts.focus ?? true) entry.term.focus();
 }
 
 export function destroyPane(paneId: string) {
