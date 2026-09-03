@@ -1,5 +1,5 @@
 import { get, writable } from "svelte/store";
-import type { ChangeEntry, TreeEntry } from "./types";
+import type { ChangeEntry, TreeEntry, TreeSearch } from "./types";
 import { ipc } from "./ipc";
 
 /** Fetched children per directory path ("" = project root). */
@@ -10,6 +10,7 @@ export const expandedDirs = writable<Set<string>>(new Set());
 export function resetTree() {
   treeChildren.set(new Map());
   expandedDirs.set(new Set());
+  clearTreeQuery();
 }
 
 /** Root the tree is currently showing.
@@ -57,6 +58,25 @@ export async function toggleDir(path: string) {
   } else {
     expandedDirs.update((s) => new Set(s).add(path));
     if (!get(treeChildren).has(path)) await loadDir(path);
+  }
+}
+
+/** Fold the whole tree back to its top level. */
+export function collapseAll() {
+  expandedDirs.set(new Set());
+}
+
+/** Expand every directory above `path`, fetching the ones not loaded yet.
+ *
+ *  What makes a search hit reachable: picking one has to leave the tree open at
+ *  the file, not merely scrolled near it. */
+export async function expandTo(path: string) {
+  const parts = path.split("/").slice(0, -1);
+  let dir = "";
+  for (const part of parts) {
+    dir = dir ? `${dir}/${part}` : part;
+    if (!get(treeChildren).has(dir)) await loadDir(dir);
+    expandedDirs.update((s) => new Set(s).add(dir));
   }
 }
 
@@ -133,4 +153,90 @@ export function buildBadges(changes: ChangeEntry[]): {
     }
   }
   return { files, dirCounts };
+}
+
+/** One visible row: the entry and how deep it sits.
+ *
+ *  The tree is flattened before it is drawn rather than rendered recursively.
+ *  Two things fall out of that and neither is cosmetic: a row can span the full
+ *  width of the sidebar (a nested component indents its own hover highlight,
+ *  which is why the old tree's selection stopped short of the left edge), and
+ *  keyboard navigation becomes an index into an array instead of a walk. */
+export interface TreeRow {
+  entry: TreeEntry;
+  depth: number;
+}
+
+/** The rows the tree currently shows, in display order. */
+export function flattenTree(
+  children: Map<string, TreeEntry[]>,
+  expanded: Set<string>,
+): TreeRow[] {
+  const rows: TreeRow[] = [];
+  const walk = (dir: string, depth: number) => {
+    for (const entry of children.get(dir) ?? []) {
+      rows.push({ entry, depth });
+      if (entry.isDir && expanded.has(entry.path)) walk(entry.path, depth + 1);
+    }
+  };
+  walk("", 0);
+  return rows;
+}
+
+/* -------------------------------------------------------------- search */
+
+/** What is in the explorer's search box. "" means the box is empty and the
+ *  tree itself is showing. */
+export const treeQuery = writable("");
+/** Matches for the current query, or null when nothing has been searched. */
+export const treeMatches = writable<TreeSearch | null>(null);
+/** True while a search is in flight, so the box can say so rather than
+ *  looking like it found nothing. */
+export const treeSearching = writable(false);
+
+/** Shortest query that is worth walking the tree for. One character matches
+ *  most of a repository, which is a slow way to say nothing. */
+export const MIN_TREE_QUERY = 2;
+
+let searchTimer: ReturnType<typeof setTimeout> | undefined;
+/** Guards against an older, slower search overwriting a newer one's answer. */
+let searchSeq = 0;
+
+/** Type into the search box. Debounced: this walks the filesystem. */
+export function setTreeQuery(query: string) {
+  treeQuery.set(query);
+  clearTimeout(searchTimer);
+  const trimmed = query.trim();
+  if (trimmed.length < MIN_TREE_QUERY) {
+    searchSeq++;
+    treeMatches.set(null);
+    treeSearching.set(false);
+    return;
+  }
+  treeSearching.set(true);
+  searchTimer = setTimeout(() => void runTreeSearch(trimmed), 160);
+}
+
+async function runTreeSearch(query: string) {
+  const seq = ++searchSeq;
+  try {
+    const found = await ipc.searchTree(query, treeRoot);
+    if (seq !== searchSeq) return;
+    treeMatches.set(found);
+  } catch {
+    if (seq !== searchSeq) return;
+    treeMatches.set({ entries: [], truncated: false });
+  } finally {
+    if (seq === searchSeq) treeSearching.set(false);
+  }
+}
+
+export function clearTreeQuery() {
+  setTreeQuery("");
+}
+
+/** Re-run whatever is in the box (after a create, rename or delete). */
+export function refreshTreeSearch() {
+  const query = get(treeQuery).trim();
+  if (query.length >= MIN_TREE_QUERY) void runTreeSearch(query);
 }

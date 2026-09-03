@@ -424,6 +424,13 @@ export interface TreeEntry {
   ignored: boolean;
 }
 
+/** Answer to an explorer search. `truncated` means a cap was hit, so the list
+ *  is a prefix of the real answer rather than all of it. */
+export interface TreeSearch {
+  entries: TreeEntry[];
+  truncated: boolean;
+}
+
 export interface FileContent {
   content: string;
   binary: boolean;

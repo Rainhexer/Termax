@@ -313,3 +313,373 @@ pub fn open_in_default_app(
     }
     Ok(())
 }
+
+// --------------------------------------------------------------- mutations
+//
+// Creating, renaming and deleting all act on the *entry* rather than on what it
+// points at, so they cannot use `resolve`: canonicalizing the whole path
+// follows a final symlink, which would rename or delete the link's target, and
+// a path that does not exist yet cannot be canonicalized at all.
+
+/// The longest a search answers with. The explorer is a sidebar, not a results
+/// page, and a list nobody can scan is the same as no answer.
+const MAX_SEARCH_HITS: usize = 200;
+/// Entries visited before a search gives up and answers with what it has.
+const MAX_SEARCH_SCANNED: usize = 40_000;
+/// Depth the search walk descends. Deeper than this is generated output.
+const MAX_SEARCH_DEPTH: usize = 12;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TreeSearch {
+    pub entries: Vec<TreeEntry>,
+    /// True when a cap was hit, so the list is a prefix of the real answer.
+    pub truncated: bool,
+}
+
+/// Resolve a project-relative path without following a final symlink.
+///
+/// The parent is canonicalized and checked for containment — which is what
+/// stops a symlinked directory inside the project from being used as a way
+/// out — and the last component is then joined on verbatim.
+fn resolve_entry(root: &Path, rel: &str) -> Result<PathBuf, String> {
+    let rel_path = Path::new(rel);
+    if rel_path.is_absolute()
+        || rel_path
+            .components()
+            .any(|c| matches!(c, Component::ParentDir))
+    {
+        return Err(format!("invalid path: {rel}"));
+    }
+    // None for "" — which is the project root, and nothing here may touch it.
+    let name = rel_path
+        .file_name()
+        .ok_or_else(|| format!("invalid path: {rel}"))?;
+    let canonical_root = root.canonicalize().map_err(|e| e.to_string())?;
+    let parent = canonical_root
+        .join(rel_path.parent().unwrap_or(Path::new("")))
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    if !parent.starts_with(&canonical_root) {
+        return Err(format!("path escapes project root: {rel}"));
+    }
+    Ok(parent.join(name))
+}
+
+/// Validate a single new name typed into the explorer.
+///
+/// One path component, deliberately: the prompts are "new file *in this
+/// folder*" and "rename *this*", so a separator in the box means the user is
+/// describing a different operation than the one they picked, and quietly
+/// creating intermediate directories through it would also be a way past the
+/// containment check that only ever inspects one parent.
+fn check_name(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("name cannot be empty".into());
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err("name cannot contain a path separator".into());
+    }
+    if name == "." || name == ".." || name.contains('\0') {
+        return Err(format!("invalid name: {name}"));
+    }
+    if name == ".git" {
+        return Err(".git is managed by git".into());
+    }
+    Ok(name.to_string())
+}
+
+/// Refuse to touch the git directory. Everything else in the tree is the
+/// user's to lose; `.git` is the repository itself.
+fn check_not_git(rel: &str) -> Result<(), String> {
+    if rel == ".git" || rel.starts_with(".git/") {
+        return Err(".git is managed by git".into());
+    }
+    Ok(())
+}
+
+/// Create an empty file or a directory inside `dir` (relative, "" = root).
+///
+/// Returns the new entry's project-relative path so the caller can select it
+/// without guessing how the two halves join.
+#[tauri::command(async)]
+pub fn create_entry(
+    manager: tauri::State<SessionManager>,
+    dir: String,
+    name: String,
+    is_dir: bool,
+    root: Option<String>,
+) -> Result<String, String> {
+    let (root, _) = manager
+        .root_info(root.as_deref())
+        .ok_or("no active session")?;
+    let name = check_name(&name)?;
+    let parent = resolve(&root, &dir)?;
+    if !parent.is_dir() {
+        return Err(format!("not a directory: {dir}"));
+    }
+    let target = parent.join(&name);
+    // `create_new` would cover the file case, but a directory has no such flag
+    // and the message it fails with is worse than this one.
+    if target.exists() {
+        return Err(format!("{name} already exists"));
+    }
+    if is_dir {
+        std::fs::create_dir(&target).map_err(|e| e.to_string())?;
+    } else {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(if dir.is_empty() {
+        name
+    } else {
+        format!("{dir}/{name}")
+    })
+}
+
+/// Rename an entry in place, returning its new project-relative path.
+#[tauri::command(async)]
+pub fn rename_entry(
+    manager: tauri::State<SessionManager>,
+    path: String,
+    name: String,
+    root: Option<String>,
+) -> Result<String, String> {
+    let (root, _) = manager
+        .root_info(root.as_deref())
+        .ok_or("no active session")?;
+    check_not_git(&path)?;
+    let name = check_name(&name)?;
+    let from = resolve_entry(&root, &path)?;
+    let target = from
+        .parent()
+        .ok_or_else(|| format!("invalid path: {path}"))?
+        .join(&name);
+    if target == from {
+        return Ok(path);
+    }
+    // `rename` would silently replace an existing file, which is not what
+    // "rename" means to the person who typed the name.
+    if target.exists() {
+        return Err(format!("{name} already exists"));
+    }
+    std::fs::rename(&from, &target).map_err(|e| e.to_string())?;
+    let parent_rel = Path::new(&path).parent().and_then(Path::to_str).unwrap_or("");
+    Ok(if parent_rel.is_empty() {
+        name
+    } else {
+        format!("{parent_rel}/{name}")
+    })
+}
+
+/// Delete a file, a symlink, or a directory and everything under it.
+///
+/// Permanent — there is no trash here — so every caller must have confirmed
+/// first. Symlinks are unlinked rather than followed (see `resolve_entry`).
+#[tauri::command(async)]
+pub fn delete_entry(
+    manager: tauri::State<SessionManager>,
+    path: String,
+    root: Option<String>,
+) -> Result<(), String> {
+    let (root, _) = manager
+        .root_info(root.as_deref())
+        .ok_or("no active session")?;
+    check_not_git(&path)?;
+    let abs = resolve_entry(&root, &path)?;
+    let meta = std::fs::symlink_metadata(&abs).map_err(|e| e.to_string())?;
+    if meta.is_dir() {
+        std::fs::remove_dir_all(&abs).map_err(|e| e.to_string())
+    } else {
+        std::fs::remove_file(&abs).map_err(|e| e.to_string())
+    }
+}
+
+/// Entries anywhere under the root whose name (or path) contains `query`.
+///
+/// Case-insensitive plain substring: nobody types a regex into an explorer
+/// filter by accident, and a broken one would be an error message where an
+/// answer belongs. Ranked name-prefix, then name, then path — the file you
+/// were thinking of first, the directory that merely contains the word last.
+#[tauri::command(async)]
+pub fn search_tree(
+    manager: tauri::State<SessionManager>,
+    query: String,
+    root: Option<String>,
+) -> Result<TreeSearch, String> {
+    let (root, git_mode) = manager
+        .root_info(root.as_deref())
+        .ok_or("no active session")?;
+    let needle = query.trim().to_lowercase();
+    let mut out = TreeSearch {
+        entries: Vec::new(),
+        truncated: false,
+    };
+    if needle.is_empty() {
+        return Ok(out);
+    }
+
+    // (rank, path length, path, name, is_dir). Length breaks rank ties so a
+    // shallow `src/app.css` outranks a deep one that scores the same.
+    let mut scored: Vec<(u8, usize, String, String, bool)> = Vec::new();
+    let mut scanned = 0usize;
+    let walker = walkdir::WalkDir::new(&root)
+        .follow_links(false)
+        .max_depth(MAX_SEARCH_DEPTH)
+        .into_iter()
+        .filter_entry(|entry| {
+            if entry.depth() == 0 || !entry.file_type().is_dir() {
+                return true;
+            }
+            let name = entry.file_name().to_string_lossy();
+            // Dot-directories are kept: `.github` and `.cargo` are places
+            // people look for. Only the two kinds nobody browses are pruned.
+            name != ".git" && !crate::session::IGNORED_DIRS.contains(&name.as_ref())
+        });
+
+    for entry in walker.filter_map(Result::ok) {
+        if entry.depth() == 0 {
+            continue;
+        }
+        scanned += 1;
+        if scanned > MAX_SEARCH_SCANNED {
+            out.truncated = true;
+            break;
+        }
+        let Ok(rel) = entry.path().strip_prefix(&root) else {
+            continue;
+        };
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let lower = name.to_lowercase();
+        let rank = if lower.starts_with(&needle) {
+            0
+        } else if lower.contains(&needle) {
+            1
+        } else if rel.to_lowercase().contains(&needle) {
+            2
+        } else {
+            continue;
+        };
+        scored.push((rank, rel.len(), rel, name, entry.file_type().is_dir()));
+    }
+
+    scored.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+    if scored.len() > MAX_SEARCH_HITS {
+        out.truncated = true;
+        scored.truncate(MAX_SEARCH_HITS);
+    }
+
+    // Only the survivors are asked about: `check-ignore` is one process, and
+    // handing it the whole walk to label two hundred rows would be the most
+    // expensive part of the search.
+    let rels: Vec<String> = scored.iter().map(|(_, _, rel, _, _)| rel.clone()).collect();
+    let ignored_set = if git_mode {
+        git_ignored(&root, &rels)
+    } else {
+        HashSet::new()
+    };
+
+    out.entries = scored
+        .into_iter()
+        .map(|(_, _, path, name, is_dir)| {
+            let ignored = ignored_set.contains(&path)
+                || (!git_mode && crate::session::IGNORED_DIRS.contains(&name.as_str()));
+            TreeEntry {
+                name,
+                path,
+                is_dir,
+                ignored,
+            }
+        })
+        .collect();
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_root(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("termax-fstree-test-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn resolve_entry_allows_a_path_that_does_not_exist_yet() {
+        let root = temp_root("create");
+        let target = resolve_entry(&root, "new.txt").unwrap();
+        assert_eq!(target, root.canonicalize().unwrap().join("new.txt"));
+    }
+
+    #[test]
+    fn resolve_entry_refuses_the_root_itself() {
+        let root = temp_root("root");
+        assert!(resolve_entry(&root, "").is_err());
+    }
+
+    #[test]
+    fn resolve_entry_refuses_escapes() {
+        let root = temp_root("escape");
+        assert!(resolve_entry(&root, "../outside").is_err());
+        assert!(resolve_entry(&root, "/etc/passwd").is_err());
+    }
+
+    /// The reason this exists at all: deleting `link` must unlink the link, and
+    /// `resolve` would have handed back the target it points at instead.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_entry_does_not_follow_a_final_symlink() {
+        let root = temp_root("symlink");
+        let outside = std::env::temp_dir().join("termax-fstree-test-symlink-target");
+        std::fs::write(&outside, "keep me").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+
+        assert!(resolve(&root, "link").is_err(), "resolve must reject the escape");
+        let entry = resolve_entry(&root, "link").unwrap();
+        assert_eq!(entry, root.canonicalize().unwrap().join("link"));
+
+        std::fs::remove_file(&entry).unwrap();
+        assert!(outside.exists(), "the link's target must survive");
+        std::fs::remove_file(&outside).unwrap();
+    }
+
+    /// A symlinked *directory* is still an escape: the containment check reads
+    /// the parent, so `link/file` resolves outside the root and is rejected.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_entry_refuses_a_symlinked_parent() {
+        let root = temp_root("symlink-parent");
+        let outside = std::env::temp_dir().join("termax-fstree-test-symlink-dir");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        assert!(resolve_entry(&root, "link/file.txt").is_err());
+    }
+
+    #[test]
+    fn check_name_takes_one_component_only() {
+        assert_eq!(check_name("  notes.md  ").unwrap(), "notes.md");
+        assert!(check_name("").is_err());
+        assert!(check_name("a/b").is_err());
+        assert!(check_name("a\\b").is_err());
+        assert!(check_name("..").is_err());
+        assert!(check_name(".git").is_err());
+    }
+
+    #[test]
+    fn check_not_git_guards_the_repository() {
+        assert!(check_not_git(".git").is_err());
+        assert!(check_not_git(".git/config").is_err());
+        assert!(check_not_git(".gitignore").is_ok());
+    }
+}

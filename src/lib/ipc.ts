@@ -25,6 +25,7 @@ import type {
   SearchResult,
   SessionInfo,
   TreeEntry,
+  TreeSearch,
   VaultCommand,
   Workspace,
   WorktreeEntry,
@@ -281,6 +282,18 @@ export const ipc = {
    *  buffer that has unsaved edits, live. */
   mergeFile: (path: string, base: string, ours: string, root?: string) =>
     invoke<MergeOutcome>("merge_file", { path, base, ours, root }),
+  /** Create an empty file or a directory inside `dir` ("" = the root), and
+   *  report the new entry's project-relative path. */
+  createEntry: (dir: string, name: string, isDir: boolean, root?: string) =>
+    invoke<string>("create_entry", { dir, name, isDir, root }),
+  /** Rename in place; `name` is one path component. Returns the new path. */
+  renameEntry: (path: string, name: string, root?: string) =>
+    invoke<string>("rename_entry", { path, name, root }),
+  /** Permanent — directories go with everything under them. Callers confirm. */
+  deleteEntry: (path: string, root?: string) => invoke<void>("delete_entry", { path, root }),
+  /** Entries anywhere under the root matching `query` (plain substring). */
+  searchTree: (query: string, root?: string) =>
+    invoke<TreeSearch>("search_tree", { query, root }),
   revealInFileManager: (path: string, root?: string) =>
     invoke<void>("reveal_in_file_manager", { path, root }),
   openInDefaultApp: (path: string, root?: string) =>
