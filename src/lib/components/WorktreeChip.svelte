@@ -48,7 +48,7 @@
     } else if (branch) {
       lines.push(`On ${branch}`);
     }
-    if (missing) lines.push("This worktree's directory is gone.");
+    if (missing) lines.push("This worktree's directory no longer exists — see the Trees panel.");
     if (root && !isPrimary) lines.push(root);
     return lines.join("\n");
   });

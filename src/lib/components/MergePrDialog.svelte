@@ -10,7 +10,8 @@
    */
   import { ipc } from "../ipc";
   import { activeRoot, flashGitMessage } from "../stores";
-  import { loadPrDetail, refreshPrs } from "../pr";
+  import { forgetSettledPr, loadPrDetail, refreshPrs } from "../pr";
+  import { removeWorktree, worktreeRows } from "../worktrees";
   import type { PrDetail, PullRequest } from "../types";
 
   let { pr, onclose }: { pr: PullRequest; onclose: () => void } = $props();
@@ -18,10 +19,26 @@
   type Method = "squash" | "rebase" | "merge";
   let method = $state<Method>("squash");
   let deleteBranch = $state(false);
+  let removeTree = $state(false);
   let detail = $state<PrDetail | null>(null);
   let loading = $state(true);
   let busy = $state(false);
   let error = $state<string | null>(null);
+  /** Set once GitHub has accepted the merge. The merge is not repeatable, so
+   *  the button must not stay live if the cleanup that follows it fails. */
+  let merged = $state(false);
+
+  /** The worktree this pull request was built in, if it still exists.
+   *
+   *  Merging is the moment its reason to exist ends, which is why the offer to
+   *  clean it up belongs here — beside "delete the branch", the decision it
+   *  rhymes with — rather than in a list that sits in the sidebar afterwards
+   *  waiting to be noticed. */
+  const tree = $derived(
+    $worktreeRows.find(
+      (row) => !row.isMain && row.state !== "missing" && row.branch === pr.headRefName,
+    ) ?? null,
+  );
 
   $effect(() => {
     void load();
@@ -72,19 +89,39 @@
   });
 
   async function merge() {
-    if (blocker || busy) return;
+    if (blocker || busy || merged) return;
     busy = true;
     error = null;
     try {
       await ipc.ghPrMerge(pr.number, method, deleteBranch, $activeRoot ?? undefined);
+      merged = true;
       flashGitMessage(`Merged #${pr.number}`);
-      await refreshPrs(true);
-      onclose();
     } catch (err) {
       error = String(err);
-    } finally {
       busy = false;
+      return;
     }
+
+    // The branch's pull request just stopped being open, so the cached "no
+    // settled PR for this branch" is now wrong — and it is what tells the
+    // worktree panel this tree is finished with.
+    forgetSettledPr(pr.headRefName);
+
+    if (removeTree && tree) {
+      const problem = await removeWorktree(tree.path);
+      if (problem) {
+        // The merge itself succeeded; only the cleanup did not. Say so, and
+        // leave the dialog open rather than closing on a half-done action.
+        error = `Merged #${pr.number}, but the worktree could not be removed:\n\n${problem}`;
+        busy = false;
+        await refreshPrs(true);
+        return;
+      }
+    }
+
+    busy = false;
+    await refreshPrs(true);
+    onclose();
   }
 
   /** The equivalent command, for the escape hatch. */
@@ -181,6 +218,23 @@
           Delete <span class="font-mono text-[11px]">{pr.headRefName}</span> after merging
         </label>
 
+        {#if tree}
+          <label class="flex items-start gap-2 text-[12px] text-zinc-300">
+            <input type="checkbox" bind:checked={removeTree} class="mt-0.5 accent-emerald-500" />
+            <span class="min-w-0">
+              Remove its worktree{tree.tabs.length
+                ? ` and close ${tree.tabs.length} tab${tree.tabs.length === 1 ? "" : "s"}`
+                : ""}
+              <span class="block break-all font-mono text-[10px] text-zinc-600">{tree.path}</span>
+              <!-- Refused rather than forced, so a tree holding the only copy of
+                   something survives the click. -->
+              <span class="block text-[10px] text-zinc-600">
+                Kept if it has uncommitted changes or a running pane.
+              </span>
+            </span>
+          </label>
+        {/if}
+
         {#if blocker}
           <p class="rounded-md border border-amber-500/40 bg-amber-950/30 px-2 py-1.5 text-[11px] text-amber-300">
             {blocker}
@@ -189,7 +243,9 @@
 
         {#if error}
           <div class="rounded-md border border-red-500/40 bg-red-950/40 px-2 py-1.5">
-            <p class="text-[11px] font-semibold text-red-300">GitHub refused the merge.</p>
+            <p class="text-[11px] font-semibold text-red-300">
+              {merged ? "The merge landed; the cleanup didn't." : "GitHub refused the merge."}
+            </p>
             <p class="mt-0.5 whitespace-pre-wrap break-words font-mono text-[10px] text-red-300/80">{error}</p>
           </div>
         {/if}
@@ -208,10 +264,10 @@
         </button>
         <button
           class="rounded-md bg-purple-600 px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-purple-500 disabled:opacity-40"
-          disabled={busy || loading || !!blocker}
+          disabled={busy || loading || merged || !!blocker}
           title={blocker ?? `gh pr merge ${pr.number} --${method}`}
           onclick={merge}
-        >{busy ? "Merging…" : `Merge (${method})`}</button>
+        >{merged ? "Merged" : busy ? "Merging…" : `Merge (${method})`}</button>
       </div>
     </div>
   </div>

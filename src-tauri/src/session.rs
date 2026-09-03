@@ -535,18 +535,23 @@ pub fn list_worktrees(
 ///
 /// With `committish`, the tree is created detached at that commit — the fork-PR
 /// case, where the head branch does not exist in this repository.
+///
+/// `start` names the base for a branch being created now ("new branch off
+/// main"). It is ignored when `origin/<branch>` already exists, because an
+/// existing remote branch is always the better start point.
 #[tauri::command(async)]
 pub fn worktree_add(
     manager: tauri::State<SessionManager>,
     path: String,
     branch: String,
     committish: Option<String>,
+    start: Option<String>,
 ) -> Result<Vec<git::WorktreeEntry>, String> {
     let root = resolve_git(&manager, None)?;
     let target = Path::new(&path);
     match committish.as_deref() {
         Some(spec) => git::worktree_add_detached(&root, target, spec)?,
-        None => git::worktree_add_tracking(&root, target, &branch)?,
+        None => git::worktree_add_tracking(&root, target, &branch, start.as_deref())?,
     }
     git::worktrees(&root)
 }

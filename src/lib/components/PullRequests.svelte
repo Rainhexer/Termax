@@ -18,19 +18,10 @@
     flashGitMessage,
     gitMode,
     gitStatus,
-    primaryRoot,
     restricted,
     sendToPane,
-    worktrees,
   } from "../stores";
-  import {
-    gitWorktrees,
-    missingWorktrees,
-    refreshGitWorktrees,
-    removeWorktree,
-    startWorkOnPr,
-    tabForBranch,
-  } from "../worktrees";
+  import { startWorkOnPr, tabForBranch } from "../worktrees";
   import { enabledLaunchers, launcherById, settings } from "../settings";
   import { ipc } from "../ipc";
   import CreatePrModal from "./CreatePrModal.svelte";
@@ -83,69 +74,6 @@
     else if (pr.isCrossRepository) {
       flashGitMessage("Fork PR checked out read-only — use `gh pr checkout` to push back");
     }
-  }
-
-  /** Worktrees worth offering to clean up: the ones whose directory is gone, and
-   *  the ones whose pull request has already merged or closed. A worktree in
-   *  active use is not listed — this is a cleanup surface, not a manager. */
-  const worktreeRows = $derived.by(() => {
-    const byBranch = new Map(prs.map((p) => [p.headRefName, p]));
-    return $worktrees
-      .filter((w) => w.path !== $primaryRoot)
-      .map((w) => {
-        const entry = $gitWorktrees.find((g) => g.path === w.path);
-        const branch = entry?.branch ?? null;
-        const open = branch ? byBranch.get(branch) : undefined;
-        return {
-          path: w.path,
-          branch,
-          missing: $missingWorktrees.has(w.path),
-          // A branch with no *open* PR, in a tree we created for a PR, is the
-          // merged/closed case. `prs` only holds open ones.
-          mergedPr: !open && branch ? (mergedNumbers.get(branch) ?? null) : null,
-        };
-      })
-      .filter((row) => row.missing || row.mergedPr !== null);
-  });
-
-  /** Branch → number for pull requests that are no longer open.
-   *
-   *  `gh pr list --state open` drops a PR the instant it merges, so a merged
-   *  branch would otherwise look like it never had one. Only bound worktree
-   *  branches are looked up, which is a handful of calls at most. */
-  let mergedNumbers = $state(new Map<string, number>());
-
-  $effect(() => {
-    const branches = $worktrees
-      .filter((w) => w.path !== $primaryRoot)
-      .map((w) => $gitWorktrees.find((g) => g.path === w.path)?.branch)
-      .filter((b): b is string => !!b && !prs.some((p) => p.headRefName === b));
-    if (!branches.length) return;
-    void (async () => {
-      const found = new Map<string, number>();
-      for (const branch of branches) {
-        const pr = await ipc.ghPrForBranch(branch).catch(() => null);
-        if (pr) found.set(branch, pr.number);
-      }
-      mergedNumbers = found;
-    })();
-  });
-
-  async function dropWorktree(row: { path: string; branch: string | null; missing: boolean }) {
-    actionError = null;
-    if (row.missing) {
-      try {
-        await ipc.worktreePrune();
-        await refreshGitWorktrees();
-      } catch (err) {
-        actionError = String(err);
-      }
-      return;
-    }
-    if (!confirm(`Delete the worktree at\n${row.path}?\n\nYour branch and its commits are untouched.`))
-      return;
-    const problem = await removeWorktree(row.path);
-    if (problem) actionError = problem;
   }
 
   async function markReady(pr: PullRequest) {
@@ -491,40 +419,6 @@
         <p class="px-1 pb-1 text-[10px] text-zinc-600">
           No pull request for <span class="font-mono text-zinc-500">{$gitStatus.branch}</span>.
         </p>
-      {/if}
-
-      <!-- Worktrees whose pull request is done, or whose directory has gone.
-           This is the cleanup moment users actually want, and it is the only
-           place that offers to delete anything from disk. -->
-      {#if worktreeRows.length}
-        <div class="mt-1 border-t border-zinc-800 pt-1">
-          <p class="px-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-600">
-            Worktrees
-          </p>
-          {#each worktreeRows as row (row.path)}
-            <div class="flex items-center gap-1.5 px-1 py-0.5">
-              <span class="shrink-0 font-mono text-[10px] {row.missing ? 'text-red-400' : 'text-zinc-600'}">
-                {row.missing ? "!" : "⎇"}
-              </span>
-              <span class="min-w-0 flex-1 truncate font-mono text-[10px] text-zinc-400" title={row.path}>
-                {row.branch ?? row.path}
-              </span>
-              {#if row.missing}
-                <span class="shrink-0 text-[9px] text-red-400" title="This directory no longer exists">gone</span>
-              {:else if row.mergedPr}
-                <span class="shrink-0 text-[9px] text-purple-400">#{row.mergedPr} merged</span>
-              {/if}
-              <button
-                class="shrink-0 rounded px-1 text-[9px] text-zinc-600 hover:bg-zinc-800 hover:text-red-300 disabled:opacity-40"
-                title={row.missing
-                  ? "Drop git's record of this worktree"
-                  : "Delete this worktree's directory (refuses if it has uncommitted changes)"}
-                disabled={busyPr !== null}
-                onclick={() => dropWorktree(row)}
-              >Remove</button>
-            </div>
-          {/each}
-        </div>
       {/if}
     {/if}
   </div>

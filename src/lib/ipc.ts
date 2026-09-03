@@ -161,9 +161,11 @@ export const ipc = {
   // keeps the administrative records.
   listWorktrees: () => invoke<WorktreeEntry[]>("list_worktrees"),
   /** Create a worktree. With `committish`, the tree is detached at that commit
-   *  (the fork-PR case, where the head branch is not in this repository). */
-  worktreeAdd: (path: string, branch: string, committish?: string) =>
-    invoke<WorktreeEntry[]>("worktree_add", { path, branch, committish }),
+   *  (the fork-PR case, where the head branch is not in this repository).
+   *  `start` names the base for a branch being created now; it is ignored when
+   *  `origin/<branch>` already exists. */
+  worktreeAdd: (path: string, branch: string, committish?: string, start?: string) =>
+    invoke<WorktreeEntry[]>("worktree_add", { path, branch, committish, start }),
   worktreeRemove: (path: string, force: boolean) =>
     invoke<WorktreeEntry[]>("worktree_remove", { path, force }),
   worktreePrune: () => invoke<WorktreeEntry[]>("worktree_prune"),

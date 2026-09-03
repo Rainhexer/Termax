@@ -225,6 +225,9 @@ export interface WorktreeEntry {
   locked: boolean;
   /** The main working tree (the one holding the real .git directory). */
   isMain: boolean;
+  /** git still holds a record for this tree but its directory is gone. Reported
+   *  by git, so a tree deleted from a terminal is recognized immediately. */
+  prunable: boolean;
 }
 
 export interface GhProbe {

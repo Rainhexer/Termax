@@ -270,7 +270,7 @@
             <span
               class="shrink-0 text-purple-400"
               title="{stats.worktrees} linked worktree{stats.worktrees === 1 ? '' : 's'}"
-            >⊞{stats.worktrees}</span>
+            >⎇{stats.worktrees}</span>
           {/if}
 
           <!-- Working tree, in terminal shorthand; tooltips spell it out. -->

@@ -231,6 +231,27 @@ async function runTreeSearch(query: string) {
   }
 }
 
+/** Create, rename and delete, against the root the tree is actually showing.
+ *
+ *  These live here rather than in the component for the same reason `loadDir`
+ *  and `runTreeSearch` do: `treeRoot` is private to this module, and a caller
+ *  that reaches for `ipc` directly gets the *project* root by default. With a
+ *  worktree-bound tab that is a different checkout with the same relative
+ *  paths — so a delete would land on a file of the same name in the main tree.
+ *  Keeping the root out of reach makes that unspellable rather than merely
+ *  unlikely. */
+export function createEntry(dir: string, name: string, isDir: boolean): Promise<string> {
+  return ipc.createEntry(dir, name, isDir, treeRoot);
+}
+
+export function renameEntry(path: string, name: string): Promise<string> {
+  return ipc.renameEntry(path, name, treeRoot);
+}
+
+export function deleteEntry(path: string): Promise<void> {
+  return ipc.deleteEntry(path, treeRoot);
+}
+
 export function clearTreeQuery() {
   setTreeQuery("");
 }

@@ -23,8 +23,10 @@
   import type { CliActivity, CliStatus } from "../cliStatus";
   import CommandVault from "./CommandVault.svelte";
   import PullRequests from "./PullRequests.svelte";
+  import WorktreesPanel from "./WorktreesPanel.svelte";
   import Issues from "./Issues.svelte";
   import WorktreeChip from "./WorktreeChip.svelte";
+  import { worktreeRows } from "../worktrees";
   import ChangesPanel from "./ChangesPanel.svelte";
   import FileTree from "./FileTree.svelte";
   import ErrorBoundary from "./ErrorBoundary.svelte";
@@ -128,7 +130,9 @@
 
   // The swap panel: Launch and Changes are pinned, and everything else takes
   // turns in the space between them. The GitHub tabs only exist in a git repo,
-  // matching the guard the two panels apply to themselves.
+  // matching the guard the two panels apply to themselves. Worktrees share that
+  // guard — they are a git feature, not a GitHub one, but a folder with no repo
+  // or no trust has none either way.
   const github = $derived($gitMode && !$restricted);
   const sections = $derived<{ id: SidebarSection; label: string; count: number; title: string }[]>([
     ...(github
@@ -145,6 +149,15 @@
     { id: "files", label: "Files", count: 0, title: "Explorer" },
     ...(github
       ? [
+          {
+            id: "trees" as const,
+            label: "Trees",
+            // The main tree is always there and is not something to manage, so
+            // the badge counts the linked ones — the number people mean when
+            // they ask how many worktrees they have.
+            count: $worktreeRows.filter((w) => !w.isMain).length,
+            title: "Worktrees — every checkout of this repository",
+          },
           {
             id: "prs" as const,
             label: "PRs",
@@ -440,6 +453,10 @@
         {:else if section === "vault"}
           <ErrorBoundary label="Command vault" compact>
             <CommandVault fill />
+          </ErrorBoundary>
+        {:else if section === "trees"}
+          <ErrorBoundary label="Worktrees" compact>
+            <WorktreesPanel fill />
           </ErrorBoundary>
         {:else}
           <ErrorBoundary label="File tree" compact>

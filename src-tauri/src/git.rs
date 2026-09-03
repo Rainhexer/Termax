@@ -350,6 +350,10 @@ pub struct WorktreeEntry {
     pub locked: bool,
     /// The main working tree (the one holding the real `.git` directory).
     pub is_main: bool,
+    /// git still holds a record for this tree but its directory is gone, so
+    /// `git worktree prune` would drop it. Reported by git itself, which is why
+    /// a tree deleted from a terminal is recognized before anything prunes it.
+    pub prunable: bool,
 }
 
 /// The worktrees of this repository, main tree first.
@@ -366,6 +370,9 @@ pub fn worktrees(root: &Path) -> Result<Vec<WorktreeEntry>, String> {
 /// Parse `git worktree list --porcelain`: blank-line-separated blocks, each
 /// starting with `worktree <path>`, then `HEAD <sha>`, then either
 /// `branch <ref>` or a bare `detached`. The first block is always the main tree.
+///
+/// `locked` and `prunable` each appear either bare or with a reason after a
+/// space, so both spellings are accepted.
 fn parse_worktrees(text: &str) -> Vec<WorktreeEntry> {
     let mut out: Vec<WorktreeEntry> = Vec::new();
     for line in text.lines() {
@@ -378,6 +385,7 @@ fn parse_worktrees(text: &str) -> Vec<WorktreeEntry> {
                 detached: false,
                 locked: false,
                 is_main: out.is_empty(),
+                prunable: false,
             });
             continue;
         }
@@ -395,6 +403,8 @@ fn parse_worktrees(text: &str) -> Vec<WorktreeEntry> {
             entry.detached = true;
         } else if line == "locked" || line.starts_with("locked ") {
             entry.locked = true;
+        } else if line == "prunable" || line.starts_with("prunable ") {
+            entry.prunable = true;
         }
     }
     out
@@ -436,22 +446,40 @@ pub fn default_branch(root: &Path) -> Option<String> {
     (!short.is_empty()).then(|| short.to_string())
 }
 
-/// Create a worktree at `path` on `branch`, tracking `origin/<branch>`.
+/// Create a worktree at `path` on `branch`.
 ///
-/// `-B` resets an existing local branch onto the remote tip, which is what
-/// "start work on this PR" means. Errors are git's stderr; the caller must
-/// recognize "already used by worktree at …" and turn it into a tab switch
-/// rather than showing it raw.
-pub fn worktree_add_tracking(root: &Path, path: &Path, branch: &str) -> Result<(), String> {
+/// Four cases, in the order git can actually satisfy them:
+///
+///   1. `origin/<branch>` exists — track it. `-B` resets an existing local
+///      branch onto the remote tip, which is what "start work on this PR"
+///      means, and is the only shape this function used to have.
+///   2. An explicit `start` — the user named a base branch for a branch they
+///      are creating now, so `-b` it from there.
+///   3. The branch exists locally only — check it out as it stands. Without
+///      this, a branch that was never pushed could not get a worktree at all,
+///      because case 1's `origin/<branch>` does not resolve.
+///   4. Neither — branch off HEAD.
+///
+/// Errors are git's stderr; the caller must recognize "already used by worktree
+/// at …" and turn it into a tab switch rather than showing it raw.
+pub fn worktree_add_tracking(
+    root: &Path,
+    path: &Path,
+    branch: &str,
+    start: Option<&str>,
+) -> Result<(), String> {
     let path = path.to_string_lossy().into_owned();
-    let start = format!("origin/{branch}");
-    git(
-        root,
-        &[
-            "worktree", "add", &path, "--track", "-B", branch, &start,
-        ],
-    )
-    .map(|_| ())
+    let remote = format!("origin/{branch}");
+    let args: Vec<&str> = if object_exists(root, &remote) {
+        vec!["worktree", "add", &path, "--track", "-B", branch, &remote]
+    } else if let Some(base) = start {
+        vec!["worktree", "add", &path, "-b", branch, base]
+    } else if object_exists(root, branch) {
+        vec!["worktree", "add", &path, branch]
+    } else {
+        vec!["worktree", "add", &path, "-b", branch]
+    };
+    git(root, &args).map(|_| ())
 }
 
 /// Create a detached worktree at `path` on an arbitrary committish. Used for
@@ -683,6 +711,33 @@ locked on removable media
         assert!(!wts[0].locked);
         assert!(wts[1].locked, "bare `locked`");
         assert!(wts[2].locked, "`locked <reason>`");
+    }
+
+    #[test]
+    fn parses_prunable_worktrees_in_both_forms() {
+        // A tree whose directory was deleted outside Termax is still listed,
+        // marked prunable — which is how the panel can call it missing before
+        // anything has run `git worktree prune`.
+        let text = "\
+worktree /main
+HEAD abc
+branch refs/heads/main
+
+worktree /a
+HEAD abc
+branch refs/heads/a
+prunable
+
+worktree /b
+HEAD abc
+branch refs/heads/b
+prunable gitdir file points to non-existent location
+";
+        let wts = parse_worktrees(text);
+        assert_eq!(wts.len(), 3);
+        assert!(!wts[0].prunable);
+        assert!(wts[1].prunable, "bare `prunable`");
+        assert!(wts[2].prunable, "`prunable <reason>`");
     }
 
     /// A branch name containing a slash must keep it: only the `refs/heads/`

@@ -23,7 +23,7 @@
  */
 import { derived, get, writable } from "svelte/store";
 import { ipc } from "./ipc";
-import type { Tab, Worktree, WorktreeEntry } from "./types";
+import type { PullRequest, Tab, Worktree, WorktreeEntry } from "./types";
 // The `worktrees` list itself lives in stores.ts, because `loadWorkspace` and
 // `persistLayout` have to read and write it. Keeping it there means the import
 // arrow only ever points this way and the module graph stays acyclic.
@@ -32,10 +32,12 @@ import {
   activeTabId,
   addPane,
   checkoutBranch,
+  closeTab,
   collectTabPanes,
   flashGitMessage,
   gitError,
   newTab,
+  persistLayout,
   primaryRoot,
   refreshChanges,
   sessionReady,
@@ -46,14 +48,16 @@ import {
 import { setTreeRoot } from "./filetree";
 import { isAlive, queueType } from "./terminals";
 import { settings as appSettings } from "./settings";
+import { prByBranch, resolveSettledPrs, settledPrByBranch } from "./pr";
 
 export { worktrees };
 
 /** What `git worktree list` currently reports. The authority on what exists. */
 export const gitWorktrees = writable<WorktreeEntry[]>([]);
 
-/** Paths whose directory git no longer lists. A bound tab stays open and keeps
- *  its panes — it just cannot track files until the tree is recreated. */
+/** Paths whose directory is gone: either git no longer lists them at all, or it
+ *  lists them as prunable. A bound tab stays open and keeps its panes — it just
+ *  cannot track files until the tree is recreated or forgotten. */
 export const missingWorktrees = writable<Set<string>>(new Set());
 
 export function worktreeById(list: Worktree[], id: string | undefined): Worktree | null {
@@ -91,13 +95,21 @@ export const branchByRoot = derived(gitWorktrees, (entries) => {
   return map;
 });
 
-/** Re-read `git worktree list` and recompute which bound paths have vanished. */
+/** Re-read `git worktree list` and recompute which paths have vanished.
+ *
+ *  Two sources, because they catch different moments. git's own `prunable` flag
+ *  covers a tree whose directory was deleted from a terminal — git still holds
+ *  the administrative record, so the entry is still listed and only that flag
+ *  says it is dead. A registered path git does not list at all covers the other
+ *  side: someone ran `git worktree prune` while we had a record. */
 export async function refreshGitWorktrees(): Promise<void> {
   try {
     const entries = await ipc.listWorktrees();
     gitWorktrees.set(entries);
-    const known = new Set(entries.map((e) => e.path));
-    missingWorktrees.set(new Set(get(worktrees).map((w) => w.path).filter((p) => !known.has(p))));
+    const live = new Set(entries.filter((e) => !e.prunable).map((e) => e.path));
+    const gone = entries.filter((e) => e.prunable).map((e) => e.path);
+    const orphaned = get(worktrees).map((w) => w.path).filter((p) => !live.has(p));
+    missingWorktrees.set(new Set([...gone, ...orphaned]));
   } catch (err) {
     // Not a git repo, or git failed. Neither is worth an error banner here: the
     // Changes panel already reports repo-level problems, and with no worktrees
@@ -282,8 +294,12 @@ function dirName(path: string): string {
 }
 
 /** Put `path` on screen: its bound tab if it has one, the project-root tab when
- *  the tree *is* the project, otherwise a new tab bound to it. */
-async function goToWorktree(branch: string, path: string): Promise<void> {
+ *  the tree *is* the project, otherwise a new tab bound to it.
+ *
+ *  Exported because it is what "jump to this worktree" means everywhere — the
+ *  branch switcher, the worktree panel, and the already-checked-out recovery
+ *  paths all want this exact behaviour rather than an approximation of it. */
+export async function goToWorktree(branch: string, path: string): Promise<void> {
   const record = get(worktrees).find((w) => samePath(w.path, path));
   const bound = record ? get(tabs).find((t) => t.worktreeId === record.id) : undefined;
   if (bound) {
@@ -340,15 +356,17 @@ export async function switchToBranch(branch: string): Promise<void> {
  *
  *  `prNumber` with `fromFork` fetches `refs/pull/N/head` into a detached tree
  *  instead, because a fork's head branch does not exist in this repository.
+ *  `start` names the base for a branch being created now, which is what the
+ *  "new worktree" dialog offers and neither of the PR/issue flows needs.
  *  Adopts an existing tree at the same path rather than failing. */
 export async function ensureWorktree(
   projectPath: string,
   branch: string,
-  opts: { prNumber?: number; fromFork?: boolean } = {},
+  opts: { prNumber?: number; fromFork?: boolean; start?: string } = {},
 ): Promise<string> {
   const path = worktreePathFor(projectPath, branch);
 
-  const existing = get(gitWorktrees).find((w) => w.path === path);
+  const existing = get(gitWorktrees).find((w) => w.path === path && !w.prunable);
   if (existing) return path;
 
   if (opts.fromFork && opts.prNumber !== undefined) {
@@ -360,7 +378,7 @@ export async function ensureWorktree(
     await ipc.gitFetchBranch(branch).catch(() => {
       // A branch that only exists locally is still worth a worktree.
     });
-    await ipc.worktreeAdd(path, branch);
+    await ipc.worktreeAdd(path, branch, undefined, opts.start);
   }
   await refreshGitWorktrees();
   return path;
@@ -447,6 +465,60 @@ function openTabForWorktree(
     title: opts.launcherName,
     tabTitle: `#${opts.prNumber} ${short}`,
   });
+}
+
+/** Create a worktree for `branch` and open a tab in it.
+ *
+ *  The plain, PR-free, issue-free path: "give me a second checkout of this
+ *  branch". Until the worktree panel there was no such thing — a worktree could
+ *  only come into being as a side effect of starting work on a pull request or
+ *  an issue, so a branch that was neither could not get one from inside the app
+ *  at all.
+ *
+ *  `start` creates the branch off that base; without it an existing branch
+ *  (local or remote) is checked out as it stands. Idempotent in the same way the
+ *  other two entry points are: a branch that already has a tab just gets
+ *  focused, and a branch checked out in another tree jumps there.
+ *
+ *  Returns a human-readable problem, or null on success. */
+export async function createWorktree(opts: {
+  projectPath: string;
+  branch: string;
+  start?: string;
+  launch: string | null;
+  launcherName: string;
+}): Promise<string | null> {
+  const branch = opts.branch.trim();
+  if (!branch) return "Name the branch this worktree should check out.";
+
+  const existingTab = tabForBranch(branch);
+  if (existingTab) {
+    switchTab(existingTab.tabId);
+    return null;
+  }
+
+  let path: string;
+  try {
+    path = await ensureWorktree(opts.projectPath, branch, { start: opts.start });
+  } catch (err) {
+    const message = String(err);
+    if (isAlreadyCheckedOut(message)) {
+      const holder = get(gitWorktrees).find((w) => w.branch === branch);
+      if (holder) {
+        await goToWorktree(branch, holder.path);
+        return null;
+      }
+      return `${branch} is already checked out in another worktree.`;
+    }
+    return message;
+  }
+
+  // Register and create the tab in one synchronous block: an await between the
+  // two would let the reconciler observe a worktree nothing references yet.
+  const id = registerWorktree(path);
+  newTab({ worktreeId: id, launch: opts.launch, title: opts.launcherName, tabTitle: branch });
+  offerSetupCommand();
+  return null;
 }
 
 /** Branch name for an issue, in GitHub's own `<number>-<slug>` shape.
@@ -596,15 +668,194 @@ function openTabForIssue(
   return tab.focusedPaneId;
 }
 
+/** What a worktree is *for*, as one word the panel can show and sort on.
+ *
+ *  Deliberately not stored anywhere: every one of these is recomputed from git,
+ *  the tab list and the pull-request cache, for the same reason `Worktree` only
+ *  persists an id and a path — a stored status is wrong the moment someone runs
+ *  a git command in a terminal. */
+export type WorktreeState = "main" | "active" | "idle" | "merged" | "missing";
+
+/** One worktree, as every surface in the app should see it.
+ *
+ *  The app used to answer "what worktrees are there?" by walking `worktrees`,
+ *  its own record list — which only ever contained trees *Termax itself*
+ *  created, and kept containing them after the directory was gone. This walks
+ *  git's list instead and attaches the app's records to it, so a tree made from
+ *  a terminal appears, and a record with no tree is reported as missing rather
+ *  than as an ordinary worktree. */
+export interface WorktreeRow {
+  path: string;
+  branch: string | null;
+  head: string;
+  detached: boolean;
+  locked: boolean;
+  isMain: boolean;
+  /** Workspace record id, or null for a tree no tab has ever been bound to. */
+  recordId: string | null;
+  /** Tabs whose panes run in this tree. */
+  tabs: { id: string; title: string }[];
+  /** Open pull request for the branch, else the merged/closed one. */
+  pr: PullRequest | null;
+  state: WorktreeState;
+  /** Branch name, or the directory when detached. */
+  label: string;
+}
+
+const STATE_ORDER: Record<WorktreeState, number> = {
+  main: 0,
+  active: 1,
+  idle: 2,
+  merged: 3,
+  missing: 4,
+};
+
+/** Every worktree of this repository, ready to render.
+ *
+ *  The single model behind the worktree panel, and the thing any future surface
+ *  should read rather than re-deriving branch/PR/tab joins of its own — that
+ *  duplication is what let the old cleanup list disagree with the tab bar. */
+export const worktreeRows = derived(
+  [gitWorktrees, worktrees, tabs, missingWorktrees, prByBranch, settledPrByBranch, primaryRoot],
+  ([entries, records, tabList, missing, openPrs, settledPrs, primary]) => {
+    const isMissing = (path: string) => [...missing].some((m) => samePath(m, path));
+    const prFor = (branch: string | null) =>
+      branch ? (openPrs.get(branch) ?? settledPrs.get(branch) ?? null) : null;
+    const tabsWith = (predicate: (tab: Tab) => boolean) =>
+      tabList.filter(predicate).map((t) => ({ id: t.id, title: t.title }));
+
+    const rows: WorktreeRow[] = entries.map((entry) => {
+      const record = records.find((r) => samePath(r.path, entry.path)) ?? null;
+      const isMain = entry.isMain || samePath(entry.path, primary);
+      // Tabs reach the main tree by having no `worktreeId` at all, so it cannot
+      // be found through a record the way a linked tree is.
+      const bound = isMain
+        ? tabsWith((t) => !t.worktreeId)
+        : tabsWith((t) => !!record && t.worktreeId === record.id);
+      const pr = prFor(entry.branch);
+      const gone = entry.prunable || isMissing(entry.path);
+      const state: WorktreeState = gone
+        ? "missing"
+        : isMain
+          ? "main"
+          : pr && pr.state !== "OPEN"
+            ? "merged"
+            : bound.length
+              ? "active"
+              : "idle";
+      return {
+        path: entry.path,
+        branch: entry.branch,
+        head: entry.head,
+        detached: entry.detached,
+        locked: entry.locked,
+        isMain,
+        recordId: record?.id ?? null,
+        tabs: bound,
+        pr,
+        state,
+        label: entry.branch ?? dirName(entry.path),
+      };
+    });
+
+    // Records git does not list at all: someone pruned while we held a record.
+    // Without these the tabs bound to them would have no row to be released from.
+    for (const record of records) {
+      if (rows.some((r) => samePath(r.path, record.path))) continue;
+      rows.push({
+        path: record.path,
+        branch: null,
+        head: "",
+        detached: false,
+        locked: false,
+        isMain: false,
+        recordId: record.id,
+        tabs: tabsWith((t) => t.worktreeId === record.id),
+        pr: null,
+        state: "missing",
+        label: dirName(record.path),
+      });
+    }
+
+    return rows.sort(
+      (a, b) => STATE_ORDER[a.state] - STATE_ORDER[b.state] || a.label.localeCompare(b.label),
+    );
+  },
+);
+
+/** Ask GitHub about the branches whose worktree has no *open* pull request.
+ *
+ *  Driven by the panel becoming visible rather than by a reactive effect: this
+ *  spawns `gh` once per unanswered branch, and `pr.ts` caches the answers. */
+export async function refreshWorktreePrs(): Promise<void> {
+  const branches = get(worktreeRows)
+    // Nothing to clean up about a tree that is already gone, so its branch is
+    // not worth a `gh` spawn.
+    .filter((row) => !row.isMain && row.state !== "missing" && row.branch)
+    .map((row) => row.branch as string);
+  await resolveSettledPrs(branches);
+}
+
+/** Drop the local bookkeeping for a path whose session is going away.
+ *
+ *  Matched on both spellings, because `openSessions` is keyed by the path we
+ *  asked for while callers here have git's spelling. */
+function forgetSession(path: string): void {
+  for (const [key, canonical] of [...openSessions]) {
+    if (samePath(key, path) || samePath(canonical, path)) openSessions.delete(key);
+  }
+}
+
+/** Release every tab bound to a worktree record that is going away.
+ *
+ *  Closed, not left behind: the directory their panes run in has just stopped
+ *  existing, so a surviving tab would spawn shells that immediately fail. The
+ *  last tab in the bar is the exception — `closeTab` refuses to remove it, and a
+ *  window with no tab has nowhere to put anything — so it is unbound to the
+ *  project root instead. */
+function releaseTabsFor(recordId: string): void {
+  for (const tab of get(tabs).filter((t) => t.worktreeId === recordId)) {
+    if (get(tabs).length > 1) {
+      closeTab(tab.id);
+    } else {
+      tabs.update((list) =>
+        list.map((t) => {
+          if (t.id !== tab.id) return t;
+          const { worktreeId: _dropped, ...rest } = t;
+          return rest;
+        }),
+      );
+    }
+  }
+}
+
+/** Forget the workspace record for a worktree, and the tabs and session with it.
+ *
+ *  Persisted explicitly: `closeTab` saves the workspace, but it does so before
+ *  the record is dropped, so without this the deleted worktree would come back
+ *  in the saved file and be pruned only on the next project open. */
+function dropRecord(recordId: string, path: string): void {
+  releaseTabsFor(recordId);
+  worktrees.update((list) => list.filter((w) => w.id !== recordId));
+  forgetSession(path);
+  persistLayout();
+}
+
 /** Remove a worktree from disk after checking nothing is using it.
  *
  *  Returns a problem string rather than throwing for the cases the user can act
- *  on. Never passes `--force` unless they explicitly chose to discard changes. */
+ *  on. Never passes `--force` unless they explicitly chose to discard changes.
+ *
+ *  On success the app's own record goes too, along with the tabs bound to it.
+ *  Leaving the record behind is what used to make a tree the user had just
+ *  deleted reappear as "gone": a record whose directory is absent is by
+ *  definition missing, so the delete button turned a worktree into a broken
+ *  worktree instead of removing it. */
 export async function removeWorktree(
   path: string,
   opts: { discardChanges?: boolean } = {},
 ): Promise<string | null> {
-  const record = get(worktrees).find((w) => w.path === path);
+  const record = get(worktrees).find((w) => samePath(w.path, path));
   if (record) {
     const boundTabs = get(tabs).filter((t) => t.worktreeId === record.id);
     // A running agent in a tree being deleted would lose its work with no
@@ -617,10 +868,35 @@ export async function removeWorktree(
       return `${n} pane${n === 1 ? " is" : "s are"} still running in this worktree. Close its tab first.`;
     }
   }
+  // git first: a refusal (uncommitted changes, a locked tree) must leave the
+  // tabs exactly as they were, so the user can go and deal with the work.
   try {
     await ipc.worktreeRemove(path, opts.discardChanges === true);
   } catch (err) {
     return String(err);
+  }
+  if (record) dropRecord(record.id, path);
+  await refreshGitWorktrees();
+  return null;
+}
+
+/** Drop the records for worktrees whose directory is gone — git's and ours.
+ *
+ *  The counterpart to `removeWorktree` for a tree deleted outside Termax: there
+ *  is nothing on disk left to remove, so this only forgets. Repository-wide,
+ *  because `git worktree prune` is: pruning one stale record and leaving another
+ *  is not something git offers, and pretending otherwise would make the panel
+ *  disagree with the command line. Returns a problem string, or null. */
+export async function forgetMissingWorktrees(): Promise<string | null> {
+  const stale = get(worktreeRows).filter((row) => row.state === "missing");
+  try {
+    await ipc.worktreePrune();
+  } catch (err) {
+    return String(err);
+  }
+  for (const row of stale) {
+    if (row.recordId) dropRecord(row.recordId, row.path);
+    else forgetSession(row.path);
   }
   await refreshGitWorktrees();
   return null;

@@ -87,6 +87,49 @@ export const prByBranch = derived(prCache, (cache) => {
   return map;
 });
 
+/** Pull requests for branches that have no *open* one, filled on demand.
+ *
+ *  `gh pr list --state open` drops a pull request the instant it merges, so a
+ *  merged branch would otherwise look like it never had one — and the worktree
+ *  built for it would read as work in progress rather than the cleanup
+ *  candidate it is.
+ *
+ *  Filled only when something asks (the worktree panel becoming visible, a merge
+ *  completing), never from a reactive effect: each entry is a `gh` spawn and a
+ *  network round trip, which is exactly what the network posture above forbids
+ *  putting on a render path. `null` is a cached "asked, and there is none", so a
+ *  branch that never had a pull request is asked about once rather than on every
+ *  pass. */
+export const settledPrByBranch = writable(new Map<string, PullRequest | null>());
+
+/** Ask GitHub about branches whose pull request is not in the open list.
+ *
+ *  Skips anything already answered and anything with an open PR, so calling it
+ *  on every worktree refresh costs nothing after the first. */
+export async function resolveSettledPrs(branches: string[]): Promise<void> {
+  if (!canQuery()) return;
+  const known = get(settledPrByBranch);
+  const open = get(prByBranch);
+  const wanted = [...new Set(branches)].filter((b) => b && !known.has(b) && !open.has(b));
+  if (!wanted.length) return;
+  const found = new Map(known);
+  for (const branch of wanted) {
+    found.set(branch, await ipc.ghPrForBranch(branch).catch(() => null));
+  }
+  settledPrByBranch.set(found);
+}
+
+/** Forget one branch's cached answer, so the next resolve asks again. Used after
+ *  a merge, where the answer just changed and the cached `null` would hide it. */
+export function forgetSettledPr(branch: string): void {
+  settledPrByBranch.update((map) => {
+    if (!map.has(branch)) return map;
+    const next = new Map(map);
+    next.delete(branch);
+    return next;
+  });
+}
+
 /** The PR for the checked-out branch of the primary root, if any. */
 export const currentPr = derived([prByBranch, gitStatus], ([byBranch, status]) => {
   if (!status || status.detached) return null;
@@ -165,6 +208,9 @@ export async function loadPrDetail(number: number): Promise<PrDetail | null> {
 
 export function resetPrs(): void {
   prCache.set(EMPTY);
+  // Branch names are not unique across projects, so a cached answer from the
+  // previous repository would attach the wrong pull request to a worktree here.
+  settledPrByBranch.set(new Map());
 }
 
 /** Wire the automatic refresh triggers. Called once at startup. */

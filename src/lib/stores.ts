@@ -33,17 +33,19 @@ export const sidebarCollapsed = writable(false);
  *  The sidebar stacks Launch and Changes around a single swappable panel, so
  *  exactly one of these is mounted at a time. "files" is the default because it
  *  is the only one that costs nothing: the two GitHub sections fetch when they
- *  become visible, and a user who never picks them never talks to GitHub. */
-export type SidebarSection = "issues" | "vault" | "files" | "prs";
+ *  become visible, and a user who never picks them never talks to GitHub.
+ *  "trees" sits between the two: it reads git for free, and only asks GitHub
+ *  about branches whose pull request is not already in the open list. */
+export type SidebarSection = "issues" | "vault" | "files" | "trees" | "prs";
+
+const SECTIONS: readonly SidebarSection[] = ["issues", "vault", "files", "trees", "prs"];
 
 const SECTION_KEY = "termax.sidebarSection";
 
 function readSection(): SidebarSection {
   try {
     const stored = localStorage.getItem(SECTION_KEY);
-    if (stored === "issues" || stored === "vault" || stored === "files" || stored === "prs") {
-      return stored;
-    }
+    if (SECTIONS.includes(stored as SidebarSection)) return stored as SidebarSection;
   } catch {
     // A private-mode/quota failure must not break the sidebar.
   }
@@ -202,7 +204,10 @@ function syncActiveTab() {
   );
 }
 
-function persistLayout() {
+/** Save the workspace: the tab set, which one is active, and the worktrees they
+ *  reference. Exported for `worktrees.ts`, which drops records of its own and
+ *  would otherwise leave them in the saved workspace until the next tab change. */
+export function persistLayout() {
   const project = get(activeProject);
   if (!project) return;
   syncActiveTab();

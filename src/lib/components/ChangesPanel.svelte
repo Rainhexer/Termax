@@ -281,7 +281,10 @@
                     <span class="w-2.5 shrink-0 text-emerald-400">{b === $gitStatus.branch ? "✓" : ""}</span>
                     <span class="min-w-0 flex-1 truncate">{b}</span>
                     {#if elsewhere}
-                      <span class="shrink-0 text-[10px] text-zinc-500">↗ worktree</span>
+                      <span
+                        class="shrink-0 text-[10px] text-zinc-500"
+                        title="Checked out in another worktree — picking this goes there"
+                      >↗ worktree</span>
                     {/if}
                   </button>
                 {:else}
