@@ -743,6 +743,39 @@ impl PtyManager {
         }
     }
 
+    /// Whether the program on this pane has put the tty into raw mode — the
+    /// portable fact that it is reading keystrokes itself.
+    ///
+    /// `None` when it cannot be told (not unix, or the pane is gone), which
+    /// callers must read as "no opinion" rather than as "not ready".
+    ///
+    /// This is what separates a program that took our input from one that has
+    /// not started reading yet. Until a TUI switches the tty to raw mode, the
+    /// *kernel* echoes anything written to the pane, so the text appears on
+    /// screen exactly as if the program had accepted it — and is then thrown
+    /// away, because entering raw mode flushes the input queue.
+    pub fn input_is_raw(&self, pane_id: &str) -> Option<bool> {
+        #[cfg(unix)]
+        {
+            let handle = self.handle(pane_id)?;
+            let fd = handle.master.lock().unwrap().as_raw_fd()?;
+            // SAFETY: `fd` is the pane's live master, held open by the handle
+            // for the duration of this call, and `termios` is only read.
+            let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
+            let ok = unsafe { libc::tcgetattr(fd, termios.as_mut_ptr()) } == 0;
+            if !ok {
+                return None;
+            }
+            let termios = unsafe { termios.assume_init() };
+            Some(termios.c_lflag & (libc::ICANON | libc::ECHO) == 0)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = pane_id;
+            None
+        }
+    }
+
     /// Queue input for the pane. Returns once the bytes are handed to the
     /// pane's writer thread, without waiting for the pty to accept them.
     pub fn write(&self, pane_id: &str, data: &str) -> Result<(), String> {
@@ -931,6 +964,14 @@ pub fn resize_pty(
 pub fn kill_pty(manager: tauri::State<PtyManager>, pane_id: String) -> Result<(), String> {
     manager.kill(&pane_id);
     Ok(())
+}
+
+#[tauri::command(async)]
+pub fn pty_input_is_raw(
+    manager: tauri::State<PtyManager>,
+    pane_id: String,
+) -> Result<Option<bool>, String> {
+    Ok(manager.input_is_raw(&pane_id))
 }
 
 #[tauri::command(async)]
