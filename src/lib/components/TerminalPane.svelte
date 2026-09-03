@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { PaneNode } from "../types";
-  import { attach, detach, fitPane, focusTerminal, loadingPanes, fileDropPaneId } from "../terminals";
+  import { attach, detach, fitPane, focusTerminal, loadingPanes, fileDropPaneId, setPaneFontDelta } from "../terminals";
   import { activeProject, activeTabId, focusedPaneId, closePane, addPane, maximizedPaneId, tabs, toggleMaximizedPane, togglePaneBell, worktrees } from "../stores";
   import { dropTarget, startPaneDrag } from "../paneDrag";
   import { rootForTab } from "../worktrees";
@@ -21,6 +21,14 @@
   const fileDropTarget = $derived($fileDropPaneId === pane.id);
   const loading = $derived(pane.launch && $loadingPanes.has(pane.id));
   const ringing = $derived($attentionPanes.has(pane.id));
+  const zoomed = $derived(pane.fontDelta ?? 0);
+
+  // The pane's text zoom lives in the layout (Ctrl +/-), the terminal it
+  // applies to lives in terminals.ts. Declared before the attach effect so a
+  // restored pane opens at its own size rather than at the theme's.
+  $effect(() => {
+    setPaneFontDelta(pane.id, pane.fontDelta ?? 0);
+  });
 
   /** Directory a newly spawned pane should start in. */
   function spawnRoot(): string {
@@ -84,6 +92,12 @@
       {pane.title}
     </span>
     <div class="ml-auto flex items-center gap-0.5">
+      {#if zoomed !== 0}
+        <span
+          class="mr-0.5 rounded bg-zinc-800 px-1 py-px text-[9px] font-semibold text-zinc-400"
+          title="Text zoomed {zoomed > 0 ? '+' : ''}{zoomed}px — Ctrl+0 resets"
+        >{zoomed > 0 ? "+" : ""}{zoomed}</span>
+      {/if}
       <button
         class="rounded px-1.5 py-0.5 hover:bg-zinc-800
           {ringing ? 'text-amber-400' : pane.bell ? 'text-emerald-400' : 'text-zinc-500 hover:text-zinc-200'}"

@@ -84,6 +84,18 @@ const CLIENT_JS: &str = r##"
     }, 80);
   }, { passive: true });
 
+  // --- text zoom -----------------------------------------------------------
+  // The pane's Ctrl +/- zoom, applied to this document. The parent owns the
+  // value (it is stored with the pane and outlives this page), so the frame
+  // only reports the keystroke and waits to be told the new zoom. The keys are
+  // reported from here because a keystroke typed into the frame never reaches
+  // the parent window's handler.
+  // `zoom` rather than a root font size: a previewed page is mostly not written
+  // in rem, and scaling the whole page is what the same keys do in a browser.
+  function applyZoom(z) {
+    doc.documentElement.style.zoom = z === 1 ? "" : String(z);
+  }
+
   window.addEventListener("message", function (e) {
     var d = e.data;
     if (!d || !d.__tmx) return;
@@ -92,7 +104,16 @@ const CLIENT_JS: &str = r##"
     else if (d.__tmx === "back") history.back();
     else if (d.__tmx === "forward") history.forward();
     else if (d.__tmx === "navigate" && typeof d.url === "string") location.href = d.url;
+    else if (d.__tmx === "zoom" && typeof d.zoom === "number") applyZoom(d.zoom);
   });
+
+  doc.addEventListener("keydown", function (e) {
+    if (!e.ctrlKey || e.altKey || e.metaKey) return;
+    var k = e.key;
+    if (k !== "+" && k !== "=" && k !== "-" && k !== "_" && k !== "0") return;
+    e.preventDefault();
+    parent.postMessage({ __tmx: "zoomKey", key: k }, "*");
+  }, true);
 
   function announce() {
     var rel = location.pathname.slice(BASE.length) || "/";
