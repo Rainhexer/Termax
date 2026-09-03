@@ -8,6 +8,7 @@ import { ipc } from "./ipc";
 import { perf, setQueueDepthSource } from "./perf";
 import { settings, type AppSettings } from "./settings";
 import { fontStack, xtermTheme } from "./theme";
+import { paneFontSize } from "./paneFont";
 import * as bell from "./bell";
 import * as renderers from "./renderers";
 import * as scheduler from "./writeScheduler";
@@ -155,6 +156,8 @@ interface Entry {
    *  there. Those panes are settled by the screen scan instead; see
    *  {@link cliTurnEnded}. */
   launch: string | null;
+  /** Per-pane font-size offset from the theme (Ctrl +/-). See paneFont.ts. */
+  fontDelta: number;
 }
 
 // Terminals live outside the component tree so panes survive layout re-renders.
@@ -542,7 +545,7 @@ function applyAppearance(s: AppSettings) {
   for (const entry of registry.values()) {
     if (!entry.opened || !entry.term) continue;
     try {
-      entry.term.options.fontSize = fonts.terminalSize;
+      entry.term.options.fontSize = paneFontSize(fonts.terminalSize, entry.fontDelta);
       entry.term.options.fontFamily = family;
       entry.term.options.theme = theme;
       entry.term.options.cursorBlink = s.terminal.cursorBlink;
@@ -574,11 +577,38 @@ function applyAppearance(s: AppSettings) {
   });
 }
 
+/** Pane id → font offset, kept outside the registry so a pane's zoom is known
+ *  before its terminal exists (a restored layout sets it as the pane mounts). */
+const fontDeltas = new Map<string, number>();
+/** Apply a pane's font-size offset. Called by the pane component from the
+ *  layout, which owns the value; a live terminal is restyled and re-fitted so
+ *  full-screen TUIs redraw at the new cell size instead of keeping the old
+ *  rows/cols (same reason `applyAppearance` re-fits on a font change). */
+export function setPaneFontDelta(paneId: string, delta: number) {
+  const previous = fontDeltas.get(paneId);
+  fontDeltas.set(paneId, delta);
+  if (previous === delta) return;
+  const entry = registry.get(paneId);
+  if (!entry) return;
+  entry.fontDelta = delta;
+  if (!entry.opened) return;
+  try {
+    entry.term.options.fontSize = paneFontSize(
+      get(settings).appearance.theme.fonts.terminalSize,
+      delta,
+    );
+  } catch (err) {
+    console.error(`[terminals] failed to resize text in pane ${paneId}:`, err);
+    return;
+  }
+  requestAnimationFrame(() => fitPane(paneId));
+}
+
 function create(paneId: string): Entry {
   const s = get(settings);
   const term = new Terminal({
     fontFamily: fontStack(s.appearance.theme.fonts.terminal, "mono"),
-    fontSize: s.appearance.theme.fonts.terminalSize,
+    fontSize: paneFontSize(s.appearance.theme.fonts.terminalSize, fontDeltas.get(paneId)),
     cursorBlink: s.terminal.cursorBlink,
     cursorStyle: s.terminal.cursorStyle,
     allowProposedApi: true,
@@ -619,6 +649,7 @@ function create(paneId: string): Entry {
     foregroundProbedAt: 0,
     hiddenSeq: -1,
     launch: null,
+    fontDelta: fontDeltas.get(paneId) ?? 0,
   };
   // A program asking for attention (BEL) rings straight away — no heuristics.
   // Except in a coding-CLI pane: those ring the bell for their own reasons
@@ -1215,6 +1246,7 @@ export function destroyPane(paneId: string) {
   const entry = registry.get(paneId);
   if (!entry) return;
   registry.delete(paneId);
+  fontDeltas.delete(paneId);
   pendingRun.delete(paneId);
   outputHooks.delete(paneId);
   oscBuffers.delete(paneId);
@@ -1297,6 +1329,7 @@ export function diagCounts(): Record<string, number> {
     statusTails: statusTails.size,
     pendingTitles: pendingTitles.size,
     remoteScreens: remoteScreens.size,
+    fontDeltas: fontDeltas.size,
     paneTitles: get(paneTitles).size,
     paneRoots: get(paneRoots).size,
     paneRuns: get(paneRuns).size,

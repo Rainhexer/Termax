@@ -158,6 +158,12 @@ export interface PaneNode {
   view?: "edit" | "preview";
   /** Terminal panes: chime + pulse when the command finishes or wants input. */
   bell?: boolean;
+  /** Font-size offset in px from the theme's size for this pane's content
+   *  (Ctrl +/-). Absent or 0 means "whatever the theme says", which is what
+   *  keeps new panes at the default size while a zoomed pane stays zoomed
+   *  across restarts. Stored as an offset rather than an absolute size so a
+   *  later theme change still moves every pane. */
+  fontDelta?: number;
 }
 
 export interface SplitNode {

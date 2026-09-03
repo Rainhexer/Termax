@@ -25,6 +25,7 @@ import { getMonaco, languageForPath, MONACO_THEME } from "../monaco";
   } from "../previewServer";
   import { flushPaneScroll, getPaneScroll, setPaneScroll, type PaneScroll } from "../paneScroll";
   import { fontStack } from "../theme";
+  import { FONT_STEP, paneFontSize } from "../paneFont";
   import { ipc } from "../ipc";
   import { settings } from "../settings";
   import {
@@ -41,6 +42,7 @@ import { getMonaco, languageForPath, MONACO_THEME } from "../monaco";
     sessionReady,
     setPaneDiff,
     setPaneView,
+    zoomPane,
     toggleMaximizedPane,
   } from "../stores";
   import { dropTarget, startPaneDrag } from "../paneDrag";
@@ -144,6 +146,19 @@ import { getMonaco, languageForPath, MONACO_THEME } from "../monaco";
   );
   /** Image files have no editable text view. */
   const imageOnly = $derived(previewKind === "image");
+
+  // --- text zoom (Ctrl +/-) ---------------------------------------------------
+  // The offset lives in the layout, so it survives restarts and stays this
+  // pane's alone. Every view this pane can show has to honour it: Monaco below,
+  // the markdown preview through the font-size variable it already reads, and
+  // the html/svg frame — a separate document — through a zoom message.
+  const fontDelta = $derived(pane.fontDelta ?? 0);
+  const previewFontSize = $derived(
+    paneFontSize($settings.appearance.theme.fonts.previewSize, fontDelta),
+  );
+  const frameZoom = $derived(
+    previewFontSize / ($settings.appearance.theme.fonts.previewSize || previewFontSize),
+  );
   const markdownHtml = $derived(
     viewMode === "preview" && previewKind === "markdown"
       ? renderMarkdown(previewText, previewSrv ? previewBaseUrl(previewSrv, path) : "")
@@ -180,7 +195,7 @@ import { getMonaco, languageForPath, MONACO_THEME } from "../monaco";
     readOnly: get(explorerLocked),
     lineNumbers: "off" as const,
     minimap: { enabled: false },
-    fontSize: get(settings).appearance.theme.fonts.editorSize,
+    fontSize: paneFontSize(get(settings).appearance.theme.fonts.editorSize, pane.fontDelta),
     fontFamily: fontStack(get(settings).appearance.theme.fonts.editor, "mono"),
     scrollBeyondLastLine: false,
   });
@@ -189,9 +204,19 @@ import { getMonaco, languageForPath, MONACO_THEME } from "../monaco";
   // themeing, which monaco.ts re-defines on every theme change).
   $effect(() => {
     const fonts = $settings.appearance.theme.fonts;
-    const opts = { fontSize: fonts.editorSize, fontFamily: fontStack(fonts.editor, "mono") };
+    const opts = {
+      fontSize: paneFontSize(fonts.editorSize, fontDelta),
+      fontFamily: fontStack(fonts.editor, "mono"),
+    };
     plainEditor?.updateOptions(opts);
     diffEditor?.updateOptions(opts);
+  });
+
+  // The frame is a document of its own, so its text follows the pane's zoom
+  // only if it is told to. Re-sent on every change, and again from the frame's
+  // "ready" message, since a reload or a link followed inside it starts over.
+  $effect(() => {
+    postFrameZoom(frameZoom);
   });
 
   function saveEditorState() {
@@ -445,15 +470,31 @@ import { getMonaco, languageForPath, MONACO_THEME } from "../monaco";
     openFile(path, { view: "preview", newPane: true });
   }
 
+  function postFrameZoom(zoom: number) {
+    previewFrame?.contentWindow?.postMessage({ __tmx: "zoom", zoom }, "*");
+  }
+
   function onFrameMessage(e: MessageEvent) {
     if (!previewFrame || e.source !== previewFrame.contentWindow) return;
-    const data = e.data as { __tmx?: string; pct?: number; path?: string; url?: string } | null;
+    const data = e.data as {
+      __tmx?: string;
+      pct?: number;
+      path?: string;
+      url?: string;
+      key?: string;
+    } | null;
     if (!data?.__tmx) return;
     if (data.__tmx === "ready") {
       framePath = data.path ?? "";
+      postFrameZoom(frameZoom);
       // The frame stays mounted while editing, so only restore it when it is
       // the visible view; otherwise this would move the editor instead.
       if (viewMode === "preview") applyScroll();
+    } else if (data.__tmx === "zoomKey" && data.key) {
+      // Ctrl +/- pressed inside the frame. It is a document of its own, so the
+      // keystroke never reached App.svelte's handler; apply it to this pane.
+      const k = data.key;
+      zoomPane(paneId, k === "0" ? 0 : k === "-" || k === "_" ? -FONT_STEP : FONT_STEP);
     } else if (data.__tmx === "open" && data.url) {
       // A link leaving the project. The preview is not a browser, so hand it to
       // the real one instead of stranding the pane on a page it cannot leave.
@@ -1052,6 +1093,12 @@ import { getMonaco, languageForPath, MONACO_THEME } from "../monaco";
       <span class="truncate text-[10px] text-red-400" title={saveError}>save failed</span>
     {/if}
     <div class="ml-auto flex items-center gap-0.5">
+      {#if fontDelta !== 0}
+        <span
+          class="mr-0.5 rounded bg-zinc-800 px-1 py-px text-[9px] font-semibold text-zinc-400"
+          title="Text zoomed {fontDelta > 0 ? '+' : ''}{fontDelta}px — Ctrl+0 resets"
+        >{fontDelta > 0 ? "+" : ""}{fontDelta}</span>
+      {/if}
       {#if conflict}
         <button
           class="rounded px-1.5 py-0.5 text-[11px] text-red-300 hover:bg-zinc-800"
@@ -1202,7 +1249,13 @@ import { getMonaco, languageForPath, MONACO_THEME } from "../monaco";
     <!-- Preview container stays in the DOM across view-mode toggles so the
          browser preserves its scroll position naturally. Only hidden via CSS. -->
     {#if previewKind === "markdown"}
-      <div bind:this={previewEl} class:hidden={viewMode !== "preview"} class="min-h-0 flex-1 overflow-auto bg-[var(--tmx-pv-bg)]" onscroll={captureScroll}>
+      <div
+        bind:this={previewEl}
+        class:hidden={viewMode !== "preview"}
+        class="min-h-0 flex-1 overflow-auto bg-[var(--tmx-pv-bg)]"
+        style="--tmx-font-preview-size: {previewFontSize}px"
+        onscroll={captureScroll}
+      >
         <div class="md-preview">{@html markdownHtml}</div>
       </div>
     {:else if previewKind === "html" || previewKind === "svg"}

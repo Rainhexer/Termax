@@ -8,6 +8,7 @@ import * as terminals from "./terminals";
 import { loadDir, resetTree } from "./filetree";
 import { attentionPanes, bellPanes, setFocusedPane } from "./bell";
 import { clearPaneScroll } from "./paneScroll";
+import { clampDelta } from "./paneFont";
 import { clearPreviewServers } from "./previewServer";
 
 export const projects = writable<Project[]>([]);
@@ -1130,6 +1131,24 @@ export function sendToPane(command: string) {
   }
   const paneId = addPane(null, "Shell");
   terminals.queueType(paneId, command);
+}
+
+/** Grow or shrink the text in one pane. `step` is in px; 0 resets the pane to
+ *  the theme's size. Persisted with the layout, so a zoomed pane comes back
+ *  zoomed while every new pane still opens at the default size.
+ *
+ *  Returns whether the pane exists, which is what tells the key handler to
+ *  swallow the keystroke. */
+export function zoomPane(paneId: string, step: number): boolean {
+  const tree = get(layout);
+  if (!tree) return false;
+  const pane = layoutOps.findPane(tree, paneId);
+  if (!pane) return false;
+  const next = step === 0 ? 0 : clampDelta((pane.fontDelta ?? 0) + step);
+  // Still "handled" when the size did not move: the pane is at the end of its
+  // range, and the key must not fall through to the terminal or the webview.
+  if (next !== (pane.fontDelta ?? 0)) setLayout(layoutOps.setPaneFontDelta(tree, paneId, next));
+  return true;
 }
 
 /** Turn the bell watch on/off for a pane; persisted with the layout. */

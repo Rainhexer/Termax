@@ -19,8 +19,10 @@
     focusedPaneId,
     moveActiveTab,
     paneAreaSize,
+    zoomPane,
   } from "./lib/stores";
   import { savePaneFile } from "./lib/editorSave";
+  import { FONT_STEP } from "./lib/paneFont";
   import { loadSettings, settingsOpen } from "./lib/settings";
   import { initPrListeners } from "./lib/pr";
   import { initIssueListeners } from "./lib/issues";
@@ -92,9 +94,38 @@
         }, FS_DEBOUNCE_MS),
       );
     });
+    /** The pane a keystroke belongs to: the one it was typed into, else the
+     *  focused one — which is what makes the shortcut work from the sidebar or
+     *  the tab bar too. Null when the keystroke came from a text field outside
+     *  the grid, where these keys are none of our business. */
+    const paneForEvent = (e: KeyboardEvent): string | null => {
+      const el = e.target as HTMLElement | null;
+      const inPane = el && typeof el.closest === "function" ? el.closest("[data-pane-id]") : null;
+      if (inPane) return (inPane as HTMLElement).dataset.paneId ?? null;
+      return isTextEntry(e.target) ? null : get(focusedPaneId);
+    };
+
     const onKeydown = (e: KeyboardEvent) => {
       if (!e.ctrlKey || e.altKey || e.metaKey) return;
       const key = e.key.toLowerCase();
+      // Text zoom for one pane. Handled before the text-entry guard below: the
+      // point is to resize the editor and the terminal, both of which look like
+      // text entry, and neither of which has its own meaning for these keys.
+      // "+"/"-" cover the numpad; "=" and "_" are the unshifted keys people
+      // actually press. Ctrl+0 goes back to the theme's size.
+      if (key === "+" || key === "=" || key === "-" || key === "_" || key === "0") {
+        const paneId = paneForEvent(e);
+        if (!paneId) return;
+        const step = key === "0" ? 0 : key === "-" || key === "_" ? -FONT_STEP : FONT_STEP;
+        // Only swallowed once a pane has taken it — on the home screen, or with
+        // a stale focused pane, these keys are not ours. Swallowing stops the
+        // keystroke reaching xterm (which would send it to the PTY) and Monaco,
+        // and stops the webview's own zoom.
+        if (!zoomPane(paneId, step)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
       // Ctrl+Z and Ctrl+X are undo and cut everywhere else in computing, and this
       // listener runs in the capture phase with preventDefault — so without this
       // guard it silently stole both from the Monaco editor and from every text

@@ -108,6 +108,16 @@ export function setPaneBell(node: LayoutNode, paneId: string, bell: boolean): La
   return { ...node, a: setPaneBell(node.a, paneId, bell), b: setPaneBell(node.b, paneId, bell) };
 }
 
+/** Set the font-size offset on a pane. Returns new tree. */
+export function setPaneFontDelta(node: LayoutNode, paneId: string, fontDelta: number): LayoutNode {
+  if (node.type === "pane") return node.id === paneId ? { ...node, fontDelta } : node;
+  return {
+    ...node,
+    a: setPaneFontDelta(node.a, paneId, fontDelta),
+    b: setPaneFontDelta(node.b, paneId, fontDelta),
+  };
+}
+
 export function setRatio(node: LayoutNode, splitId: string, ratio: number): LayoutNode {
   if (node.type === "pane") return node;
   if (node.id === splitId) return { ...node, ratio };
