@@ -17,13 +17,19 @@
 import { get, writable } from "svelte/store";
 import {
   collectTabPanes,
+  draggedGroupKey,
   draggedPaneId,
   draggedTabId,
+  groupKeyOf,
+  groupKeys,
   movePane,
+  movePaneToGroup,
   movePaneToNewTab,
   movePaneToTab,
+  reorderGroup,
   reorderTab,
   splitPaneAt,
+  switchGroup,
   switchTab,
   activeTabId,
   tabs,
@@ -34,8 +40,13 @@ export type DropZone = "top" | "bottom" | "left" | "right" | "center";
 /** Where the thing in hand would land if the pointer were released now. */
 export type DropTarget =
   | { kind: "pane"; paneId: string; zone: DropZone }
-  /** Onto a tab in the bar: a pane moves into it, a tab reorders before/after. */
+  /** Onto a subtab: a pane moves into it, a subtab reorders before/after.
+   *  `slot` is an index within that tab's own group, which is the row being
+   *  dragged along. */
   | { kind: "tab"; tabId: string; slot: number }
+  /** Onto a worktree tab in the top row: a pane moves into that tree's current
+   *  subtab, a worktree tab reorders before/after. */
+  | { kind: "group"; key: string; slot: number }
   /** Onto the "+" button: tear the pane off, or move the tab to the end. */
   | { kind: "newTab" }
   | null;
@@ -56,7 +67,7 @@ const SPRING_DELAY = 550;
 const captureHost = () => document.documentElement;
 
 type Gesture = {
-  kind: "pane" | "tab";
+  kind: "pane" | "tab" | "group";
   id: string;
   /** Shown in the ghost that follows the cursor. */
   label: string;
@@ -80,12 +91,17 @@ export function startPaneDrag(e: PointerEvent, paneId: string, label: string) {
   begin(e, "pane", paneId, label);
 }
 
-/** Begin a possible tab drag. */
+/** Begin a possible subtab drag. */
 export function startTabDrag(e: PointerEvent, tabId: string, label: string) {
   begin(e, "tab", tabId, label);
 }
 
-function begin(e: PointerEvent, kind: "pane" | "tab", id: string, label: string) {
+/** Begin a possible worktree-tab drag along the top row. */
+export function startGroupDrag(e: PointerEvent, key: string, label: string) {
+  begin(e, "group", key, label);
+}
+
+function begin(e: PointerEvent, kind: "pane" | "tab" | "group", id: string, label: string) {
   if (e.button !== 0) return;
   // The header strips carry buttons (close, split, bell). A press that lands on
   // one is aiming at the button, not at the pane.
@@ -138,6 +154,7 @@ function onMove(e: PointerEvent) {
     document.body.style.cursor = "grabbing";
     // Published only now, so a plain click never flickers the drag-only UI.
     if (g.kind === "pane") draggedPaneId.set(g.id);
+    else if (g.kind === "group") draggedGroupKey.set(g.id);
     else draggedTabId.set(g.id);
   }
 
@@ -200,6 +217,7 @@ function cancel() {
   }
   draggedPaneId.set(null);
   draggedTabId.set(null);
+  draggedGroupKey.set(null);
   dropTarget.set(null);
 }
 
@@ -257,9 +275,41 @@ function isLonePane(paneId: string): boolean {
 function hitTest(x: number, y: number, g: Gesture): DropTarget {
   const el = document.elementFromPoint(x, y);
 
+  const groupEl = el?.closest<HTMLElement>("[data-group-key]");
+  const groupKey = groupEl?.dataset.groupKey;
+  if (groupEl && groupKey) {
+    if (g.kind === "group") {
+      stopSpring(g);
+      const rect = groupEl.getBoundingClientRect();
+      const i = get(groupKeys).indexOf(groupKey);
+      if (i < 0) return null;
+      return { kind: "group", key: groupKey, slot: x > rect.left + rect.width / 2 ? i + 1 : i };
+    }
+    // A subtab belongs to its tree and cannot be dropped into another one: the
+    // panes inside it are already running in the old tree's directory, so the
+    // move would relabel them rather than move them.
+    if (g.kind === "tab") {
+      stopSpring(g);
+      return null;
+    }
+    springGroup(g, groupKey);
+    return { kind: "group", key: groupKey, slot: 0 };
+  }
+
+  // The worktree row's "+" makes a new tree rather than accepting a drop, but a
+  // worktree tab dragged onto it lands at the end of the row — the same gesture
+  // the subtab row's "+" offers.
+  const newTree = el?.closest<HTMLElement>("[data-new-worktree]");
+  if (newTree) {
+    stopSpring(g);
+    if (g.kind !== "group") return null;
+    return { kind: "group", key: g.id, slot: get(groupKeys).length };
+  }
+
   const plus = el?.closest<HTMLElement>("[data-new-tab]");
   if (plus) {
     stopSpring(g);
+    if (g.kind === "group") return null;
     if (g.kind === "pane" && isLonePane(g.id)) return null;
     return { kind: "newTab" };
   }
@@ -267,10 +317,21 @@ function hitTest(x: number, y: number, g: Gesture): DropTarget {
   const tabEl = el?.closest<HTMLElement>("[data-tab-id]");
   const tabId = tabEl?.dataset.tabId;
   if (tabEl && tabId) {
+    if (g.kind === "group") {
+      stopSpring(g);
+      return null;
+    }
     if (g.kind === "tab") {
       stopSpring(g);
       const rect = tabEl.getBoundingClientRect();
-      const i = get(tabs).findIndex((t) => t.id === tabId);
+      // Group-local: the row only ever shows one tree's subtabs, so the slot the
+      // user is aiming at is an index within that tree.
+      const list = get(tabs);
+      const dragged = list.find((t) => t.id === g.id);
+      const target = list.find((t) => t.id === tabId);
+      if (!dragged || !target || groupKeyOf(dragged) !== groupKeyOf(target)) return null;
+      const members = list.filter((t) => groupKeyOf(t) === groupKeyOf(target));
+      const i = members.findIndex((t) => t.id === tabId);
       if (i < 0) return null;
       return { kind: "tab", tabId, slot: x > rect.left + rect.width / 2 ? i + 1 : i };
     }
@@ -279,7 +340,7 @@ function hitTest(x: number, y: number, g: Gesture): DropTarget {
   }
 
   stopSpring(g);
-  if (g.kind === "tab") return null;
+  if (g.kind === "tab" || g.kind === "group") return null;
 
   const paneEl = el?.closest<HTMLElement>("[data-pane-id]");
   const paneId = paneEl?.dataset.paneId;
@@ -311,21 +372,42 @@ function springLoad(g: Gesture, tabId: string) {
   g.springTimer = setTimeout(() => switchTab(tabId), SPRING_DELAY);
 }
 
+/** Spring-load a worktree tab, so hovering it with a pane in hand opens that
+ *  tree and the pane can be dropped at an exact spot inside its grid. */
+function springGroup(g: Gesture, key: string) {
+  if (g.springTabId === key) return;
+  stopSpring(g);
+  const active = get(tabs).find((t) => t.id === get(activeTabId));
+  if (active && groupKeyOf(active) === key) return;
+  g.springTabId = key;
+  g.springTimer = setTimeout(() => switchGroup(key), SPRING_DELAY);
+}
+
 function stopSpring(g: Gesture) {
   clearTimeout(g.springTimer);
   g.springTimer = undefined;
   g.springTabId = null;
 }
 
-function apply(kind: "pane" | "tab", id: string, target: DropTarget) {
+function apply(kind: "pane" | "tab" | "group", id: string, target: DropTarget) {
   if (!target) return;
+  if (kind === "group") {
+    if (target.kind === "group") reorderGroup(id, target.slot);
+    return;
+  }
   if (kind === "tab") {
     if (target.kind === "tab") reorderTab(id, target.slot);
-    else if (target.kind === "newTab") reorderTab(id, get(tabs).length);
+    else if (target.kind === "newTab") {
+      const list = get(tabs);
+      const dragged = list.find((t) => t.id === id);
+      if (dragged) reorderTab(id, list.filter((t) => groupKeyOf(t) === groupKeyOf(dragged)).length);
+    }
     return;
   }
   if (target.kind === "newTab") {
     movePaneToNewTab(id);
+  } else if (target.kind === "group") {
+    movePaneToGroup(id, target.key);
   } else if (target.kind === "tab") {
     movePaneToTab(id, target.tabId);
   } else if (target.kind === "pane") {

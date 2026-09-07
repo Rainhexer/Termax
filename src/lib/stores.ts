@@ -224,6 +224,10 @@ export function toggleMaximizedPane(paneId: string) {
 export const draggedPaneId = writable<string | null>(null);
 /** The tab currently in hand, likewise. */
 export const draggedTabId = writable<string | null>(null);
+/** Group key of the worktree tab being dragged along the top row; null when
+ *  none. Separate from `draggedTabId` because the two rows accept different
+ *  things: a subtab never leaves its tree, a group never enters one. */
+export const draggedGroupKey = writable<string | null>(null);
 
 const untrackedKey = (projectId: string) => `termax.showUntracked.${projectId}`;
 const stagedKey = (projectId: string) => `termax.showStaged.${projectId}`;
@@ -255,6 +259,69 @@ export function toggleUnstaged() {
     return next;
   });
 }
+
+// --- Worktree groups --------------------------------------------------------
+//
+// A worktree-bound tab used to be a peer of every other tab in one flat bar,
+// which made "which tree am I typing in?" a per-tab question and quietly capped
+// each worktree at the one tab that created it. Tabs are grouped by their
+// `worktreeId` instead: the group is the worktree, its tabs are subtabs of it.
+//
+// Nothing new is persisted. The grouping is derived from the `worktreeId` that
+// `Tab` has always carried, so an old workspace opens as one root group and a
+// tab that loses its worktree simply rejoins it.
+
+/** Group key for tabs with no `worktreeId`: the project's own working tree. */
+export const ROOT_GROUP = "root";
+
+/** Which group a tab belongs to. */
+export function groupKeyOf(tab: Tab): string {
+  return tab.worktreeId ?? ROOT_GROUP;
+}
+
+/** Group keys in bar order.
+ *
+ *  The root group leads and is always listed, even with no tab of its own: it is
+ *  how you get back to the project after closing its last tab, and a first entry
+ *  that comes and goes is one you cannot aim at. */
+export const groupKeys = derived(tabs, ($tabs) => {
+  const keys = [ROOT_GROUP];
+  for (const t of $tabs) {
+    const key = groupKeyOf(t);
+    if (!keys.includes(key)) keys.push(key);
+  }
+  return keys;
+});
+
+/** The group the active tab is in. */
+export const activeGroupKey = derived([tabs, activeTabId], ([$tabs, id]) => {
+  const tab = $tabs.find((t) => t.id === id);
+  return tab ? groupKeyOf(tab) : ROOT_GROUP;
+});
+
+/** Tabs of a group, in bar order. */
+export function tabsInGroup(key: string): Tab[] {
+  return get(tabs).filter((t) => groupKeyOf(t) === key);
+}
+
+/** Subtabs of the group on screen. */
+export const groupTabs = derived([tabs, activeGroupKey], ([$tabs, key]) =>
+  $tabs.filter((t) => groupKeyOf(t) === key),
+);
+
+/** Whether the bar splits into a worktree row plus a subtab row.
+ *
+ *  A project with no worktree open keeps the single strip it always had. Also
+ *  true mid-drag, so a tab or pane in flight always has both rows to aim at. */
+export const groupBarVisible = derived(
+  [groupKeys, draggedPaneId, draggedTabId, draggedGroupKey],
+  ([keys, pane, tab, group]) => keys.length > 1 || !!pane || !!tab || !!group,
+);
+
+/** Last subtab looked at in each group, so returning to a worktree lands where
+ *  you left it. Session-lived on purpose: a remembered id that did not survive a
+ *  restart costs one wrong-but-valid tab, which is not worth a persisted field. */
+const lastTabByGroup = new Map<string, string>();
 
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -331,6 +398,7 @@ export function collectTabPanes(tab: Tab): string[] {
 /** Load a tab's grid into the live stores (does not touch other tabs). */
 function activateTab(tab: Tab) {
   activeTabId.set(tab.id);
+  lastTabByGroup.set(groupKeyOf(tab), tab.id);
   layout.set(tab.layout);
   focusedPaneId.set(tab.focusedPaneId ?? layoutOps.collectPanes(tab.layout)[0]?.id ?? null);
 }
@@ -345,12 +413,16 @@ export function switchTab(id: string) {
   persistLayout();
 }
 
-/** Next unused "Tab N" name.
+/** Next unused "Tab N" name within one group.
  *
  *  Counting existing tabs produced duplicates: close Tab 2 of 3 and the next new
- *  tab is also "Tab 3". Scan for the lowest free number instead. */
-function nextTabTitle(list: Tab[]): string {
-  const taken = new Set(list.map((t) => t.title));
+ *  tab is also "Tab 3". Scan for the lowest free number instead.
+ *
+ *  Scoped to the group because the number is read next to the worktree it
+ *  belongs to: every tree starts at "Tab 1" rather than continuing a count the
+ *  user cannot see the rest of. */
+function nextTabTitle(list: Tab[], key: string): string {
+  const taken = new Set(list.filter((t) => groupKeyOf(t) === key).map((t) => t.title));
   for (let n = 1; ; n++) {
     const candidate = `Tab ${n}`;
     if (!taken.has(candidate)) return candidate;
@@ -385,7 +457,7 @@ export function newTab(
   const worktreeId = opts.worktreeId === undefined ? inherited : (opts.worktreeId ?? undefined);
   const tab: Tab = {
     id: crypto.randomUUID(),
-    title: opts.tabTitle ?? nextTabTitle(get(tabs)),
+    title: opts.tabTitle ?? nextTabTitle(get(tabs), worktreeId ?? ROOT_GROUP),
     layout: pane,
     focusedPaneId: pane.id,
     ...(worktreeId ? { worktreeId } : {}),
@@ -409,14 +481,29 @@ export function closeTab(id: string) {
   const idx = list.findIndex((t) => t.id === id);
   const remaining = list.filter((t) => t.id !== id);
   const wasActive = get(activeTabId) === id;
+  const key = groupKeyOf(tab);
+  if (lastTabByGroup.get(key) === id) lastTabByGroup.delete(key);
   tabs.set(remaining);
-  if (wasActive) activateTab(remaining[Math.min(idx, remaining.length - 1)]);
+  if (wasActive) {
+    // Land on the nearest surviving subtab of the same worktree. Falling through
+    // to the next tab by position would drop the user into another tree — a
+    // different branch and a different set of files — for closing one tab.
+    const near =
+      remaining.slice(idx).find((t) => groupKeyOf(t) === key) ??
+      [...remaining.slice(0, idx)].reverse().find((t) => groupKeyOf(t) === key);
+    activateTab(near ?? remaining[Math.min(idx, remaining.length - 1)]);
+  }
   persistLayout();
 }
 
-/** Switch to the tab `dir` steps from the active one, wrapping around. */
+/** Switch to the subtab `dir` steps from the active one, wrapping around inside
+ *  the active worktree.
+ *
+ *  Worktree-local rather than global: a shortcut that walked out of the tree you
+ *  are working in would change the branch, the files and the Changes panel under
+ *  you without saying so. Crossing trees is {@link cycleGroup}. */
 export function cycleTab(dir: 1 | -1) {
-  const list = get(tabs);
+  const list = tabsInGroup(get(activeGroupKey));
   if (list.length <= 1) return;
   const idx = list.findIndex((t) => t.id === get(activeTabId));
   if (idx === -1) return;
@@ -424,24 +511,36 @@ export function cycleTab(dir: 1 | -1) {
   switchTab(next.id);
 }
 
-/** Move the tab `id` to `toIndex` in the bar (index in the pre-move list). */
+/** Move a subtab to `toIndex` within its own group (index in the pre-move list
+ *  *of that group*, which is the row the user is dragging along).
+ *
+ *  The tab never leaves its worktree: the flat array is permuted only across the
+ *  slots that group already occupies, so no other group's order moves and no tab
+ *  silently changes the tree its new panes would spawn in. */
 export function reorderTab(id: string, toIndex: number) {
   const list = get(tabs);
-  const from = list.findIndex((t) => t.id === id);
+  const tab = list.find((t) => t.id === id);
+  if (!tab) return;
+  const key = groupKeyOf(tab);
+  const slots = list.flatMap((t, i) => (groupKeyOf(t) === key ? [i] : []));
+  const members = slots.map((i) => list[i]);
+  const from = members.findIndex((t) => t.id === id);
   if (from === -1) return;
-  const clamped = Math.max(0, Math.min(list.length, toIndex));
+  const clamped = Math.max(0, Math.min(members.length, toIndex));
   // Dropping just before or just after itself is a no-op.
   if (clamped === from || clamped === from + 1) return;
-  const next = [...list];
-  const [tab] = next.splice(from, 1);
+  const next = [...members];
+  next.splice(from, 1);
   next.splice(clamped > from ? clamped - 1 : clamped, 0, tab);
-  tabs.set(next);
+  const out = [...list];
+  slots.forEach((slot, i) => (out[slot] = next[i]));
+  tabs.set(out);
   persistLayout();
 }
 
-/** Shift the active tab one slot left (-1) or right (1). */
+/** Shift the active tab one slot left (-1) or right (1) among its group's subtabs. */
 export function moveActiveTab(dir: 1 | -1) {
-  const list = get(tabs);
+  const list = tabsInGroup(get(activeGroupKey));
   const idx = list.findIndex((t) => t.id === get(activeTabId));
   if (idx === -1) return;
   const target = idx + dir;
@@ -515,6 +614,16 @@ export function movePaneToTab(paneId: string, toTabId: string) {
   persistLayout();
 }
 
+/** Move a pane into another worktree group, landing on the subtab last used
+ *  there. The pane keeps the shell it already has — see `PaneInstance.root`. */
+export function movePaneToGroup(paneId: string, key: string) {
+  const members = tabsInGroup(key);
+  const remembered = lastTabByGroup.get(key);
+  const target = members.find((t) => t.id === remembered) ?? members[0];
+  if (!target) return;
+  movePaneToTab(paneId, target.id);
+}
+
 /** Tear a pane out into a brand-new tab and switch to it. */
 export function movePaneToNewTab(paneId: string) {
   syncActiveTab();
@@ -530,6 +639,11 @@ export function movePaneToNewTab(paneId: string) {
     title: pane.title,
     layout: pane,
     focusedPaneId: pane.id,
+    // Inherit the source tab's worktree. Without it, tearing a pane out of a
+    // worktree tab produced a tab that claimed the project root while the pane
+    // inside it was still running in the tree — so the file tree, the Changes
+    // panel and every pane opened beside it described the wrong branch.
+    ...(from.worktreeId ? { worktreeId: from.worktreeId } : {}),
   };
   tabs.set([
     ...list.map((t) =>
@@ -552,6 +666,64 @@ export function renameTab(id: string, title: string) {
   const name = title.trim();
   if (!name) return;
   tabs.update((list) => list.map((t) => (t.id === id ? { ...t, title: name } : t)));
+  persistLayout();
+}
+
+/** Put a worktree group on screen, at the subtab last looked at inside it.
+ *
+ *  A group with no tabs left gets one rather than being inert: the root group is
+ *  always listed, and clicking a worktree in the bar has to mean "work here". */
+export function switchGroup(key: string) {
+  const members = tabsInGroup(key);
+  if (!members.length) {
+    newTab({ worktreeId: key === ROOT_GROUP ? null : key });
+    return;
+  }
+  if (get(activeGroupKey) === key) return;
+  const remembered = lastTabByGroup.get(key);
+  switchTab((members.find((t) => t.id === remembered) ?? members[0]).id);
+}
+
+/** Switch to the group `dir` steps along the bar, wrapping around. */
+export function cycleGroup(dir: 1 | -1) {
+  const keys = get(groupKeys);
+  if (keys.length <= 1) return;
+  const idx = keys.indexOf(get(activeGroupKey));
+  if (idx === -1) return;
+  switchGroup(keys[(idx + dir + keys.length) % keys.length]);
+}
+
+/** Close every subtab of a worktree group.
+ *
+ *  The directory is never touched — that is `removeWorktree` in worktrees.ts.
+ *  This only stops working in it. The root group has no close: it is the
+ *  project, and a window with no group would have nowhere to put a tab. */
+export function closeGroup(key: string) {
+  if (key === ROOT_GROUP) return;
+  const members = tabsInGroup(key);
+  if (!members.length) return;
+  // `closeTab` refuses to remove the last tab in the window, so a group that
+  // holds all of them needs somewhere for the close to land first.
+  if (members.length === get(tabs).length) newTab({ worktreeId: null });
+  for (const t of members) closeTab(t.id);
+  lastTabByGroup.delete(key);
+}
+
+/** Move a worktree group to `toIndex` in the bar (index in the pre-move key
+ *  list). The root group is pinned first and cannot be displaced. */
+export function reorderGroup(key: string, toIndex: number) {
+  if (key === ROOT_GROUP) return;
+  const keys = get(groupKeys);
+  const from = keys.indexOf(key);
+  if (from <= 0) return;
+  // 1 rather than 0: nothing sorts before the project's own tree.
+  const clamped = Math.max(1, Math.min(keys.length, toIndex));
+  if (clamped === from || clamped === from + 1) return;
+  const next = [...keys];
+  next.splice(from, 1);
+  next.splice(clamped > from ? clamped - 1 : clamped, 0, key);
+  const list = get(tabs);
+  tabs.set(next.flatMap((k) => list.filter((t) => groupKeyOf(t) === k)));
   persistLayout();
 }
 
@@ -683,9 +855,17 @@ export async function closeProject() {
   if (!current) return;
   clearTimeout(saveTimer);
   syncActiveTab();
-  const workspace: Workspace = { tabs: get(tabs), activeTabId: get(activeTabId)! };
+  // With `worktrees` omitted, closing a project wrote a workspace whose tabs
+  // referenced records that were no longer in the file — so every worktree tab
+  // came back bound to nothing and fell back to the project root on reopen.
+  const workspace: Workspace = {
+    tabs: get(tabs),
+    activeTabId: get(activeTabId)!,
+    worktrees: get(worktrees),
+  };
   await ipc.saveLayout(current.id, workspace).catch(() => {});
   terminals.destroyAll();
+  lastTabByGroup.clear();
   vaultRuns.set(new Map());
   await ipc.stopSession().catch(() => {});
   sessionReady.set(false);
@@ -760,47 +940,87 @@ export interface VaultRun {
   exitCode: number | null;
 }
 
-/** Vault command id → its last run. Commands never run are absent.
+/** Run key → its last run. Commands never run are absent.
  *  Also the command→pane link: while the pane lives, re-running reuses it. */
 export const vaultRuns = writable<Map<string, VaultRun>>(new Map());
 
-function updateRun(cmdId: string, patch: Partial<VaultRun>) {
+/** Key a vault run by the command *and* the root it ran in.
+ *
+ *  Keyed by command alone, one saved command remembered a single terminal for
+ *  the whole project: pressing it from a worktree tab jumped to whichever tree
+ *  it had last run in and typed the command there, so `npm test` in a feature
+ *  worktree ran against master's files. A command is per directory, because that
+ *  is what a command means. */
+function runKey(cmdId: string, root: string | null): string {
+  return `${root ?? ""}\u0000${cmdId}`;
+}
+
+function updateRun(key: string, patch: Partial<VaultRun>) {
   vaultRuns.update((m) => {
-    const prev = m.get(cmdId) ?? { paneId: null, state: "done" as VaultRunState, exitCode: null };
-    return new Map(m).set(cmdId, { ...prev, ...patch });
+    const prev = m.get(key) ?? { paneId: null, state: "done" as VaultRunState, exitCode: null };
+    return new Map(m).set(key, { ...prev, ...patch });
   });
 }
 
-/** Command ids whose run lives in `paneId`. */
+/** Runs for the root on screen, keyed by command id — what the vault list reads,
+ *  so a command shows the state of *its* run here and not one in another tree. */
+export const activeVaultRuns = derived([vaultRuns, activeRoot], ([runs, root]) => {
+  const prefix = runKey("", root);
+  const out = new Map<string, VaultRun>();
+  for (const [key, run] of runs) {
+    if (key.startsWith(prefix)) out.set(key.slice(prefix.length), run);
+  }
+  return out;
+});
+
+/** Run keys whose run lives in `paneId`. */
 function runsInPane(paneId: string): string[] {
   return [...get(vaultRuns)].filter(([, r]) => r.paneId === paneId).map(([id]) => id);
+}
+
+/** Group a pane's tab belongs to; null once the pane is gone.
+ *
+ *  A pane can be dragged into a tab on another worktree, taking its still-valid
+ *  run link with it. The key alone cannot see that, so the link is also checked
+ *  against where the pane actually sits now. */
+function groupOfPane(paneId: string): string | null {
+  const owner = get(tabs).find((t) => collectTabPanes(t).includes(paneId));
+  return owner ? groupKeyOf(owner) : null;
 }
 
 /** Drop the pane link. A run still going when its pane disappears is `stopped`;
  *  a finished one keeps its done/failed result. */
 function unlinkPane(paneId: string) {
-  for (const cmdId of runsInPane(paneId)) {
-    const run = get(vaultRuns).get(cmdId)!;
+  for (const key of runsInPane(paneId)) {
+    const run = get(vaultRuns).get(key)!;
     const ended = run.state === "done" || run.state === "failed" || run.state === "idle";
-    updateRun(cmdId, { paneId: null, state: ended ? run.state : "stopped" });
+    updateRun(key, { paneId: null, state: ended ? run.state : "stopped" });
   }
 }
 
 // Mirror pane run state onto the commands running there.
 terminals.paneRuns.subscribe((runs) => {
-  for (const [cmdId, run] of get(vaultRuns)) {
+  for (const [key, run] of get(vaultRuns)) {
     if (!run.paneId) continue;
     const paneRun = runs.get(run.paneId);
     if (paneRun && (paneRun.state !== run.state || paneRun.exitCode !== run.exitCode)) {
-      updateRun(cmdId, { state: paneRun.state, exitCode: paneRun.exitCode });
+      updateRun(key, { state: paneRun.state, exitCode: paneRun.exitCode });
     }
   }
 });
 
+/** Run a saved command in the worktree the user is looking at.
+ *
+ *  The pane is reused only when it is still in this worktree's group; a link
+ *  that has drifted elsewhere (its pane was dragged into another tree's tab) is
+ *  dropped and a fresh pane opened here, rather than pulling the user across the
+ *  bar and running the command against another branch's files. */
 export function runVaultCommand(cmd: VaultCommand) {
   const jump = (get(appSettings).behavior.vaultRunBehavior ?? "stay") === "jump";
-  const linked = get(vaultRuns).get(cmd.id)?.paneId;
-  if (linked && terminals.isAlive(linked)) {
+  const key = runKey(cmd.id, get(activeRoot));
+  const group = get(activeGroupKey);
+  const linked = get(vaultRuns).get(key)?.paneId;
+  if (linked && terminals.isAlive(linked) && groupOfPane(linked) === group) {
     // A live link is always reused — never open a second terminal for the
     // same command. Only the reveal is governed by the setting.
     if (!jump) {
@@ -817,6 +1037,10 @@ export function runVaultCommand(cmd: VaultCommand) {
     // The terminal outlived its pane (closed from a tab we no longer hold):
     // drop the stale link and open a fresh pane below.
     unlinkPane(linked);
+  } else if (linked) {
+    // Alive but no longer in this worktree, or gone entirely. Either way the
+    // link cannot serve a run here.
+    unlinkPane(linked);
   }
   if (!jump) {
     // Stay in place: open the pane in the background and keep the current
@@ -826,12 +1050,12 @@ export function runVaultCommand(cmd: VaultCommand) {
     if (previousFocus && layoutOps.findPane(get(layout), previousFocus)) {
       focusedPaneId.set(previousFocus);
     }
-    updateRun(cmd.id, { paneId, state: "starting", exitCode: null });
+    updateRun(key, { paneId, state: "starting", exitCode: null });
     terminals.queueRun(paneId, cmd.command, { focus: false });
     return;
   }
   const paneId = addPane(launchFor(cmd.terminalType), launcherById(cmd.terminalType).name);
-  updateRun(cmd.id, { paneId, state: "starting", exitCode: null });
+  updateRun(key, { paneId, state: "starting", exitCode: null });
   terminals.queueRun(paneId, cmd.command);
 }
 
@@ -855,14 +1079,14 @@ export function revealPane(paneId: string): boolean {
 focusedPaneId.subscribe((id) => {
   if (!id) return;
   terminals.acknowledgeRun(id);
-  for (const cmdId of runsInPane(id)) {
-    if (get(vaultRuns).get(cmdId)!.state === "done") updateRun(cmdId, { state: "idle" });
+  for (const key of runsInPane(id)) {
+    if (get(vaultRuns).get(key)!.state === "done") updateRun(key, { state: "idle" });
   }
 });
 
-/** Jump to the terminal a vault command is running in. */
+/** Jump to the terminal this worktree's run of a vault command lives in. */
 export function revealVaultCommand(cmdId: string): boolean {
-  const paneId = get(vaultRuns).get(cmdId)?.paneId;
+  const paneId = get(vaultRuns).get(runKey(cmdId, get(activeRoot)))?.paneId;
   if (!paneId) return false;
   if (revealPane(paneId)) return true;
   // Pane vanished without us seeing it close: drop the stale link.
@@ -1302,6 +1526,14 @@ export const tabsWithAttention = derived(
     return out;
   },
 );
+
+/** Group keys holding at least one ringing pane; drives the worktree row pulse,
+ *  so a tree whose agent wants input says so from the tab you are not in. */
+export const groupsWithAttention = derived([tabs, tabsWithAttention], ([$tabs, ringing]) => {
+  const out = new Set<string>();
+  for (const t of $tabs) if (ringing.has(t.id)) out.add(groupKeyOf(t));
+  return out;
+});
 
 /** Wire global PTY listeners; pane auto-closes when its process exits. */
 export function initListeners() {

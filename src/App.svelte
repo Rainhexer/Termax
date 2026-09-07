@@ -15,8 +15,10 @@
     refreshChanges,
     addPane,
     fsTick,
+    cycleGroup,
     cycleTab,
     focusedPaneId,
+    groupBarVisible,
     moveActiveTab,
     paneAreaSize,
     zoomPane,
@@ -34,6 +36,7 @@
   import SettingsModal from "./lib/components/SettingsModal.svelte";
   import ErrorBoundary from "./lib/components/ErrorBoundary.svelte";
   import TitleBar from "./lib/components/TitleBar.svelte";
+  import TabBar from "./lib/components/TabBar.svelte";
 
   /** Whether a keystroke is being typed into an editable field.
    *
@@ -106,8 +109,25 @@
     };
 
     const onKeydown = (e: KeyboardEvent) => {
-      if (!e.ctrlKey || e.altKey || e.metaKey) return;
+      if (!e.ctrlKey || e.metaKey) return;
       const key = e.key.toLowerCase();
+      // Ctrl+Alt+Z/X steps between worktrees, mirroring Ctrl+Z/X for the tabs
+      // inside one. Its own modifier because crossing a tree changes the branch,
+      // the files and the Changes panel — not something tab cycling should do by
+      // running off the end of a row. Alt rather than a bare Ctrl letter because
+      // every unshifted one worth having (Ctrl+W deletes a word, Ctrl+Q is XON)
+      // is a key people press inside their shells all day.
+      if (e.altKey) {
+        if (isTextEntry(e.target)) return;
+        if (key === "z") {
+          e.preventDefault();
+          cycleGroup(-1);
+        } else if (key === "x") {
+          e.preventDefault();
+          cycleGroup(1);
+        }
+        return;
+      }
       // Text zoom for one pane. Handled before the text-entry guard below: the
       // point is to resize the editor and the terminal, both of which look like
       // text entry, and neither of which has its own meaning for these keys.
@@ -131,7 +151,8 @@
       // guard it silently stole both from the Monaco editor and from every text
       // field in the app.
       if (isTextEntry(e.target)) return;
-      // Ctrl+Z/X cycles tabs; adding Shift moves the active tab instead.
+      // Ctrl+Z/X cycles the tabs of the worktree you are in; adding Shift moves
+      // the active tab instead.
       if (key === "z") {
         e.preventDefault();
         if (e.shiftKey) moveActiveTab(-1);
@@ -172,6 +193,11 @@
     </ErrorBoundary>
     <div class="flex min-w-0 flex-1 flex-col">
       <TitleBar />
+      {#if $groupBarVisible}
+        <ErrorBoundary label="Tab bar" compact>
+          <TabBar />
+        </ErrorBoundary>
+      {/if}
       <main class="flex min-h-0 flex-1 flex-col">
         {#if $sessionError}
           <!-- Without this, a project whose folder was deleted or unmounted still

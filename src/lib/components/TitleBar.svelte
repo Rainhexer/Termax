@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import { activeProject } from "../stores";
+  import { activeProject, groupBarVisible } from "../stores";
   import ErrorBoundary from "./ErrorBoundary.svelte";
   import TabBar from "./TabBar.svelte";
+  import WorktreeBar from "./WorktreeBar.svelte";
 
   const win = getCurrentWindow();
 
@@ -31,9 +32,20 @@
      attribute must sit on the exact element under the pointer, never inherited. -->
 <header class="flex h-9 shrink-0 items-stretch border-b border-zinc-800 bg-zinc-950" data-tauri-drag-region>
   {#if $activeProject}
-    <ErrorBoundary label="Tab bar" compact>
-      <TabBar />
-    </ErrorBoundary>
+    <!-- One strip while the project root is the only tree in play — the look this
+         bar has always had. Once a worktree is open the strip becomes the
+         worktree row and the tabs move to their own row below (see App.svelte),
+         so a tab always says which tree it belongs to without having to fit that
+         into its own label. -->
+    {#if $groupBarVisible}
+      <ErrorBoundary label="Worktree bar" compact>
+        <WorktreeBar />
+      </ErrorBoundary>
+    {:else}
+      <ErrorBoundary label="Tab bar" compact>
+        <TabBar inline />
+      </ErrorBoundary>
+    {/if}
   {/if}
 
   <!-- All leftover width is grabbable; without it the window could only be
