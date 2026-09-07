@@ -62,6 +62,62 @@ sidebarSection.subscribe((section) => {
   }
 });
 
+/** Whether the pinned Changes panel is collapsed to its header. Collapsed, the
+ *  header still carries the file count and the +/- totals, so the sidebar can
+ *  give the whole of its height to the section above without losing the number
+ *  people actually watch. */
+const CHANGES_COLLAPSED_KEY = "termax.changesCollapsed";
+
+function readChangesCollapsed(): boolean {
+  try {
+    return localStorage.getItem(CHANGES_COLLAPSED_KEY) === "true";
+  } catch {
+    // A private-mode/quota failure must not break the sidebar.
+    return false;
+  }
+}
+
+export const changesCollapsed = writable<boolean>(readChangesCollapsed());
+
+changesCollapsed.subscribe((collapsed) => {
+  try {
+    localStorage.setItem(CHANGES_COLLAPSED_KEY, String(collapsed));
+  } catch {
+    // As above: the choice just doesn't survive a restart.
+  }
+});
+
+export const toggleChangesCollapsed = () => changesCollapsed.update((v) => !v);
+
+/** Height, in px, of the scrollable changed-files list. Dragged via a handle
+ *  on the list's bottom edge; persisted so the choice survives a restart. */
+const CHANGES_HEIGHT_KEY = "termax.changesHeight";
+export const CHANGES_MIN_HEIGHT = 80;
+export const CHANGES_MAX_HEIGHT = 600;
+const CHANGES_DEFAULT_HEIGHT = 240; // matches the old fixed max-h-60
+
+function readChangesHeight(): number {
+  try {
+    const raw = Number(localStorage.getItem(CHANGES_HEIGHT_KEY));
+    if (Number.isFinite(raw) && raw > 0) {
+      return Math.min(CHANGES_MAX_HEIGHT, Math.max(CHANGES_MIN_HEIGHT, raw));
+    }
+  } catch {
+    // A private-mode/quota failure must not break the sidebar.
+  }
+  return CHANGES_DEFAULT_HEIGHT;
+}
+
+export const changesHeight = writable<number>(readChangesHeight());
+
+changesHeight.subscribe((height) => {
+  try {
+    localStorage.setItem(CHANGES_HEIGHT_KEY, String(height));
+  } catch {
+    // As above: the choice just doesn't survive a restart.
+  }
+});
+
 /** Change tracking for one root. */
 export interface RootGit {
   status: GitStatus | null;

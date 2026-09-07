@@ -1,7 +1,11 @@
 <script lang="ts">
   import {
     changes,
+    changesCollapsed,
     changesError,
+    changesHeight,
+    CHANGES_MIN_HEIGHT,
+    CHANGES_MAX_HEIGHT,
     fetchRemote,
     gitBusy,
     gitError,
@@ -20,6 +24,7 @@
     showUntracked,
     showStaged,
     showUnstaged,
+    toggleChangesCollapsed,
     toggleUntracked,
     toggleStaged,
     toggleUnstaged,
@@ -30,6 +35,40 @@
 
   let listEl = $state<HTMLDivElement>();
   let flashPath = $state<string | null>(null);
+
+  // Drag the section's top border to resize the list. Live height stays local while
+  // dragging so it doesn't churn the store (and its debounced disk write) on
+  // every pointer move; the store only updates on release.
+  let dragHeight = $state<number | null>(null);
+  const listHeight = $derived(dragHeight ?? $changesHeight);
+
+  function startResize(e: PointerEvent) {
+    e.preventDefault();
+    const handle = e.currentTarget as HTMLElement;
+    const startY = e.clientY;
+    const startHeight = $changesHeight;
+    handle.setPointerCapture(e.pointerId);
+    dragHeight = startHeight;
+
+    const onMove = (ev: PointerEvent) => {
+      dragHeight = Math.min(
+        CHANGES_MAX_HEIGHT,
+        Math.max(CHANGES_MIN_HEIGHT, startHeight + startY - ev.clientY),
+      );
+    };
+    const onUp = () => {
+      handle.releasePointerCapture(e.pointerId);
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+      handle.removeEventListener("pointercancel", onUp);
+      const final = dragHeight ?? startHeight;
+      dragHeight = null;
+      changesHeight.set(final);
+    };
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+    handle.addEventListener("pointercancel", onUp);
+  }
 
   // Branch switcher dropdown state.
   let branchMenuOpen = $state(false);
@@ -198,9 +237,114 @@
       return true;
     }),
   );
+
+  // Collapsed, the header is all that is left of the panel, so it carries the
+  // numbers the list would have shown: how many files, and the line totals.
+  let totalAdded = $derived(visible.reduce((n, c) => n + c.added, 0));
+  let totalRemoved = $derived(visible.reduce((n, c) => n + c.removed, 0));
 </script>
 
-<div class="flex flex-col gap-1">
+{#snippet branchSwitcher()}
+  {#if $gitStatus}
+    <div class="relative min-w-0 shrink" bind:this={branchAnchor}>
+      <button
+        class="flex min-w-0 max-w-full items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold hover:bg-emerald-900/60 disabled:opacity-50 {$gitStatus.detached
+          ? 'bg-amber-950/60 text-amber-400'
+          : 'bg-emerald-950/60 text-emerald-400'}"
+        title={$gitStatus.detached
+          ? `Not on a branch — HEAD is detached at ${$gitStatus.branch}. Commits made here belong to no branch until you create one. Click to switch to a branch.`
+          : "Switch branch"}
+        disabled={$gitBusy}
+        onclick={toggleBranchMenu}
+      >
+        <!-- In detached state git.rs puts the short SHA in `branch`, so the
+             old label read "HEAD (a1b2c3d)" — which looks like a branch named
+             HEAD. Say what it actually is. -->
+        <span class="min-w-0 truncate">{$gitStatus.detached ? `detached @ ${$gitStatus.branch}` : $gitStatus.branch}</span>
+        <span class="shrink-0 text-[8px] text-emerald-500/70">▾</span>
+      </button>
+
+      {#if branchMenuOpen}
+        <div
+          bind:this={branchMenuEl}
+          class="absolute left-0 z-20 w-56 max-h-72 overflow-hidden rounded-md border border-zinc-700 bg-zinc-900 shadow-xl shadow-black/50
+            {branchMenuUp ? 'bottom-full mb-1' : 'top-full mt-1'}
+            {branchMenuMeasured ? '' : 'invisible'}"
+        >
+          {#if $gitStatus.remoteUrl}
+            <button
+              class="flex w-full items-center gap-1.5 border-b border-zinc-800 px-2 py-1.5 text-left text-[11px] text-zinc-300 hover:bg-zinc-800"
+              title={`Open ${$gitStatus.branch} on ${$gitStatus.remoteUrl}`}
+              onclick={() => {
+                branchMenuOpen = false;
+                openBranchOnRemote();
+              }}
+            >
+              <span class="text-zinc-500">↗</span>
+              <span class="min-w-0 flex-1 truncate">View branch on remote</span>
+            </button>
+          {/if}
+          <div class="border-b border-zinc-800 p-1">
+            <input
+              class="w-full rounded bg-zinc-800 px-2 py-1 text-[11px] text-zinc-200 placeholder:text-zinc-600 focus:outline-none"
+              placeholder="Switch branch…"
+              bind:value={branchFilter}
+              onmousedown={(e) => e.stopPropagation()}
+            />
+          </div>
+          <div class="max-h-52 overflow-y-auto py-0.5">
+            {#each filteredBranches as b (b)}
+              <!-- A branch checked out in another worktree cannot be checked
+                   out here at all, so say so before the click: selecting it
+                   goes to that worktree's tab instead. -->
+              {@const elsewhere = $branchesElsewhere.get(b)}
+              <button
+                class="flex w-full items-center gap-1.5 px-2 py-1 text-left font-mono text-[11px] hover:bg-zinc-800
+                  {b === $gitStatus.branch ? 'text-emerald-400' : 'text-zinc-300'}"
+                title={elsewhere ? `Checked out in ${elsewhere} — go to that tab` : `Switch to ${b}`}
+                onclick={() => pickBranch(b)}
+              >
+                <span class="w-2.5 shrink-0 text-emerald-400">{b === $gitStatus.branch ? "✓" : ""}</span>
+                <span class="min-w-0 flex-1 truncate">{b}</span>
+                {#if elsewhere}
+                  <span
+                    class="shrink-0 text-[10px] text-zinc-500"
+                    title="Checked out in another worktree — picking this goes there"
+                  >↗ worktree</span>
+                {/if}
+              </button>
+            {:else}
+              {#if branchError}
+                <p class="px-2 py-1.5 text-[11px] text-red-400">Couldn't list branches.</p>
+                <p class="px-2 pb-1.5 font-mono text-[10px] text-red-300/80">{branchError}</p>
+              {:else}
+                <p class="px-2 py-1.5 text-[11px] text-zinc-600">
+                  {branchFilter.trim() ? "No matching branches" : "No other branches"}
+                </p>
+              {/if}
+            {/each}
+          </div>
+        </div>
+      {/if}
+    </div>
+  {/if}
+{/snippet}
+
+<div class="relative flex flex-col gap-1">
+  <!-- The line separating this section from the tree above it *is* the resize
+       handle: pinned to the sidebar's bottom, the panel has no bottom edge to
+       drag against, so it resizes from the top like the sidebar resizes from its
+       right edge. The strip is invisible until hover/drag and reaches out over
+       the wrapper's padding (-inset-x-3 / -top-4) to sit on the border itself. -->
+  {#if !$changesCollapsed}
+    <div
+      class="absolute -inset-x-3 -top-4 z-20 h-2 cursor-row-resize touch-none {dragHeight !== null
+        ? 'bg-emerald-500/40'
+        : 'hover:bg-emerald-500/40'}"
+      title="Drag to resize"
+      onpointerdown={startResize}
+    ></div>
+  {/if}
   {#if $restricted}
     <div class="mx-1 mb-1 flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-950/40 px-2 py-1.5">
       <!-- "session snapshot tracking" was jargon defined nowhere. Say what the
@@ -217,105 +361,25 @@
       >Trust folder</button>
     </div>
   {/if}
-  {#if $gitMode}
-    <div class="flex flex-wrap items-center gap-1.5 px-1 pb-0.5">
+  {#if $gitMode && !$changesCollapsed}
+    <div class="flex items-center gap-1.5 px-1 pb-0.5">
       {#if $gitStatus}
-        <div class="relative" bind:this={branchAnchor}>
-          <button
-            class="flex max-w-full items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold hover:bg-emerald-900/60 disabled:opacity-50 {$gitStatus.detached
-              ? 'bg-amber-950/60 text-amber-400'
-              : 'bg-emerald-950/60 text-emerald-400'}"
-            title={$gitStatus.detached
-              ? `Not on a branch — HEAD is detached at ${$gitStatus.branch}. Commits made here belong to no branch until you create one. Click to switch to a branch.`
-              : "Switch branch"}
-            disabled={$gitBusy}
-            onclick={toggleBranchMenu}
-          >
-            <!-- In detached state git.rs puts the short SHA in `branch`, so the
-                 old label read "HEAD (a1b2c3d)" — which looks like a branch named
-                 HEAD. Say what it actually is. -->
-            <span class="truncate">{$gitStatus.detached ? `detached @ ${$gitStatus.branch}` : $gitStatus.branch}</span>
-            <span class="text-[8px] text-emerald-500/70">▾</span>
-          </button>
-
-          {#if branchMenuOpen}
-            <div
-              bind:this={branchMenuEl}
-              class="absolute left-0 z-20 w-56 max-h-72 overflow-hidden rounded-md border border-zinc-700 bg-zinc-900 shadow-xl shadow-black/50
-                {branchMenuUp ? 'bottom-full mb-1' : 'top-full mt-1'}
-                {branchMenuMeasured ? '' : 'invisible'}"
-            >
-              {#if $gitStatus.remoteUrl}
-                <button
-                  class="flex w-full items-center gap-1.5 border-b border-zinc-800 px-2 py-1.5 text-left text-[11px] text-zinc-300 hover:bg-zinc-800"
-                  title={`Open ${$gitStatus.branch} on ${$gitStatus.remoteUrl}`}
-                  onclick={() => {
-                    branchMenuOpen = false;
-                    openBranchOnRemote();
-                  }}
-                >
-                  <span class="text-zinc-500">↗</span>
-                  <span class="min-w-0 flex-1 truncate">View branch on remote</span>
-                </button>
-              {/if}
-              <div class="border-b border-zinc-800 p-1">
-                <input
-                  class="w-full rounded bg-zinc-800 px-2 py-1 text-[11px] text-zinc-200 placeholder:text-zinc-600 focus:outline-none"
-                  placeholder="Switch branch…"
-                  bind:value={branchFilter}
-                  onmousedown={(e) => e.stopPropagation()}
-                />
-              </div>
-              <div class="max-h-52 overflow-y-auto py-0.5">
-                {#each filteredBranches as b (b)}
-                  <!-- A branch checked out in another worktree cannot be checked
-                       out here at all, so say so before the click: selecting it
-                       goes to that worktree's tab instead. -->
-                  {@const elsewhere = $branchesElsewhere.get(b)}
-                  <button
-                    class="flex w-full items-center gap-1.5 px-2 py-1 text-left font-mono text-[11px] hover:bg-zinc-800
-                      {b === $gitStatus.branch ? 'text-emerald-400' : 'text-zinc-300'}"
-                    title={elsewhere ? `Checked out in ${elsewhere} — go to that tab` : `Switch to ${b}`}
-                    onclick={() => pickBranch(b)}
-                  >
-                    <span class="w-2.5 shrink-0 text-emerald-400">{b === $gitStatus.branch ? "✓" : ""}</span>
-                    <span class="min-w-0 flex-1 truncate">{b}</span>
-                    {#if elsewhere}
-                      <span
-                        class="shrink-0 text-[10px] text-zinc-500"
-                        title="Checked out in another worktree — picking this goes there"
-                      >↗ worktree</span>
-                    {/if}
-                  </button>
-                {:else}
-                  {#if branchError}
-                    <p class="px-2 py-1.5 text-[11px] text-red-400">Couldn't list branches.</p>
-                    <p class="px-2 pb-1.5 font-mono text-[10px] text-red-300/80">{branchError}</p>
-                  {:else}
-                    <p class="px-2 py-1.5 text-[11px] text-zinc-600">
-                      {branchFilter.trim() ? "No matching branches" : "No other branches"}
-                    </p>
-                  {/if}
-                {/each}
-              </div>
-            </div>
-          {/if}
-        </div>
+        {@render branchSwitcher()}
         {#if $gitStatus.hasUpstream}
           {#if $gitStatus.ahead > 0}
-            <span class="font-mono text-[10px] text-emerald-500" title="Commits ahead of upstream">↑{$gitStatus.ahead}</span>
+            <span class="shrink-0 font-mono text-[10px] text-emerald-500" title="Commits ahead of upstream">↑{$gitStatus.ahead}</span>
           {/if}
           {#if $gitStatus.behind > 0}
-            <span class="font-mono text-[10px] text-amber-500" title="Commits behind upstream">↓{$gitStatus.behind}</span>
+            <span class="shrink-0 font-mono text-[10px] text-amber-500" title="Commits behind upstream">↓{$gitStatus.behind}</span>
           {/if}
           <button
-            class="rounded px-1 font-mono text-[11px] text-zinc-500 hover:bg-zinc-800 hover:text-emerald-400 disabled:opacity-40"
+            class="shrink-0 rounded px-1 font-mono text-[11px] text-zinc-500 hover:bg-zinc-800 hover:text-emerald-400 disabled:opacity-40"
             title="Fetch from remote (check for updates)"
             disabled={$gitBusy}
             onclick={fetchRemote}
           >⤓</button>
         {:else}
-          <span class="text-[10px] text-zinc-600">(no remote)</span>
+          <span class="shrink-0 text-[10px] text-zinc-600">(no remote)</span>
         {/if}
         {#if $gitMessage}
           <span class="min-w-0 flex-1 truncate text-[10px] text-zinc-500" title={$gitMessage}>{$gitMessage}</span>
@@ -360,16 +424,40 @@
         >✕</button>
       </div>
     {/if}
-  {:else if !$restricted}
+  {:else if !$gitMode && !$restricted && !$changesCollapsed}
     <p class="px-1 pb-0.5 text-[10px] text-zinc-600">No git repository</p>
   {/if}
 
-  <div class="flex items-center justify-between px-1">
-    <h2 class="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-      Changes {#if visible.length}<span class="text-zinc-600">({visible.length})</span>{/if}
-    </h2>
+  <div class="flex items-center justify-between gap-1 px-1">
+    <!-- Collapsed, the panel is one row, and the branch is what people want on
+         that row far more than the word "Changes" — so the branch switcher moves
+         up here and brings the diff totals with it. -->
+    {#if $changesCollapsed && $gitMode && $gitStatus}
+      <div class="flex min-w-0 items-center gap-1.5">
+        {@render branchSwitcher()}
+        {#if visible.length}
+          <span class="shrink-0 font-mono text-[10px]">
+            <span class="text-zinc-500">{visible.length}</span>
+            <span class="text-emerald-500">+{totalAdded}</span>
+            <span class="text-red-500">−{totalRemoved}</span>
+          </span>
+        {:else}
+          <span class="shrink-0 text-[10px] text-zinc-600">clean</span>
+        {/if}
+      </div>
+    {:else}
+      <h2 class="min-w-0 truncate text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+        Changes {#if visible.length}<span class="text-zinc-600">({visible.length})</span>{/if}
+        {#if $changesCollapsed && visible.length}
+          <span class="font-mono text-[10px] normal-case tracking-normal">
+            <span class="text-emerald-500">+{totalAdded}</span>
+            <span class="text-red-500">−{totalRemoved}</span>
+          </span>
+        {/if}
+      </h2>
+    {/if}
     <div class="flex items-center gap-1">
-      {#if $gitMode}
+      {#if $gitMode && !$changesCollapsed}
         <button
           class="rounded px-1.5 font-mono text-[10px] font-bold {$showStaged
             ? 'text-emerald-400 hover:bg-zinc-800'
@@ -392,22 +480,34 @@
           onclick={toggleUntracked}
         >U</button>
       {/if}
-      {#if $gitMode}
+      {#if $gitMode && !$changesCollapsed}
         <button
           class="rounded px-1 text-[10px] text-zinc-600 hover:bg-zinc-800 hover:text-amber-400"
           title="Withdraw trust: stop Termax running git in this folder"
           onclick={revokeCurrentFolderTrust}
         >🔓</button>
       {/if}
+      {#if !$changesCollapsed}
+        <button
+          class="rounded px-1.5 text-xs text-zinc-500 hover:bg-zinc-800 hover:text-emerald-400"
+          title="Refresh"
+          onclick={() => refreshChanges()}
+        >⟳</button>
+      {/if}
       <button
-        class="rounded px-1.5 text-xs text-zinc-500 hover:bg-zinc-800 hover:text-emerald-400"
-        title="Refresh"
-        onclick={() => refreshChanges()}
-      >⟳</button>
+        class="rounded px-1 text-[10px] text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300"
+        title={$changesCollapsed ? "Expand changes" : "Collapse changes"}
+        aria-expanded={!$changesCollapsed}
+        aria-label={$changesCollapsed ? "Expand changes" : "Collapse changes"}
+        onclick={toggleChangesCollapsed}
+      >{$changesCollapsed ? "▴" : "▾"}</button>
     </div>
   </div>
 
-  {#if $changesError}
+  {#if $changesCollapsed}
+    <!-- Nothing below the header: the count and the +/- totals in it are the
+         whole of the collapsed panel. -->
+  {:else if $changesError}
     <!-- Must come before the "clean" message: a failed read used to render as a
          clean working tree, which told the user everything was fine when the app
          had in fact lost track of their changes entirely. -->
@@ -429,23 +529,27 @@
     </p>
   {/if}
 
-  <div class="max-h-60 min-h-0 overflow-y-auto" bind:this={listEl}>
-    {#each visible as change (`${change.area ?? "snap"}:${change.path}`)}
-      {@const b = badge(change)}
-      <button
-        class="flex w-full items-center gap-1.5 rounded-md px-1 py-0.5 text-left transition-colors hover:bg-zinc-800/70
-          {flashPath === change.path ? 'bg-emerald-500/20' : ''}"
-        data-path={change.path}
-        title={describeChange(change)}
-        onclick={() => openFile(change.path, { diff: true })}
-      >
-        <span class="w-3 shrink-0 font-mono text-[11px] font-bold {b.color}">{b.char}</span>
-        <span class="min-w-0 flex-1 truncate font-mono text-[11px] text-zinc-300">{change.path}</span>
-        <span class="shrink-0 font-mono text-[10px]">
-          <span class="text-emerald-500">+{change.added}</span>
-          <span class="text-red-500">−{change.removed}</span>
-        </span>
-      </button>
-    {/each}
-  </div>
+  {#if !$changesCollapsed}
+    <div class="min-h-0 shrink-0" style="height: {listHeight}px">
+      <div class="h-full overflow-y-auto" bind:this={listEl}>
+      {#each visible as change (`${change.area ?? "snap"}:${change.path}`)}
+        {@const b = badge(change)}
+        <button
+          class="flex w-full items-center gap-1.5 rounded-md px-1 py-0.5 text-left transition-colors hover:bg-zinc-800/70
+            {flashPath === change.path ? 'bg-emerald-500/20' : ''}"
+          data-path={change.path}
+          title={describeChange(change)}
+          onclick={() => openFile(change.path, { diff: true })}
+        >
+          <span class="w-3 shrink-0 font-mono text-[11px] font-bold {b.color}">{b.char}</span>
+          <span class="min-w-0 flex-1 truncate font-mono text-[11px] text-zinc-300">{change.path}</span>
+          <span class="shrink-0 font-mono text-[10px]">
+            <span class="text-emerald-500">+{change.added}</span>
+            <span class="text-red-500">−{change.removed}</span>
+          </span>
+        </button>
+      {/each}
+      </div>
+    </div>
+  {/if}
 </div>
