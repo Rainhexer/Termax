@@ -296,6 +296,16 @@ export const ipc = {
     invoke<string>("rename_entry", { path, name, root }),
   /** Permanent — directories go with everything under them. Callers confirm. */
   deleteEntry: (path: string, root?: string) => invoke<void>("delete_entry", { path, root }),
+  /** Move an entry into `toDir` ("" = the root), keeping its name. Returns the
+   *  new project-relative path. Refuses to overwrite: two files with one name
+   *  are the user's to resolve, not ours to silently pick between. */
+  moveEntry: (from: string, toDir: string, root?: string) =>
+    invoke<string>("move_entry", { from, toDir, root }),
+  /** Copy an entry into `toDir`, recursing through directories. A name already
+   *  in use is suffixed (`notes copy.md`) rather than overwritten, which is
+   *  what makes copy-and-paste into the same folder work. */
+  copyEntry: (from: string, toDir: string, root?: string) =>
+    invoke<string>("copy_entry", { from, toDir, root }),
   /** Entries anywhere under the root matching `query` (plain substring). */
   searchTree: (query: string, root?: string) =>
     invoke<TreeSearch>("search_tree", { query, root }),

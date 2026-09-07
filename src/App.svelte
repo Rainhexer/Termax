@@ -131,6 +131,26 @@
       // guard it silently stole both from the Monaco editor and from every text
       // field in the app.
       if (isTextEntry(e.target)) return;
+      const el = e.target as HTMLElement | null;
+      // The explorer owns cut, copy and paste while one of its rows has focus:
+      // there, Ctrl+X means "cut these files", not "next tab".
+      if ((key === "x" || key === "c" || key === "v") && el?.closest?.("[data-tree-root]")) return;
+      // Undo and redo belong to the explorer anywhere *outside* a pane, not
+      // only when a row has focus: a move refreshes the tree and drops focus to
+      // <body>, and the Ctrl+Z straight after a move is the one that matters.
+      // Inside a pane both keys keep what they already did — the terminal's
+      // tab cycling, and Monaco's own undo via the text-entry guard above.
+      //
+      // Conditional on the tree actually being on screen. With the sidebar
+      // showing another section nothing is listening for these, and a key that
+      // does nothing is worse than the tab cycling it replaced.
+      if (
+        (key === "z" || key === "y") &&
+        !el?.closest?.("[data-pane-id]") &&
+        document.querySelector("[data-tree-root]")
+      ) {
+        return;
+      }
       // Ctrl+Z/X cycles tabs; adding Shift moves the active tab instead.
       if (key === "z") {
         e.preventDefault();

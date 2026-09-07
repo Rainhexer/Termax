@@ -126,6 +126,8 @@ pub fn run() {
             fstree::create_entry,
             fstree::rename_entry,
             fstree::delete_entry,
+            fstree::move_entry,
+            fstree::copy_entry,
             fstree::search_tree,
             fstree::reveal_in_file_manager,
             fstree::open_in_default_app,

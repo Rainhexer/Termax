@@ -252,6 +252,84 @@ export function deleteEntry(path: string): Promise<void> {
   return ipc.deleteEntry(path, treeRoot);
 }
 
+/** Move an entry into `dir` ("" = the root), keeping its name. */
+export function moveEntry(from: string, dir: string): Promise<string> {
+  return ipc.moveEntry(from, dir, treeRoot);
+}
+
+/** Copy an entry into `dir`, suffixing the name if it is already taken. */
+export function copyEntry(from: string, dir: string): Promise<string> {
+  return ipc.copyEntry(from, dir, treeRoot);
+}
+
+/** The folder half of a path; "" for something at the top level. */
+export function parentDir(path: string): string {
+  const cut = path.lastIndexOf("/");
+  return cut < 0 ? "" : path.slice(0, cut);
+}
+
+/** True when `dir` is `path` itself or sits under it. Both a move and a copy
+ *  into your own subtree are nonsense, and the backend refuses them — this is
+ *  the same question asked early, so the drop target can decline to light up
+ *  rather than erroring after the release. */
+export function isSelfOrDescendant(dir: string, path: string): boolean {
+  return dir === path || dir.startsWith(`${path}/`);
+}
+
+/* ----------------------------------------------------------- clipboard */
+
+/** What Ctrl+C / Ctrl+X put down, waiting for a Ctrl+V.
+ *
+ *  Deliberately *not* the system clipboard. What the tree copies is a set of
+ *  project-relative paths against the root the tree is showing, which is
+ *  meaningless to any other application and, worse, would resolve to a
+ *  different checkout's files if pasted into a tab bound to another worktree.
+ *  A cut is also not a cut until it is pasted, so it has to survive as
+ *  intent rather than as text. */
+export type TreeClipboard = { paths: string[]; mode: "copy" | "cut" };
+
+export const treeClipboard = writable<TreeClipboard | null>(null);
+
+/** What a paste did: where each entry came from and where it landed. Both
+ *  halves are needed to undo it — a copy is undone by removing what it made,
+ *  a cut by moving each entry back to the folder it names. */
+export interface PasteResult {
+  mode: "copy" | "cut";
+  pairs: { from: string; to: string }[];
+}
+
+/** Paste the clipboard into `dir`.
+ *
+ *  A cut empties the clipboard, a copy does not: pasting a copy again is the
+ *  normal way to put a file in three places, while pasting a cut again would
+ *  be moving files that are no longer where the clipboard says they are. */
+export async function pasteInto(dir: string): Promise<PasteResult> {
+  const board = get(treeClipboard);
+  if (!board) return { mode: "copy", pairs: [] };
+  const pairs: { from: string; to: string }[] = [];
+  const failures: string[] = [];
+  for (const from of board.paths) {
+    // Skipped rather than failed: dragging a selection onto one of its own
+    // folders is a normal slip, and the other entries should still land.
+    if (isSelfOrDescendant(dir, from)) continue;
+    try {
+      const to = board.mode === "cut" ? await moveEntry(from, dir) : await copyEntry(from, dir);
+      // A cut pasted into the folder it is already in moves nothing, so there
+      // is nothing to undo either.
+      if (to !== from) pairs.push({ from, to });
+    } catch (err) {
+      failures.push(String(err));
+    }
+  }
+  if (board.mode === "cut") treeClipboard.set(null);
+  const result: PasteResult = { mode: board.mode, pairs };
+  if (failures.length) {
+    // Thrown with what did land attached, so a partial paste is still undoable.
+    throw Object.assign(new Error(failures.join("; ")), { result });
+  }
+  return result;
+}
+
 export function clearTreeQuery() {
   setTreeQuery("");
 }
