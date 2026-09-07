@@ -487,7 +487,7 @@ export async function initPtyListeners(onExit: (paneId: string) => void) {
 // Backslash-escape shell-special chars so a dropped path pastes as a single
 // argument (matches how native terminals handle file drops). Coding CLIs
 // (claude/opencode) read this as literal text; the shell reads it as one path.
-function shellEscapePath(path: string): string {
+export function shellEscapePath(path: string): string {
   return path.replace(/([^A-Za-z0-9_./:@%+=-])/g, "\\$1");
 }
 

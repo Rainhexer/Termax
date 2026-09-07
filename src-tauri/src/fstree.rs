@@ -499,6 +499,201 @@ pub fn delete_entry(
     }
 }
 
+// ------------------------------------------------------- move and copy
+//
+// Both take a *destination directory* rather than a destination path: the
+// explorer's gesture is "put this in there", and the name comes along
+// unchanged. Renaming during a move is `rename_entry`'s job.
+
+/// The folder half of a project-relative path ("" for a top-level entry).
+fn parent_rel(rel: &str) -> &str {
+    match rel.rfind('/') {
+        Some(cut) => &rel[..cut],
+        None => "",
+    }
+}
+
+/// True when `dir` is `path` itself or sits underneath it. Moving or copying a
+/// folder into its own subtree is either a no-op or an infinite descent, and
+/// neither is what the gesture meant.
+fn is_self_or_descendant(dir: &str, path: &str) -> bool {
+    dir == path || dir.starts_with(&format!("{path}/"))
+}
+
+/// A name in `dir` that is not taken yet: `notes.md`, then `notes copy.md`,
+/// then `notes copy 2.md`.
+///
+/// Only copies uniquify. A *move* onto an existing name is refused instead,
+/// because the two files are the same file and silently renaming one of them
+/// hides that from the person who dragged it.
+fn unique_target(dir: &Path, name: &str) -> PathBuf {
+    let plain = dir.join(name);
+    if !plain.exists() {
+        return plain;
+    }
+    // Split on the *last* dot only, and never on a leading one, so `.gitignore`
+    // keeps its whole name and `archive.tar.gz` becomes `archive.tar copy.gz`.
+    let as_path = Path::new(name);
+    let (stem, ext) = match as_path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => (
+            as_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(name)
+                .to_string(),
+            format!(".{ext}"),
+        ),
+        None => (name.to_string(), String::new()),
+    };
+    for n in 1..1000 {
+        let suffix = if n == 1 {
+            " copy".to_string()
+        } else {
+            format!(" copy {n}")
+        };
+        let candidate = dir.join(format!("{stem}{suffix}{ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    // A thousand copies of one name is not a case worth a better answer than
+    // "pick something that cannot collide".
+    dir.join(format!("{stem} copy {}{ext}", std::process::id()))
+}
+
+/// Resolve `dir` as a destination folder for a move or a copy.
+fn resolve_dest_dir(root: &Path, dir: &str) -> Result<PathBuf, String> {
+    check_not_git(dir)?;
+    let abs = resolve(root, dir)?;
+    if !abs.is_dir() {
+        return Err(format!("not a directory: {dir}"));
+    }
+    Ok(abs)
+}
+
+/// Move an entry into `to_dir`, returning its new project-relative path.
+#[tauri::command(async)]
+pub fn move_entry(
+    manager: tauri::State<SessionManager>,
+    from: String,
+    to_dir: String,
+    root: Option<String>,
+) -> Result<String, String> {
+    let (root, _) = manager
+        .root_info(root.as_deref())
+        .ok_or("no active session")?;
+    check_not_git(&from)?;
+    if is_self_or_descendant(&to_dir, &from) {
+        return Err("cannot move a folder into itself".into());
+    }
+    // Already there: the drop landed on the folder the entry is in. Answering
+    // with the unchanged path lets the caller treat it like any other move.
+    if parent_rel(&from) == to_dir {
+        return Ok(from);
+    }
+    let dest_dir = resolve_dest_dir(&root, &to_dir)?;
+    let source = resolve_entry(&root, &from)?;
+    // The entry has to exist to be moved, and `resolve_entry` deliberately does
+    // not check that (it also serves creation).
+    std::fs::symlink_metadata(&source).map_err(|e| e.to_string())?;
+    let name = Path::new(&from)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("invalid path: {from}"))?
+        .to_string();
+    let target = dest_dir.join(&name);
+    if target.exists() {
+        return Err(format!("{name} already exists in {}", dir_label(&to_dir)));
+    }
+    std::fs::rename(&source, &target).map_err(|e| e.to_string())?;
+    Ok(join_rel(&to_dir, &name))
+}
+
+/// Copy an entry into `to_dir`, returning the new entry's project-relative
+/// path. Directories go with everything under them; a name already in use is
+/// suffixed rather than overwritten, so copy-into-the-same-folder works.
+#[tauri::command(async)]
+pub fn copy_entry(
+    manager: tauri::State<SessionManager>,
+    from: String,
+    to_dir: String,
+    root: Option<String>,
+) -> Result<String, String> {
+    let (root, _) = manager
+        .root_info(root.as_deref())
+        .ok_or("no active session")?;
+    check_not_git(&from)?;
+    if is_self_or_descendant(&to_dir, &from) {
+        return Err("cannot copy a folder into itself".into());
+    }
+    let dest_dir = resolve_dest_dir(&root, &to_dir)?;
+    let source = resolve_entry(&root, &from)?;
+    let meta = std::fs::symlink_metadata(&source).map_err(|e| e.to_string())?;
+    let name = Path::new(&from)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("invalid path: {from}"))?
+        .to_string();
+    let target = unique_target(&dest_dir, &name);
+    copy_tree(&source, &target, &meta.file_type())?;
+    let created = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&name)
+        .to_string();
+    Ok(join_rel(&to_dir, &created))
+}
+
+/// "the project root" or the folder's own path, for an error message.
+fn dir_label(dir: &str) -> String {
+    if dir.is_empty() {
+        "the project root".into()
+    } else {
+        dir.to_string()
+    }
+}
+
+fn join_rel(dir: &str, name: &str) -> String {
+    if dir.is_empty() {
+        name.to_string()
+    } else {
+        format!("{dir}/{name}")
+    }
+}
+
+/// Copy one entry to `target`, recursing through directories.
+///
+/// Symlinks are recreated as symlinks rather than followed: copying a link
+/// should not duplicate whatever it points at, which may be large, outside the
+/// project, or the very folder being copied.
+fn copy_tree(source: &Path, target: &Path, kind: &std::fs::FileType) -> Result<(), String> {
+    if kind.is_symlink() {
+        #[cfg(unix)]
+        {
+            let link = std::fs::read_link(source).map_err(|e| e.to_string())?;
+            return std::os::unix::fs::symlink(link, target).map_err(|e| e.to_string());
+        }
+        #[cfg(not(unix))]
+        {
+            // No portable way to recreate one without knowing whether it points
+            // at a directory; copying the contents is the lesser surprise.
+            std::fs::copy(source, target).map_err(|e| e.to_string())?;
+            return Ok(());
+        }
+    }
+    if !kind.is_dir() {
+        std::fs::copy(source, target).map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    std::fs::create_dir(target).map_err(|e| e.to_string())?;
+    for entry in std::fs::read_dir(source).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let child_kind = entry.file_type().map_err(|e| e.to_string())?;
+        copy_tree(&entry.path(), &target.join(entry.file_name()), &child_kind)?;
+    }
+    Ok(())
+}
+
 /// Entries anywhere under the root whose name (or path) contains `query`.
 ///
 /// Case-insensitive plain substring: nobody types a regex into an explorer
@@ -674,6 +869,69 @@ mod tests {
         assert!(check_name("a\\b").is_err());
         assert!(check_name("..").is_err());
         assert!(check_name(".git").is_err());
+    }
+
+    #[test]
+    fn unique_target_suffixes_a_taken_name_and_keeps_the_extension() {
+        let root = temp_root("unique");
+        assert_eq!(unique_target(&root, "notes.md"), root.join("notes.md"));
+
+        std::fs::write(root.join("notes.md"), "").unwrap();
+        assert_eq!(unique_target(&root, "notes.md"), root.join("notes copy.md"));
+
+        std::fs::write(root.join("notes copy.md"), "").unwrap();
+        assert_eq!(unique_target(&root, "notes.md"), root.join("notes copy 2.md"));
+    }
+
+    /// A dotfile is all name and no extension, so the suffix goes on the end.
+    #[test]
+    fn unique_target_does_not_split_a_leading_dot() {
+        let root = temp_root("unique-dotfile");
+        std::fs::write(root.join(".gitignore"), "").unwrap();
+        assert_eq!(
+            unique_target(&root, ".gitignore"),
+            root.join(".gitignore copy")
+        );
+    }
+
+    #[test]
+    fn self_or_descendant_catches_a_folder_dropped_into_itself() {
+        assert!(is_self_or_descendant("src", "src"));
+        assert!(is_self_or_descendant("src/lib/components", "src"));
+        assert!(!is_self_or_descendant("srcs", "src"));
+        assert!(!is_self_or_descendant("", "src"));
+        assert!(!is_self_or_descendant("src", "src/lib"));
+    }
+
+    #[test]
+    fn parent_rel_is_the_folder_half() {
+        assert_eq!(parent_rel("src/lib/ipc.ts"), "src/lib");
+        assert_eq!(parent_rel("README.md"), "");
+    }
+
+    /// Copying a folder duplicates what is inside it, and a symlink stays a
+    /// symlink rather than becoming a copy of whatever it points at.
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_recurses_and_preserves_symlinks() {
+        let root = temp_root("copy-tree");
+        std::fs::create_dir_all(root.join("from/inner")).unwrap();
+        std::fs::write(root.join("from/inner/a.txt"), "hello").unwrap();
+        std::os::unix::fs::symlink("inner/a.txt", root.join("from/link")).unwrap();
+
+        let kind = std::fs::symlink_metadata(root.join("from"))
+            .unwrap()
+            .file_type();
+        copy_tree(&root.join("from"), &root.join("to"), &kind).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("to/inner/a.txt")).unwrap(),
+            "hello"
+        );
+        assert!(std::fs::symlink_metadata(root.join("to/link"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[test]
