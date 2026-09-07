@@ -1,11 +1,10 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import {
     changes,
     changesCollapsed,
     changesError,
     changesHeight,
-    CHANGES_MIN_HEIGHT,
-    CHANGES_MAX_HEIGHT,
     fetchRemote,
     gitBusy,
     gitError,
@@ -34,41 +33,91 @@
   import type { ChangeEntry } from "../types";
 
   let listEl = $state<HTMLDivElement>();
+  let listBoxEl = $state<HTMLDivElement>();
+  let contentEl = $state<HTMLDivElement>();
+  let rootEl = $state<HTMLDivElement>();
   let flashPath = $state<string | null>(null);
 
-  // Drag the section's top border to resize the list. Live height stays local while
-  // dragging so it doesn't churn the store (and its debounced disk write) on
-  // every pointer move; the store only updates on release.
-  let dragHeight = $state<number | null>(null);
-  const listHeight = $derived(dragHeight ?? $changesHeight);
+  // The panel is sized by its content, never by a fixed number: the rows are
+  // measured, and their total is the panel's maximum height. A clean tree
+  // therefore renders no list at all, and a two-file list is two rows tall
+  // instead of a mostly-empty box.
+  let contentHeight = $state(0);
 
-  function startResize(e: PointerEvent) {
-    e.preventDefault();
-    const handle = e.currentTarget as HTMLElement;
-    const startY = e.clientY;
-    const startHeight = $changesHeight;
-    handle.setPointerCapture(e.pointerId);
-    dragHeight = startHeight;
+  $effect(() => {
+    const el = contentEl;
+    if (!el) {
+      contentHeight = 0;
+      return;
+    }
+    const measure = () => (contentHeight = el.scrollHeight);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  });
 
-    const onMove = (ev: PointerEvent) => {
-      dragHeight = Math.min(
-        CHANGES_MAX_HEIGHT,
-        Math.max(CHANGES_MIN_HEIGHT, startHeight + startY - ev.clientY),
-      );
-    };
-    const onUp = () => {
-      handle.releasePointerCapture(e.pointerId);
-      handle.removeEventListener("pointermove", onMove);
-      handle.removeEventListener("pointerup", onUp);
-      handle.removeEventListener("pointercancel", onUp);
-      const final = dragHeight ?? startHeight;
-      dragHeight = null;
-      changesHeight.set(final);
-    };
-    handle.addEventListener("pointermove", onMove);
-    handle.addEventListener("pointerup", onUp);
-    handle.addEventListener("pointercancel", onUp);
+  /** What the sidebar actually has room for, in px. The content height alone is
+   *  not a usable maximum: the panel shares a fixed-height sidebar with the
+   *  section above it, so asking for more than fits just overflows off the
+   *  bottom of the window — the list then believes it is taller than it is and
+   *  sizes its scrollbar for that phantom height, while the drag handle keeps
+   *  travelling after the panel has visibly stopped growing.
+   *
+   *  Flex cannot be relied on to catch this: the list sits inside a plain block
+   *  wrapper, so shrinking never reaches it. Nor can the distance from the
+   *  list's top edge to the bottom of the sidebar be used — the panel is pinned
+   *  to that bottom, so that distance *is* the current list height, and using it
+   *  as the limit freezes the panel at whatever size it already had.
+   *
+   *  What is actually left is the room the section above can still give up:
+   *  its height above its own min-height. */
+  let fitLimit = $state(Infinity);
+
+  function measureFit() {
+    const wrapper = rootEl?.parentElement;
+    const sidebar = wrapper?.parentElement;
+    const fill = sidebar?.querySelector<HTMLElement>("[data-sidebar-fill]");
+    if (!listBoxEl || !wrapper || !sidebar || !fill) return;
+    const fillMin = parseFloat(getComputedStyle(fill).minHeight) || 0;
+    const slack = Math.max(0, fill.getBoundingClientRect().height - fillMin);
+    // If the panel is already spilling past the sidebar (a stored height from a
+    // taller window, say), that spill has to come back off the limit too.
+    const spill = Math.max(
+      0,
+      wrapper.getBoundingClientRect().bottom - sidebar.getBoundingClientRect().bottom,
+    );
+    const next = Math.max(0, listBoxEl.getBoundingClientRect().height + slack - spill);
+    // Ignore sub-pixel churn: the measurement feeds back into the height it
+    // measures, and without a deadband that loop never settles.
+    // untrack: the guard reads the value this function writes, and a tracked
+    // read would make the effect below re-run itself forever.
+    if (Math.abs(next - untrack(() => fitLimit)) > 0.5) fitLimit = next;
   }
+
+  // Remeasure whenever the height or the row count changes (both move how much
+  // room is left), and whenever the surrounding layout does.
+  $effect(() => {
+    void listHeight;
+    void contentHeight;
+    measureFit();
+  });
+
+  $effect(() => {
+    const wrapper = rootEl?.parentElement;
+    const sidebar = wrapper?.parentElement;
+    if (!sidebar || !wrapper) return;
+    const observer = new ResizeObserver(measureFit);
+    observer.observe(sidebar);
+    observer.observe(wrapper);
+    const fill = sidebar.querySelector<HTMLElement>("[data-sidebar-fill]");
+    if (fill) observer.observe(fill);
+    window.addEventListener("resize", measureFit);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", measureFit);
+    };
+  });
 
   // Branch switcher dropdown state.
   let branchMenuOpen = $state(false);
@@ -242,6 +291,59 @@
   // numbers the list would have shown: how many files, and the line totals.
   let totalAdded = $derived(visible.reduce((n, c) => n + c.added, 0));
   let totalRemoved = $derived(visible.reduce((n, c) => n + c.removed, 0));
+
+  // Rows are uniform, so their average is the height of one — which is the
+  // panel's minimum while any change exists, and the floor a drag can reach.
+  let rowHeight = $derived(visible.length ? contentHeight / visible.length : 0);
+  /** How tall the list may grow: exactly enough to show every row, and never
+   *  past what the sidebar can actually give it. */
+  let maxListHeight = $derived(Math.min(contentHeight, fitLimit));
+  /** True once there is more than one row, i.e. once dragging can change
+   *  anything at all. */
+  let resizable = $derived(visible.length > 1 && maxListHeight > rowHeight);
+
+  // Drag the section's top border to resize the list. Live height stays local
+  // while dragging so it doesn't churn the store (and its debounced disk write)
+  // on every pointer move; the store only updates on release. The stored value is
+  // kept unclamped — see changesHeight — and clamped to the content here, so a
+  // list that shrinks and grows again comes back to the size the user picked.
+  let dragHeight = $state<number | null>(null);
+  const listHeight = $derived(
+    visible.length === 0
+      ? 0
+      : Math.min(maxListHeight, Math.max(rowHeight, dragHeight ?? $changesHeight)),
+  );
+
+  function startResize(e: PointerEvent) {
+    e.preventDefault();
+    const handle = e.currentTarget as HTMLElement;
+    const startY = e.clientY;
+    const startHeight = listHeight;
+    handle.setPointerCapture(e.pointerId);
+    dragHeight = startHeight;
+
+    // Bounds are read per move, not captured: the fit limit can tighten while
+    // the pointer is down, and a stale maximum is exactly what let the handle
+    // keep travelling after the panel had stopped growing.
+    const onMove = (ev: PointerEvent) => {
+      dragHeight = Math.min(
+        maxListHeight,
+        Math.max(rowHeight, startHeight + startY - ev.clientY),
+      );
+    };
+    const onUp = () => {
+      handle.releasePointerCapture(e.pointerId);
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+      handle.removeEventListener("pointercancel", onUp);
+      const final = dragHeight ?? startHeight;
+      dragHeight = null;
+      changesHeight.set(final);
+    };
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+    handle.addEventListener("pointercancel", onUp);
+  }
 </script>
 
 {#snippet branchSwitcher()}
@@ -330,13 +432,13 @@
   {/if}
 {/snippet}
 
-<div class="relative flex flex-col gap-1">
+<div class="relative flex min-h-0 flex-col gap-1" bind:this={rootEl}>
   <!-- The line separating this section from the tree above it *is* the resize
        handle: pinned to the sidebar's bottom, the panel has no bottom edge to
        drag against, so it resizes from the top like the sidebar resizes from its
        right edge. The strip is invisible until hover/drag and reaches out over
        the wrapper's padding (-inset-x-3 / -top-4) to sit on the border itself. -->
-  {#if !$changesCollapsed}
+  {#if !$changesCollapsed && resizable}
     <div
       class="absolute -inset-x-3 -top-4 z-20 h-2 cursor-row-resize touch-none {dragHeight !== null
         ? 'bg-emerald-500/40'
@@ -529,9 +631,10 @@
     </p>
   {/if}
 
-  {#if !$changesCollapsed}
-    <div class="min-h-0 shrink-0" style="height: {listHeight}px">
+  {#if !$changesCollapsed && visible.length}
+    <div class="min-h-0 shrink" style="height: {listHeight}px" bind:this={listBoxEl}>
       <div class="h-full overflow-y-auto" bind:this={listEl}>
+      <div bind:this={contentEl}>
       {#each visible as change (`${change.area ?? "snap"}:${change.path}`)}
         {@const b = badge(change)}
         <button
@@ -549,6 +652,7 @@
           </span>
         </button>
       {/each}
+      </div>
       </div>
     </div>
   {/if}

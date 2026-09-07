@@ -89,18 +89,26 @@ changesCollapsed.subscribe((collapsed) => {
 
 export const toggleChangesCollapsed = () => changesCollapsed.update((v) => !v);
 
-/** Height, in px, of the scrollable changed-files list. Dragged via a handle
- *  on the list's bottom edge; persisted so the choice survives a restart. */
+/** Height, in px, the user last dragged the changed-files list to. This is only
+ *  a *preference*: the panel never grows past the height its rows actually need,
+ *  so a clean tree takes no vertical space at all and a two-file tree shows two
+ *  rows. The panel clamps this value to [one row, all rows] at render time —
+ *  keeping the raw number here means a list that shrinks and grows again returns
+ *  to the size the user picked instead of being permanently trimmed.
+ *  Persisted so the choice survives a restart. */
 const CHANGES_HEIGHT_KEY = "termax.changesHeight";
-export const CHANGES_MIN_HEIGHT = 80;
-export const CHANGES_MAX_HEIGHT = 600;
-const CHANGES_DEFAULT_HEIGHT = 240; // matches the old fixed max-h-60
+/** Only a sanity bound on what may come back from disk — the real limits come
+ *  from the content. */
+const CHANGES_HEIGHT_LIMIT = 5000;
+/** Big enough that a fresh install shows the whole list, since the panel caps it
+ *  at the content height anyway. */
+const CHANGES_DEFAULT_HEIGHT = 1000;
 
 function readChangesHeight(): number {
   try {
     const raw = Number(localStorage.getItem(CHANGES_HEIGHT_KEY));
     if (Number.isFinite(raw) && raw > 0) {
-      return Math.min(CHANGES_MAX_HEIGHT, Math.max(CHANGES_MIN_HEIGHT, raw));
+      return Math.min(CHANGES_HEIGHT_LIMIT, raw);
     }
   } catch {
     // A private-mode/quota failure must not break the sidebar.
