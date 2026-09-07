@@ -25,8 +25,8 @@
     repoMeta,
     toggleFilterLabel,
   } from "../issues";
-  import { addPane, gitMode, restricted, switchTab, tabs, worktrees } from "../stores";
-  import { gitWorktrees, tabForIssue } from "../worktrees";
+  import { addPane, gitMode, restricted, switchGroup, tabs, worktrees } from "../stores";
+  import { gitWorktrees, groupForIssue } from "../worktrees";
   import { ipc } from "../ipc";
   import type { Issue } from "../types";
   import CreateIssueModal from "./CreateIssueModal.svelte";
@@ -68,20 +68,20 @@
     return [...counts.values()].sort((a, b) => b.n - a.n).slice(0, 8);
   });
 
-  /** Issue number → the tab already working on it. Local and free: no network
-   *  call to find out an agent is on something.
+  /** Issue number → the worktree already working on it. Local and free: no
+   *  network call to find out an agent is on something.
    *
-   *  The three stores are referenced explicitly because `tabForIssue` reads them
+   *  The three stores are referenced explicitly because `groupForIssue` reads them
    *  through `get()`, which runes do not track — without them the badge would
    *  only refresh when the issue list itself changed, so a worktree created
    *  seconds ago would not show up until the next fetch. */
-  const boundTabs = $derived.by(() => {
+  const boundGroups = $derived.by(() => {
     void $gitWorktrees;
     void $worktrees;
     void $tabs;
-    const map = new Map<number, { tabId: string; path: string }>();
+    const map = new Map<number, { recordId: string; path: string }>();
     for (const issue of issues) {
-      const found = tabForIssue(issue.number);
+      const found = groupForIssue(issue.number);
       if (found) map.set(issue.number, found);
     }
     return map;
@@ -326,7 +326,7 @@
 
       <div class="min-h-0 overflow-y-auto {fill ? 'flex-1' : 'max-h-72'}">
         {#each issues as issue (issue.number)}
-          {@const bound = boundTabs.get(issue.number)}
+          {@const bound = boundGroups.get(issue.number)}
           <div class="group flex items-center gap-1 rounded-md px-1 py-0.5 hover:bg-zinc-800/70">
             <button
               class="flex min-w-0 flex-1 items-center gap-1.5 text-left"
@@ -345,7 +345,7 @@
                 <span class="shrink-0 text-[9px] text-zinc-500" title="Assigned">◍</span>
               {/if}
               {#if bound}
-                <span class="shrink-0 text-[9px] text-emerald-400" title="A tab is already working on this">⎇</span>
+                <span class="shrink-0 text-[9px] text-emerald-400" title="A worktree is already open on this">⎇</span>
               {/if}
             </button>
             <!-- The one action worth a permanent button rather than a menu: it
@@ -355,10 +355,10 @@
                 ? 'text-emerald-400 opacity-100'
                 : 'text-zinc-600 opacity-0'} transition-opacity hover:bg-zinc-800 hover:text-emerald-300 group-hover:opacity-100"
               title={bound
-                ? "Switch to the tab already working on this"
+                ? "Switch to the worktree already working on this"
                 : "Create a linked branch and open an agent on it"}
-              onclick={() => (bound ? switchTab(bound.tabId) : (starting = issue))}
-            >{bound ? "Go to tab" : "→ Agent"}</button>
+              onclick={() => (bound ? switchGroup(bound.recordId) : (starting = issue))}
+            >{bound ? "Go to it" : "→ Agent"}</button>
           </div>
         {/each}
       </div>

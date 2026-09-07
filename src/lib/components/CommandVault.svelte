@@ -1,6 +1,6 @@
 <script lang="ts">
   import { get } from "svelte/store";
-  import { activeProject, projects, runVaultCommand, revealVaultCommand, vaultRuns } from "../stores";
+  import { activeProject, activeVaultRuns, projects, runVaultCommand, revealVaultCommand } from "../stores";
   import type { VaultRun } from "../stores";
   import { enabledLaunchers, launcherById, settings } from "../settings";
   import TerminalIcon from "./TerminalIcon.svelte";
@@ -210,7 +210,10 @@
   {/if}
 
   {#each vault as cmd (cmd.id)}
-    {@const link = $vaultRuns.get(cmd.id)}
+    <!-- The run for the worktree on screen, not the last run anywhere: a
+         command has one terminal per tree, so this is what "is it running?"
+         means from here. -->
+    {@const link = $activeVaultRuns.get(cmd.id)}
     {@const run = link && link.state !== "idle" ? link : null}
     <div
       class="group flex items-center gap-1 rounded-md px-1 py-0.5 hover:bg-zinc-800/70"

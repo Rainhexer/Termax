@@ -23,7 +23,7 @@
     worktreeRows,
     type WorktreeRow,
   } from "../worktrees";
-  import { activeRoot, flashGitMessage, gitMode, restricted, switchTab } from "../stores";
+  import { activeRoot, flashGitMessage, gitMode, restricted } from "../stores";
   import NewWorktreeModal from "./NewWorktreeModal.svelte";
 
   /** Filling the sidebar's swap panel, exactly as the PR and issue panels do:
@@ -97,14 +97,14 @@
     return norm(row.path) === norm($activeRoot);
   }
 
+  /** One way in, for every row: `goToWorktree` already knows how to reach a tree
+   *  that has a group open, the project root, or one with no tab yet — and going
+   *  through it is what keeps this panel landing on the same subtab the tab bar
+   *  would. */
   async function jump(row: WorktreeRow) {
     actionError = null;
     if (row.state === "missing") {
       actionError = "That directory no longer exists. Forget it, or recreate the worktree.";
-      return;
-    }
-    if (row.tabs.length) {
-      switchTab(row.tabs[0].id);
       return;
     }
     await goToWorktree(row.label, row.path);
@@ -316,10 +316,10 @@
                 {#if row.state !== "missing"}
                   <button
                     class="rounded px-1 text-[10px] text-zinc-400 hover:bg-zinc-800 hover:text-emerald-300 disabled:opacity-40"
-                    title={row.tabs.length ? "Switch to its tab" : "Open a tab in this worktree"}
+                    title={row.tabs.length ? "Switch to this worktree" : "Open a tab in this worktree"}
                     disabled={busy !== null}
                     onclick={() => void jump(row)}
-                  >{row.tabs.length ? "Go to tab" : "Open a tab"}</button>
+                  >{row.tabs.length ? "Go to it" : "Open a tab"}</button>
                 {/if}
                 {#if row.isMain}
                   <span class="px-1 text-[10px] text-zinc-600">

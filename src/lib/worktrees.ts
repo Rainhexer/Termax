@@ -12,6 +12,15 @@
  *  the tab is also what gives every agent row in the sidebar its PR label —
  *  one model, two surfaces.
  *
+ *  ## A worktree holds a group of tabs, not one tab
+ *
+ *  Several tabs may carry the same `worktreeId`, and the tab bar renders them as
+ *  one worktree tab with subtabs under it (`worktreeGroups` here, WorktreeBar and
+ *  TabBar in the UI). The functions that open work on a branch — `goToWorktree`,
+ *  `startWorkOnPr`, `startWorkOnIssue`, `createWorktree` — are therefore
+ *  idempotent per *tree*, not per tab: they hand you back the group you already
+ *  have, and adding a second tab inside it is a thing you do afterwards.
+ *
  *  ## Sessions are reconciled, not managed by hand
  *
  *  Rather than making every caller that creates or destroys a tab remember to
@@ -28,6 +37,8 @@ import type { PullRequest, Tab, Worktree, WorktreeEntry } from "./types";
 // `persistLayout` have to read and write it. Keeping it there means the import
 // arrow only ever points this way and the module graph stays acyclic.
 import {
+  ROOT_GROUP,
+  activeProject,
   activeRoot,
   activeTabId,
   addPane,
@@ -36,12 +47,13 @@ import {
   collectTabPanes,
   flashGitMessage,
   gitError,
+  groupKeys,
   newTab,
   persistLayout,
   primaryRoot,
   refreshChanges,
   sessionReady,
-  switchTab,
+  switchGroup,
   tabs,
   worktrees,
 } from "./stores";
@@ -223,14 +235,18 @@ export function isAlreadyCheckedOut(message: string): boolean {
   return ALREADY_CHECKED_OUT.test(message);
 }
 
-/** Find a tab already bound to the worktree holding `branch`, if any. */
-export function tabForBranch(branch: string): { tabId: string; path: string } | null {
+/** Find the worktree group already working on `branch`, if any.
+ *
+ *  The *group*, not a tab: a worktree may hold several subtabs now, and every
+ *  "already working on this" path wants to land on the one the user last used
+ *  rather than on whichever tab happens to come first in the array. */
+export function groupForBranch(branch: string): { recordId: string; path: string } | null {
   const entry = get(gitWorktrees).find((w) => w.branch === branch);
   if (!entry) return null;
   const record = get(worktrees).find((w) => w.path === entry.path);
   if (!record) return null;
-  const tab = get(tabs).find((t) => t.worktreeId === record.id);
-  return tab ? { tabId: tab.id, path: entry.path } : null;
+  const bound = get(tabs).some((t) => t.worktreeId === record.id);
+  return bound ? { recordId: record.id, path: entry.path } : null;
 }
 
 /** Compare two roots as paths, not as strings.
@@ -274,7 +290,7 @@ export const branchesElsewhere = derived(
  *  The trade-off is a branch named `12-something` for unrelated reasons would
  *  match issue 12. That costs a wrong "already working on this" hint, which the
  *  user can see is wrong, and is worth not persisting a mapping that rots. */
-export function tabForIssue(number: number): { tabId: string; path: string } | null {
+export function groupForIssue(number: number): { recordId: string; path: string } | null {
   const prefix = `${number}-`;
   const entry = get(gitWorktrees).find(
     (w) => w.branch === String(number) || w.branch?.startsWith(prefix),
@@ -282,8 +298,8 @@ export function tabForIssue(number: number): { tabId: string; path: string } | n
   if (!entry) return null;
   const record = get(worktrees).find((w) => w.path === entry.path);
   if (!record) return null;
-  const tab = get(tabs).find((t) => t.worktreeId === record.id);
-  return tab ? { tabId: tab.id, path: entry.path } : null;
+  const bound = get(tabs).some((t) => t.worktreeId === record.id);
+  return bound ? { recordId: record.id, path: entry.path } : null;
 }
 
 /** Last path segment, for messages that name a tree without a wall of path. */
@@ -301,18 +317,18 @@ function dirName(path: string): string {
  *  paths all want this exact behaviour rather than an approximation of it. */
 export async function goToWorktree(branch: string, path: string): Promise<void> {
   const record = get(worktrees).find((w) => samePath(w.path, path));
-  const bound = record ? get(tabs).find((t) => t.worktreeId === record.id) : undefined;
-  if (bound) {
-    switchTab(bound.id);
+  const bound = record ? get(tabs).some((t) => t.worktreeId === record.id) : false;
+  if (record && bound) {
+    // The group, so a tree with several subtabs reopens on the one last used.
+    switchGroup(record.id);
     // The cached status for that root can be minutes old; the panel is about to
     // show it as the answer to "switch to this branch", so re-read it.
     await refreshChanges();
   } else if (samePath(path, get(primaryRoot))) {
     // The project root is not a worktree record — tabs reach it by having no
     // `worktreeId` at all — so it needs its own case rather than a registration.
-    const rootTab = get(tabs).find((t) => !t.worktreeId);
-    if (rootTab) {
-      switchTab(rootTab.id);
+    if (get(tabs).some((t) => !t.worktreeId)) {
+      switchGroup(ROOT_GROUP);
       await refreshChanges();
     } else {
       newTab({ worktreeId: null, tabTitle: branch });
@@ -400,9 +416,9 @@ export async function startWorkOnPr(opts: {
   launch: string | null;
   launcherName: string;
 }): Promise<string | null> {
-  const existingTab = tabForBranch(opts.branch);
-  if (existingTab) {
-    switchTab(existingTab.tabId);
+  const existing = groupForBranch(opts.branch);
+  if (existing) {
+    switchGroup(existing.recordId);
     return null;
   }
 
@@ -491,9 +507,9 @@ export async function createWorktree(opts: {
   const branch = opts.branch.trim();
   if (!branch) return "Name the branch this worktree should check out.";
 
-  const existingTab = tabForBranch(branch);
-  if (existingTab) {
-    switchTab(existingTab.tabId);
+  const existing = groupForBranch(branch);
+  if (existing) {
+    switchGroup(existing.recordId);
     return null;
   }
 
@@ -592,9 +608,9 @@ export async function startWorkOnIssue(opts: {
   // button twice costs nothing. Both spellings are checked: the exact branch the
   // caller asked for, and any branch belonging to this issue — the second
   // catches the case where GitHub suffixed the name on a previous attempt.
-  const existingTab = tabForBranch(wanted) ?? tabForIssue(opts.number);
-  if (existingTab) {
-    switchTab(existingTab.tabId);
+  const existing = groupForBranch(wanted) ?? groupForIssue(opts.number);
+  if (existing) {
+    switchGroup(existing.recordId);
     return null;
   }
 
@@ -611,9 +627,9 @@ export async function startWorkOnIssue(opts: {
   // The name may have changed under us, so re-check for a tab before building
   // anything: `gh issue develop` is idempotent and hands back the existing
   // branch when one is already linked, which is exactly the second-press case.
-  const onFinalName = tabForBranch(branch);
+  const onFinalName = groupForBranch(branch);
   if (onFinalName) {
-    switchTab(onFinalName.tabId);
+    switchGroup(onFinalName.recordId);
     return null;
   }
 
@@ -780,6 +796,81 @@ export const worktreeRows = derived(
     return rows.sort(
       (a, b) => STATE_ORDER[a.state] - STATE_ORDER[b.state] || a.label.localeCompare(b.label),
     );
+  },
+);
+
+/** One entry of the worktree row of the tab bar.
+ *
+ *  A projection of {@link worktreeRows} onto the groups the tab bar actually
+ *  holds, rather than a second join of git, tabs and pull requests — the panel
+ *  and the bar disagreeing about what a tree is called or whether it is missing
+ *  is exactly the class of bug `worktreeRows` was introduced to end. */
+export interface WorktreeGroup {
+  /** Matches `groupKeyOf(tab)`: a worktree record id, or ROOT_GROUP. */
+  key: string;
+  /** Null for the project's own working tree. */
+  worktreeId: string | null;
+  path: string | null;
+  /** Branch name, or the directory when detached; the project name for the root. */
+  label: string;
+  branch: string | null;
+  isRoot: boolean;
+  /** The directory is gone: its tabs stay, but nothing in them can track files. */
+  missing: boolean;
+  /** Subtabs open in this tree. Zero is normal for the root group, which is
+   *  always listed. */
+  tabCount: number;
+  pr: PullRequest | null;
+}
+
+/** The worktree row: the project, then every tree with a tab open in it.
+ *
+ *  Trees with no tab are deliberately absent — the bar is what you are working
+ *  on, and the Trees panel is what exists. The root is the exception and is
+ *  always present, because it is how you get back to the project. */
+export const worktreeGroups = derived(
+  [groupKeys, worktreeRows, worktrees, tabs, activeProject, gitWorktrees],
+  ([keys, rows, records, tabList, project, entries]) => {
+    const countIn = (key: string) =>
+      tabList.filter((t) => (t.worktreeId ?? ROOT_GROUP) === key).length;
+    // Between a project opening and `refreshGitWorktrees` answering, git has
+    // listed nothing — and a record git does not list reads as missing. Without
+    // this the bar flashes every restored worktree amber on every open. A real
+    // repository always lists at least its main tree, so an empty list means
+    // "not asked yet", never "they are all gone".
+    const asked = entries.length > 0;
+
+    return keys.map((key): WorktreeGroup => {
+      if (key === ROOT_GROUP) {
+        const row = rows.find((r) => r.isMain) ?? null;
+        return {
+          key,
+          worktreeId: null,
+          path: row?.path ?? null,
+          label: project?.name ?? "Project",
+          branch: row?.branch ?? null,
+          isRoot: true,
+          missing: false,
+          tabCount: countIn(key),
+          pr: row?.pr ?? null,
+        };
+      }
+      const record = records.find((w) => w.id === key) ?? null;
+      const row = rows.find((r) => r.recordId === key) ?? null;
+      return {
+        key,
+        worktreeId: key,
+        path: record?.path ?? row?.path ?? null,
+        label: row?.label ?? (record ? dirName(record.path) : "worktree"),
+        branch: row?.branch ?? null,
+        isRoot: false,
+        // A key with no row at all is a tab pointing at a record that no longer
+        // exists, which is as gone as a tree gets.
+        missing: asked && (row ? row.state === "missing" : true),
+        tabCount: countIn(key),
+        pr: row?.pr ?? null,
+      };
+    });
   },
 );
 

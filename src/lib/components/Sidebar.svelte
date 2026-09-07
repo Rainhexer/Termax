@@ -441,7 +441,10 @@
         {/each}
       </div>
 
-      <div class="flex min-h-0 flex-1 flex-col px-3 py-2">
+      <!-- min-h-[7rem], not min-h-0: with a zero floor the Changes panel below can
+           drag itself over the whole sidebar and squeeze this section out of
+           existence. The floor is what stops it. -->
+      <div class="flex min-h-[7rem] flex-1 flex-col px-3 py-2" data-sidebar-fill>
         {#if section === "prs"}
           <ErrorBoundary label="Pull requests" compact>
             <PullRequests fill />

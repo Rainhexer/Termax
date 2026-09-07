@@ -21,7 +21,7 @@
     restricted,
     sendToPane,
   } from "../stores";
-  import { startWorkOnPr, tabForBranch } from "../worktrees";
+  import { groupForBranch, startWorkOnPr } from "../worktrees";
   import { enabledLaunchers, launcherById, settings } from "../settings";
   import { ipc } from "../ipc";
   import CreatePrModal from "./CreatePrModal.svelte";
@@ -299,7 +299,7 @@
         {#each prs as pr (pr.number)}
           {@const isCurrent = $currentPr?.number === pr.number}
           {@const review = reviewLabel(pr.reviewDecision)}
-          {@const bound = tabForBranch(pr.headRefName)}
+          {@const bound = groupForBranch(pr.headRefName)}
           <div class="rounded-md {isCurrent ? 'bg-emerald-500/10' : ''}">
             <button
               class="flex w-full items-center gap-1.5 rounded-md px-1 py-0.5 text-left transition-colors hover:bg-zinc-800/70"
@@ -355,11 +355,11 @@
                   <button
                     class="rounded bg-emerald-600/20 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300 hover:bg-emerald-600/30 disabled:opacity-40"
                     title={bound
-                      ? "Switch to the tab already working on this"
+                      ? "Switch to the worktree already working on this"
                       : `Create a worktree for ${pr.headRefName} and open ${prLauncher?.name ?? "a shell"} in a new tab`}
                     disabled={busyPr !== null}
                     onclick={() => startWork(pr)}
-                  >{busyPr === pr.number ? "Working…" : bound ? "Go to tab" : "Start work"}</button>
+                  >{busyPr === pr.number ? "Working…" : bound ? "Go to it" : "Start work"}</button>
 
                   {#if pr.isDraft}
                     <button
