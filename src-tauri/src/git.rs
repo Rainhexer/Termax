@@ -45,7 +45,8 @@ const NULL_DEVICE: &str = "/dev/null";
 /// a trusted repo can't invoke a hook/fsmonitor binary implicitly.
 pub(crate) fn git_command(root: &Path) -> Command {
     let mut cmd = Command::new("git");
-    cmd.env("GIT_TERMINAL_PROMPT", "0")
+    crate::proc::hidden(&mut cmd)
+        .env("GIT_TERMINAL_PROMPT", "0")
         .args([
             "-c",
             "core.fsmonitor=",

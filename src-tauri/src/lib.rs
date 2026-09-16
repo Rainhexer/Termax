@@ -7,6 +7,7 @@ mod merge;
 mod open_folder;
 mod projects;
 mod preview;
+mod proc;
 mod pty;
 mod session;
 mod settings;

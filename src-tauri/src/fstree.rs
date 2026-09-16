@@ -305,7 +305,9 @@ pub fn open_in_default_app(
     }
     #[cfg(target_os = "windows")]
     {
-        Command::new("cmd")
+        // Only the `cmd` host is hidden: `start` gives the associated app its
+        // own window (or console) either way.
+        crate::proc::hidden(&mut Command::new("cmd"))
             .args(["/C", "start", ""])
             .arg(&abs)
             .spawn()
