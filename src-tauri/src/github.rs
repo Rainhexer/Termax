@@ -201,7 +201,8 @@ where
 /// and PR metadata writes.
 fn gh_command(root: &Path) -> Command {
     let mut cmd = Command::new("gh");
-    cmd.current_dir(root)
+    crate::proc::hidden(&mut cmd)
+        .current_dir(root)
         .env("GH_PROMPT_DISABLED", "1")
         .env("GH_SPINNER_DISABLED", "1")
         .env("GH_PAGER", "cat")

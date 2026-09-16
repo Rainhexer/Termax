@@ -261,7 +261,7 @@ pub async fn list_fonts() -> Vec<String> {
         .output();
 
     #[cfg(windows)]
-    let output = Command::new("powershell")
+    let output = crate::proc::hidden(&mut Command::new("powershell"))
         .args([
             "-NoProfile",
             "-Command",
@@ -417,7 +417,10 @@ fn find_on_path(bin: &str) -> Option<PathBuf> {
 }
 
 fn probe_version(path: &Path) -> Option<String> {
-    let out = Command::new(path).arg("--version").output().ok()?;
+    let out = crate::proc::hidden(&mut Command::new(path))
+        .arg("--version")
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
