@@ -5,7 +5,7 @@
    *  given PR looks the same everywhere. It takes a root path and resolves
    *  everything else itself — callers should not each re-derive branch and PR.
    */
-  import { branchByRoot, missingWorktrees } from "../worktrees";
+  import { branchAt, gitWorktrees, isMissingPath, missingWorktrees, samePath } from "../worktrees";
   import { prByBranch } from "../pr";
   import { primaryRoot } from "../stores";
 
@@ -17,10 +17,12 @@
     compact = false,
   }: { root: string | null; showBranch?: boolean; compact?: boolean } = $props();
 
-  const isPrimary = $derived(root !== null && root === $primaryRoot);
-  const branch = $derived(root ? ($branchByRoot.get(root) ?? null) : null);
+  // Every lookup here is by path, not string: `root` arrives as a pane's cwd or
+  // the canonical active root, and git spells the same tree its own way.
+  const isPrimary = $derived(samePath(root, $primaryRoot));
+  const branch = $derived(branchAt($gitWorktrees, root));
   const pr = $derived(branch ? ($prByBranch.get(branch) ?? null) : null);
-  const missing = $derived(root !== null && $missingWorktrees.has(root));
+  const missing = $derived(isMissingPath($missingWorktrees, root));
 
   const tone = $derived.by(() => {
     if (missing) return "border-red-500/50 bg-red-950/50 text-red-300";

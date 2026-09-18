@@ -58,6 +58,7 @@ import {
   worktrees,
 } from "./stores";
 import { setTreeRoot } from "./filetree";
+import { pathKey, samePathKey } from "./paths";
 import { isAlive, queueType } from "./terminals";
 import { settings as appSettings } from "./settings";
 import { prByBranch, resolveSettledPrs, settledPrByBranch } from "./pr";
@@ -100,12 +101,22 @@ export const activeTabRoot = derived(
   },
 );
 
-/** Branch currently checked out in each worktree path, from git. */
-export const branchByRoot = derived(gitWorktrees, (entries) => {
-  const map = new Map<string, string | null>();
-  for (const entry of entries) map.set(entry.path, entry.branch);
-  return map;
-});
+/** Branch git has checked out at `root`, or null when detached or unknown.
+ *
+ *  Matched as a path, not a string: the chip asks with whatever spelling its
+ *  caller had (a pane's cwd, the canonical active root), and git answers in its
+ *  own. A Map keyed by git's spelling missed every Windows lookup. */
+export function branchAt(entries: WorktreeEntry[], root: string | null): string | null {
+  if (!root) return null;
+  return entries.find((e) => samePath(e.path, root))?.branch ?? null;
+}
+
+/** Whether `missingWorktrees` names `path`, under any spelling. */
+export function isMissingPath(missing: Set<string>, path: string | null): boolean {
+  if (!path) return false;
+  for (const m of missing) if (samePath(m, path)) return true;
+  return false;
+}
 
 /** Re-read `git worktree list` and recompute which paths have vanished.
  *
@@ -113,14 +124,21 @@ export const branchByRoot = derived(gitWorktrees, (entries) => {
  *  covers a tree whose directory was deleted from a terminal — git still holds
  *  the administrative record, so the entry is still listed and only that flag
  *  says it is dead. A registered path git does not list at all covers the other
- *  side: someone ran `git worktree prune` while we had a record. */
+ *  side: someone ran `git worktree prune` while we had a record.
+ *
+ *  Compared by `pathKey`, because a record holds the path we built
+ *  (`C:\…\proj-worktrees\x`) and git lists the same tree as `C:/…/proj-worktrees/x`.
+ *  Comparing the strings marked every worktree ever created on Windows as
+ *  orphaned the moment it was made. */
 export async function refreshGitWorktrees(): Promise<void> {
   try {
     const entries = await ipc.listWorktrees();
     gitWorktrees.set(entries);
-    const live = new Set(entries.filter((e) => !e.prunable).map((e) => e.path));
+    const live = new Set(entries.filter((e) => !e.prunable).map((e) => pathKey(e.path)));
     const gone = entries.filter((e) => e.prunable).map((e) => e.path);
-    const orphaned = get(worktrees).map((w) => w.path).filter((p) => !live.has(p));
+    const orphaned = get(worktrees)
+      .map((w) => w.path)
+      .filter((p) => !live.has(pathKey(p)));
     missingWorktrees.set(new Set([...gone, ...orphaned]));
   } catch (err) {
     // Not a git repo, or git failed. Neither is worth an error banner here: the
@@ -147,10 +165,19 @@ function referencedPaths(tabList: Tab[], list: Worktree[]): Set<string> {
  *  returned, which is what every later call must use. */
 const openSessions = new Map<string, string>();
 
-/** Canonical root for a worktree path, once its session is open. */
+/** Canonical root for a worktree path, once its session is open.
+ *
+ *  Looked up by spelling-insensitive key: the table is keyed by the path a
+ *  record holds, but git's spelling of the same tree deserves the same answer. */
 export function canonicalRoot(path: string | null): string | null {
   if (!path) return null;
-  return openSessions.get(path) ?? path;
+  const exact = openSessions.get(path);
+  if (exact) return exact;
+  const key = pathKey(path);
+  for (const [asked, canonical] of openSessions) {
+    if (pathKey(asked) === key) return canonical;
+  }
+  return path;
 }
 
 /** Open/close backend sessions so they match the worktrees the tabs reference. */
@@ -166,6 +193,13 @@ async function reconcileSessions(): Promise<void> {
     try {
       const info = await ipc.openWorktreeSession(path);
       openSessions.set(path, info.root);
+      // The tab bound to this tree may already be on screen, in which case
+      // `activeRoot` was derived before the canonical root was known and still
+      // holds our spelling. Re-derive it now, or `changes` reads `gitByRoot`
+      // under one key while the refresh below writes it under another and the
+      // panel stays empty until the next tab switch. Only visible where the two
+      // spellings differ, which is every Windows path and macOS `/var`.
+      syncActiveRoot();
       await refreshChanges(info.root);
     } catch (err) {
       openSessions.delete(path);
@@ -186,9 +220,10 @@ async function reconcileSessions(): Promise<void> {
 }
 
 /** Register a worktree with the workspace, returning its id. Idempotent by path,
- *  so adopting a tree that already exists reuses the same record. */
+ *  so adopting a tree that already exists reuses the same record — including
+ *  when the caller has git's spelling of a path we registered in our own. */
 export function registerWorktree(path: string): string {
-  const existing = get(worktrees).find((w) => w.path === path);
+  const existing = get(worktrees).find((w) => samePath(w.path, path));
   if (existing) return existing.id;
   const record: Worktree = { id: crypto.randomUUID(), path };
   worktrees.update((list) => [...list, record]);
@@ -243,7 +278,7 @@ export function isAlreadyCheckedOut(message: string): boolean {
 export function groupForBranch(branch: string): { recordId: string; path: string } | null {
   const entry = get(gitWorktrees).find((w) => w.branch === branch);
   if (!entry) return null;
-  const record = get(worktrees).find((w) => w.path === entry.path);
+  const record = get(worktrees).find((w) => samePath(w.path, entry.path));
   if (!record) return null;
   const bound = get(tabs).some((t) => t.worktreeId === record.id);
   return bound ? { recordId: record.id, path: entry.path } : null;
@@ -251,15 +286,17 @@ export function groupForBranch(branch: string): { recordId: string; path: string
 
 /** Compare two roots as paths, not as strings.
  *
- *  The same tree reaches us spelled two ways: git prints resolved paths, while a
- *  path that came from the picker or the persisted workspace may carry a trailing
- *  separator or predate the backend canonicalizing it. Both spellings are
- *  compared so a stale one cannot make a tree look like a different one. */
-function samePath(a: string | null | undefined, b: string | null | undefined): boolean {
+ *  The same tree reaches us spelled several ways: git prints forward slashes,
+ *  the picker and `worktreePathFor` produce native separators, the backend's
+ *  canonical root carries Windows' `\\?\` prefix, and a persisted path may have a
+ *  trailing separator or predate canonicalization. `pathKey` folds all of that;
+ *  the session table is then consulted for what it cannot fold — a symlink the
+ *  backend resolved (macOS `/var` → `/private/var`) — so a stale spelling cannot
+ *  make a tree look like a different one. */
+export function samePath(a: string | null | undefined, b: string | null | undefined): boolean {
   if (!a || !b) return false;
-  const norm = (p: string) => p.replace(/[\/\\]+$/, "");
-  if (norm(a) === norm(b)) return true;
-  return norm(canonicalRoot(a) ?? a) === norm(canonicalRoot(b) ?? b);
+  if (samePathKey(a, b)) return true;
+  return samePathKey(canonicalRoot(a) ?? a, canonicalRoot(b) ?? b);
 }
 
 /** Branches checked out in a tree *other* than the one on screen, branch → path.
@@ -296,7 +333,7 @@ export function groupForIssue(number: number): { recordId: string; path: string 
     (w) => w.branch === String(number) || w.branch?.startsWith(prefix),
   );
   if (!entry) return null;
-  const record = get(worktrees).find((w) => w.path === entry.path);
+  const record = get(worktrees).find((w) => samePath(w.path, entry.path));
   if (!record) return null;
   const bound = get(tabs).some((t) => t.worktreeId === record.id);
   return bound ? { recordId: record.id, path: entry.path } : null;
@@ -382,7 +419,7 @@ export async function ensureWorktree(
 ): Promise<string> {
   const path = worktreePathFor(projectPath, branch);
 
-  const existing = get(gitWorktrees).find((w) => w.path === path && !w.prunable);
+  const existing = get(gitWorktrees).find((w) => samePath(w.path, path) && !w.prunable);
   if (existing) return path;
 
   if (opts.fromFork && opts.prNumber !== undefined) {
@@ -734,7 +771,7 @@ const STATE_ORDER: Record<WorktreeState, number> = {
 export const worktreeRows = derived(
   [gitWorktrees, worktrees, tabs, missingWorktrees, prByBranch, settledPrByBranch, primaryRoot],
   ([entries, records, tabList, missing, openPrs, settledPrs, primary]) => {
-    const isMissing = (path: string) => [...missing].some((m) => samePath(m, path));
+    const isMissing = (path: string) => isMissingPath(missing, path);
     const prFor = (branch: string | null) =>
       branch ? (openPrs.get(branch) ?? settledPrs.get(branch) ?? null) : null;
     const tabsWith = (predicate: (tab: Tab) => boolean) =>
@@ -993,6 +1030,17 @@ export async function forgetMissingWorktrees(): Promise<string | null> {
   return null;
 }
 
+/** Point `activeRoot` (and the file tree) at the canonical root of the tab on
+ *  screen. Runs whenever the active tab's root changes, and again when a session
+ *  opens, since only then is the canonical spelling known. */
+function syncActiveRoot(): void {
+  const canonical = canonicalRoot(get(activeTabRoot));
+  activeRoot.set(canonical);
+  // Switching to a tab on another worktree makes every cached directory listing
+  // wrong — same relative paths, different files.
+  setTreeRoot(canonical);
+}
+
 /** Wire the reconciler and keep `activeRoot` pointed at the active tab.
  *  Called once at startup. */
 export function initWorktreeListeners(): void {
@@ -1024,13 +1072,7 @@ export function initWorktreeListeners(): void {
   // `activeRoot` lives in stores.ts so that `changes`/`gitStatus` can derive from
   // it without stores.ts importing this module — keeping the dependency
   // one-directional and the import graph acyclic.
-  activeTabRoot.subscribe((root) => {
-    const canonical = canonicalRoot(root);
-    activeRoot.set(canonical);
-    // Switching to a tab on another worktree makes every cached directory listing
-    // wrong — same relative paths, different files.
-    setTreeRoot(canonical);
-  });
+  activeTabRoot.subscribe(syncActiveRoot);
 
   let scheduled = false;
   const schedule = () => {

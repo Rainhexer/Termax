@@ -20,6 +20,7 @@
     refreshGitWorktrees,
     refreshWorktreePrs,
     removeWorktree,
+    samePath,
     worktreeRows,
     type WorktreeRow,
   } from "../worktrees";
@@ -88,13 +89,11 @@
 
   /** Whether this row is the tree the active tab is running in.
    *
-   *  Compared with the trailing separator trimmed, the way `worktrees.ts` does:
-   *  git's spelling and the session's canonical spelling of one tree can differ
-   *  by one. */
+   *  Compared as paths, the way `worktrees.ts` does: git's spelling and the
+   *  session's canonical spelling of one tree differ on Windows in separators
+   *  and the `\\?\` prefix, and by a trailing separator anywhere. */
   function here(row: WorktreeRow): boolean {
-    if ($activeRoot === null) return false;
-    const norm = (p: string) => p.replace(/[\/\\]+$/, "");
-    return norm(row.path) === norm($activeRoot);
+    return samePath(row.path, $activeRoot);
   }
 
   /** One way in, for every row: `goToWorktree` already knows how to reach a tree
