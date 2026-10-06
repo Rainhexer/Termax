@@ -135,9 +135,16 @@ jobs:
       - name: Verify macOS ad-hoc signature
         if: matrix.platform == 'macos-latest'
         run: |
-          app=$(find src-tauri/target/universal-apple-darwin/release/bundle/macos \
-                  -maxdepth 1 -name '*.app' | head -1)
-          [ -n "$app" ] || { echo "No .app bundle found"; exit 1; }
+          # The bundler removes the loose .app once the .dmg is built, so check
+          # the copy that actually ships: the one inside the .dmg.
+          dmg=$(find src-tauri/target/universal-apple-darwin/release/bundle/dmg \
+                  -maxdepth 1 -name '*.dmg' | head -1)
+          [ -n "$dmg" ] || { echo "No .dmg found"; exit 1; }
+          mnt=$(mktemp -d)
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mnt"
+          trap 'hdiutil detach "$mnt" -force || true' EXIT
+          app=$(find "$mnt" -maxdepth 1 -name '*.app' | head -1)
+          [ -n "$app" ] || { echo "No .app bundle in dmg"; exit 1; }
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign --display --verbose=4 "$app" 2>&1 | tee /tmp/codesign.txt
           grep -q 'Signature=adhoc' /tmp/codesign.txt \
