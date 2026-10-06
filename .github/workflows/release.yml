@@ -1,0 +1,310 @@
+name: Release
+
+# Build native installers for macOS, Linux, and Windows, sign them, and attach
+# them to a GitHub Release. Triggered by pushing a version tag, e.g.:
+#
+#   git tag v1.0.0
+#   git push origin v1.0.0
+#
+# The `build` matrix compiles per-OS artifacts and uploads them as workflow
+# artifacts. The `release` job then signs everything with the project GPG key,
+# writes a signed SHA256SUMS manifest, and publishes the GitHub Release with
+# every installer attached. Manual (workflow_dispatch) runs are published as
+# pre-releases so they never become the "latest" release.
+#
+# Signing is best-effort by design: if a secret is missing the workflow still
+# produces a release, logs a warning, and says so in the release notes. See
+# docs/SIGNING.md for how to configure the secrets:
+#
+#   GPG_PRIVATE_KEY / GPG_KEY_ID / GPG_PASSPHRASE  — Linux + manifest signing
+#   WINDOWS_CERTIFICATE / WINDOWS_CERTIFICATE_PASSWORD — Authenticode signing
+#
+# macOS builds are ad-hoc signed unconditionally (no secrets, no Apple account).
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS universal binary (Apple Silicon + Intel in one .dmg).
+          - platform: macos-latest
+            args: "--target universal-apple-darwin"
+            rust-targets: "aarch64-apple-darwin,x86_64-apple-darwin"
+          # Linux: .deb, .rpm, .AppImage. 22.04 for broad glibc compatibility.
+          - platform: ubuntu-22.04
+            args: ""
+            rust-targets: ""
+          # Windows: .msi.
+          - platform: windows-latest
+            args: ""
+            rust-targets: ""
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libgtk-3-dev \
+            libssl-dev \
+            build-essential \
+            file
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # Imports the PFX into the runner's certificate store and writes a config
+      # overlay pointing Tauri at its thumbprint, so the bundler signs both
+      # Termax.exe and the .msi with signtool during bundling. Emits an empty
+      # extra_args when the secret is absent, leaving the build unsigned.
+      - name: Prepare Windows code signing
+        id: winsign
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE)) {
+            Write-Host "::warning title=Unsigned Windows build::WINDOWS_CERTIFICATE secret is not set - the .msi will not be Authenticode signed."
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "extra_args=" -Encoding utf8
+            exit 0
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP "termax-codesign.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $pw = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation "Cert:\CurrentUser\My" -Password $pw
+          Remove-Item $pfx -Force
+          $overlay = @{ bundle = @{ windows = @{ certificateThumbprint = $cert.Thumbprint } } } | ConvertTo-Json -Depth 5
+          # Absolute path: --config is resolved against the CLI's working
+          # directory, which tauri-action does not guarantee.
+          $overlayPath = Join-Path $env:RUNNER_TEMP "tauri.signing.conf.json"
+          Set-Content -Path $overlayPath -Value $overlay -Encoding utf8
+          Write-Host "Signing with certificate $($cert.Subject) [$($cert.Thumbprint)]"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "extra_args=--config $overlayPath" -Encoding utf8
+
+      - name: Build
+        id: tauri
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # No tagName/releaseName: tauri-action builds only. Publishing happens
+          # in the release job, after signing.
+          args: ${{ matrix.args }} ${{ steps.winsign.outputs.extra_args }}
+
+      # Ad-hoc signing comes from bundle.macOS.signingIdentity = "-" in
+      # tauri.conf.json. Fail loudly if it silently did not happen: an unsigned
+      # arm64 binary is killed on launch by macOS, which is far worse than the
+      # Gatekeeper prompt.
+      - name: Verify macOS ad-hoc signature
+        if: matrix.platform == 'macos-latest'
+        run: |
+          app=$(find src-tauri/target/universal-apple-darwin/release/bundle/macos \
+                  -maxdepth 1 -name '*.app' | head -1)
+          [ -n "$app" ] || { echo "No .app bundle found"; exit 1; }
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign --display --verbose=4 "$app" 2>&1 | tee /tmp/codesign.txt
+          grep -q 'Signature=adhoc' /tmp/codesign.txt \
+            || { echo "Expected an ad-hoc signature"; exit 1; }
+
+      - name: Verify Windows signature
+        if: matrix.platform == 'windows-latest' && steps.winsign.outputs.extra_args != ''
+        shell: pwsh
+        run: |
+          $bad = 0
+          foreach ($p in (Get-ChildItem -Recurse -Path "src-tauri/target/release/bundle/msi" -Filter *.msi)) {
+            $sig = Get-AuthenticodeSignature $p.FullName
+            Write-Host "$($p.Name): $($sig.Status) - $($sig.SignerCertificate.Subject)"
+            # UnknownError is what a valid signature from an untrusted (self-signed)
+            # root reports; only a missing or broken signature is a failure here.
+            if ($sig.Status -eq "NotSigned" -or $null -eq $sig.SignerCertificate) { $bad = 1 }
+          }
+          exit $bad
+
+      - name: Collect artifacts
+        shell: bash
+        env:
+          ARTIFACT_PATHS: ${{ steps.tauri.outputs.artifactPaths }}
+        run: |
+          mkdir -p staging
+          node -e '
+            const fs = require("fs"), path = require("path");
+            const paths = JSON.parse(process.env.ARTIFACT_PATHS);
+            let n = 0;
+            for (const p of paths) {
+              // Skip .app bundles and any other directory entries.
+              if (!fs.existsSync(p) || !fs.statSync(p).isFile()) continue;
+              fs.copyFileSync(p, path.join("staging", path.basename(p)));
+              console.log("collected " + path.basename(p));
+              n++;
+            }
+            if (n === 0) { console.error("no artifacts collected"); process.exit(1); }
+          '
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.platform }}
+          path: staging/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: artifacts-*
+          merge-multiple: true
+          path: dist
+
+      # rpmsign lives in the `rpm` package; needed for RPM header signatures.
+      - name: Install signing tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm gnupg
+
+      - name: Import GPG signing key
+        id: gpg
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          if [ -z "$GPG_PRIVATE_KEY" ]; then
+            echo "::warning title=Unsigned release::GPG_PRIVATE_KEY secret is not set - artifacts will ship with checksums only."
+            echo "signing=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --quiet --import
+          echo "signing=true" >> "$GITHUB_OUTPUT"
+
+      - name: Sign artifacts
+        if: steps.gpg.outputs.signing == 'true'
+        env:
+          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          chmod +x scripts/sign-release.sh
+          ./scripts/sign-release.sh dist
+          # Ship the public key next to the artifacts so verification needs
+          # nothing but the release page.
+          gpg --armor --export "$GPG_KEY_ID" > dist/termax-signing-key.asc
+
+      - name: Write checksums (unsigned fallback)
+        if: steps.gpg.outputs.signing != 'true'
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+
+      - name: Prepare release metadata
+        id: meta
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${{ github.ref_name }}"
+            # The tag already exists; gh rejects --target for existing tags.
+            TARGET_ARG=""
+            PRERELEASE_ARG=""
+          else
+            TAG="v${VERSION}-manual.${{ github.run_number }}"
+            TARGET_ARG="--target ${{ github.sha }}"
+            PRERELEASE_ARG="--prerelease"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "target_arg=$TARGET_ARG" >> "$GITHUB_OUTPUT"
+          echo "prerelease_arg=$PRERELEASE_ARG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          SIGNED="${{ steps.gpg.outputs.signing }}"
+          {
+            echo "Download an installer for your platform below. Installation"
+            echo "instructions: [INSTALL.md](https://github.com/${{ github.repository }}/blob/master/INSTALL.md)."
+            echo
+            echo "## Verifying your download"
+            echo
+            if [ "$SIGNED" = "true" ]; then
+              echo '`SHA256SUMS` lists the hash of every artifact and `SHA256SUMS.asc` is a'
+              echo 'detached GPG signature over it. Each artifact also has its own `.asc`'
+              echo 'signature. The signing public key is attached as `termax-signing-key.asc`.'
+              echo
+              echo '```sh'
+              echo "gpg --import termax-signing-key.asc"
+              echo "gpg --verify SHA256SUMS.asc SHA256SUMS"
+              echo "sha256sum --check --ignore-missing SHA256SUMS"
+              echo '```'
+              echo
+              echo 'The `.rpm` packages carry an embedded signature as well:'
+              echo
+              echo '```sh'
+              echo "sudo rpm --import termax-signing-key.asc && rpm -K Termax-*.rpm"
+              echo '```'
+            else
+              echo 'This build was produced without the release signing key, so only'
+              echo 'checksums are available:'
+              echo
+              echo '```sh'
+              echo "sha256sum --check --ignore-missing SHA256SUMS"
+              echo '```'
+            fi
+            echo
+            echo "## First launch"
+            echo
+            echo "- **macOS** — the app is ad-hoc signed but not notarized. Right-click"
+            echo "  Termax in Applications → **Open** → **Open**, or run"
+            echo '  `xattr -dr com.apple.quarantine /Applications/Termax.app`.'
+            echo "- **Windows** — the installer is signed, but without a CA-issued"
+            echo "  certificate SmartScreen may still warn on first run:"
+            echo "  **More info → Run anyway**."
+            echo "- **Linux** — no extra steps."
+          } > release-notes.md
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.meta.outputs.tag }}" \
+            ${{ steps.meta.outputs.prerelease_arg }} \
+            ${{ steps.meta.outputs.target_arg }} \
+            --title "Termax ${{ steps.meta.outputs.version }}" \
+            --notes-file release-notes.md \
+            dist/*

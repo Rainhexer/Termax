@@ -1,0 +1,394 @@
+@import "tailwindcss";
+@import "@xterm/xterm/css/xterm.css";
+
+/* Theme tokens -------------------------------------------------------------
+   These defaults mirror the "Termax Dark" preset in lib/theme.ts and exist so
+   the first paint is themed before settings load; applyTheme() then overwrites
+   them on <html> whenever the active theme changes. Keep the two in sync. */
+:root {
+  --tmx-ui-bg: #09090b;
+  --tmx-ui-surface: #18181b;
+  --tmx-ui-elevated: #27272a;
+  --tmx-ui-raised: #3f3f46;
+
+  --tmx-ui-text-bright: #f4f4f5;
+  --tmx-ui-text: #e4e4e7;
+  --tmx-ui-text-soft: #d4d4d8;
+  --tmx-ui-text-dim: #a1a1aa;
+  --tmx-ui-text-muted: #71717a;
+  --tmx-ui-text-faint: #52525b;
+
+  --tmx-ui-accent-soft: #d1fae5;
+  --tmx-ui-accent: #34d399;
+  --tmx-ui-accent-strong: #10b981;
+  --tmx-ui-accent-deep: #059669;
+  --tmx-ui-accent-dim: #064e3b;
+  --tmx-ui-accent-darkest: #022c22;
+  --tmx-ui-on-accent: #ffffff;
+
+  --tmx-ui-warn-light: #fde68a;
+  --tmx-ui-warn-soft: #fcd34d;
+  --tmx-ui-warn: #fbbf24;
+  --tmx-ui-warn-strong: #f59e0b;
+  --tmx-ui-warn-deep: #92400e;
+  --tmx-ui-warn-darkest: #451a03;
+
+  --tmx-ui-danger-soft: #fca5a5;
+  --tmx-ui-danger: #f87171;
+  --tmx-ui-danger-strong: #ef4444;
+  --tmx-ui-danger-deep: #991b1b;
+  --tmx-ui-danger-dim: #7f1d1d;
+  --tmx-ui-danger-darkest: #450a0a;
+
+  --tmx-ui-info: #60a5fa;
+  --tmx-ui-special: #c084fc;
+  --tmx-ui-scrim: #000000;
+
+  --tmx-term-background: #131316;
+  --tmx-term-foreground: #e4e4e7;
+  --tmx-term-cursor: #34d399;
+  --tmx-term-cursor-accent: #131316;
+  --tmx-term-selection: #3f3f46;
+
+  --tmx-ed-background: #1e1e1e;
+  --tmx-ed-foreground: #e4e4e7;
+
+  --tmx-pv-page: #ffffff;
+  --tmx-pv-bg: #1a1a1a;
+  --tmx-pv-text: #d4d4d4;
+  --tmx-pv-heading: #ffffff;
+  --tmx-pv-link: #4ea1ff;
+  --tmx-pv-code: #e4e4e7;
+  --tmx-pv-code-bg: #2a2a2a;
+  --tmx-pv-border: #333333;
+  --tmx-pv-quote-bar: #10b981;
+  --tmx-pv-quote-bg: #181818;
+  --tmx-pv-muted: #a1a1aa;
+
+  --tmx-font-ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --tmx-font-preview: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --tmx-font-preview-code: ui-monospace, monospace;
+  --tmx-font-preview-size: 14px;
+}
+
+/* Re-point the Tailwind ramps the UI uses at theme tokens, so ordinary utility
+   classes (bg-zinc-800, text-emerald-400, …) are themeable without touching
+   any component. Each Tailwind shade owns one semantic role. */
+@theme inline {
+  --color-zinc-950: var(--tmx-ui-bg);
+  --color-zinc-900: var(--tmx-ui-surface);
+  --color-zinc-800: var(--tmx-ui-elevated);
+  --color-zinc-700: var(--tmx-ui-raised);
+  --color-zinc-600: var(--tmx-ui-text-faint);
+  --color-zinc-500: var(--tmx-ui-text-muted);
+  --color-zinc-400: var(--tmx-ui-text-dim);
+  --color-zinc-300: var(--tmx-ui-text-soft);
+  --color-zinc-200: var(--tmx-ui-text);
+  --color-zinc-100: var(--tmx-ui-text-bright);
+
+  --color-emerald-100: var(--tmx-ui-accent-soft);
+  --color-emerald-400: var(--tmx-ui-accent);
+  --color-emerald-500: var(--tmx-ui-accent-strong);
+  --color-emerald-600: var(--tmx-ui-accent-deep);
+  --color-emerald-900: var(--tmx-ui-accent-dim);
+  --color-emerald-950: var(--tmx-ui-accent-darkest);
+
+  --color-amber-200: var(--tmx-ui-warn-light);
+  --color-amber-300: var(--tmx-ui-warn-soft);
+  --color-amber-400: var(--tmx-ui-warn);
+  --color-amber-500: var(--tmx-ui-warn-strong);
+  --color-amber-800: var(--tmx-ui-warn-deep);
+  --color-amber-950: var(--tmx-ui-warn-darkest);
+
+  --color-red-300: var(--tmx-ui-danger-soft);
+  --color-red-400: var(--tmx-ui-danger);
+  --color-red-500: var(--tmx-ui-danger-strong);
+  --color-red-800: var(--tmx-ui-danger-deep);
+  --color-red-900: var(--tmx-ui-danger-dim);
+  --color-red-950: var(--tmx-ui-danger-darkest);
+
+  --color-blue-400: var(--tmx-ui-info);
+  --color-purple-400: var(--tmx-ui-special);
+
+  /* `white` is only ever used as "on top of an accent fill", `black` only as
+     scrim/shadow — both belong to the theme. */
+  --color-white: var(--tmx-ui-on-accent);
+  --color-black: var(--tmx-ui-scrim);
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--tmx-ui-bg);
+  font-family: var(--tmx-font-ui);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.xterm {
+  height: 100%;
+}
+
+.xterm .xterm-viewport {
+  background-color: transparent !important;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--tmx-ui-raised);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Native <select> popups are drawn by the platform, which only reads
+   `color-scheme` (set by applyTheme) and the option colours — without these a
+   dark theme gets a white popup with white text. */
+select,
+option,
+optgroup {
+  background-color: var(--tmx-ui-surface);
+  color: var(--tmx-ui-text);
+}
+
+/* File-tree context menu rows. Kept here rather than in a Svelte <style> block:
+   the Tailwind Vite plugin also compiles component style modules, and a single
+   component-scoped stylesheet was enough to break its dev-server transform. */
+.menu-item {
+  display: block;
+  width: 100%;
+  padding: 0.3rem 0.75rem;
+  text-align: left;
+  font-size: 0.75rem;
+  color: var(--tmx-ui-text);
+}
+.menu-item:hover {
+  background: var(--tmx-ui-elevated);
+}
+
+/* Home screen: fades the decorative glyph field out under the cards, so the
+   texture reads at the edges and never behind text. Same reason as above for
+   living in this file rather than in the component. */
+.ascii-field-fade {
+  background: radial-gradient(
+    ellipse 70% 62% at 50% 48%,
+    var(--tmx-ui-bg) 42%,
+    color-mix(in srgb, var(--tmx-ui-bg) 62%, transparent) 78%,
+    transparent 100%
+  );
+}
+
+/* Pane chrome: backgrounds and the active-edge glow follow the theme. */
+.pane-term-bg {
+  background: var(--tmx-term-background);
+}
+.pane-term-veil {
+  background: color-mix(in srgb, var(--tmx-term-background) 80%, transparent);
+}
+.pane-editor-bg {
+  background: var(--tmx-ed-background);
+}
+.glow-accent {
+  background: var(--tmx-ui-accent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--tmx-ui-accent) 40%, transparent);
+}
+.glow-warn {
+  background: var(--tmx-ui-warn);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--tmx-ui-warn) 90%, transparent);
+}
+
+/* Bell attention: a pane whose command finished (or wants input) pulses its
+   border; the tab holding it pulses its background. */
+@keyframes termax-bell-pulse {
+  0%,
+  100% {
+    border-color: color-mix(in srgb, var(--tmx-ui-warn) 55%, transparent);
+    box-shadow: 0 0 0 0 transparent;
+  }
+  50% {
+    border-color: var(--tmx-ui-warn);
+    box-shadow: 0 0 14px 2px color-mix(in srgb, var(--tmx-ui-warn) 45%, transparent);
+  }
+}
+.bell-pulse {
+  animation: termax-bell-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes termax-bell-pulse-tab {
+  0%,
+  100% {
+    background-color: color-mix(in srgb, var(--tmx-ui-warn) 6%, transparent);
+  }
+  50% {
+    background-color: color-mix(in srgb, var(--tmx-ui-warn) 22%, transparent);
+  }
+}
+.bell-pulse-tab {
+  animation: termax-bell-pulse-tab 1.4s ease-in-out infinite;
+}
+
+/* Lines an agent wrote into a file while it was open in the editor. The point
+   is to be *seen arriving*: without it a file changing under the cursor is
+   indistinguishable from having mis-remembered what it said. Applied by
+   EditorPane as Monaco decorations and removed again ~1.4s later. */
+@keyframes termax-agent-flash {
+  0% {
+    background-color: color-mix(in srgb, var(--tmx-ui-accent) 42%, transparent);
+  }
+  35% {
+    background-color: color-mix(in srgb, var(--tmx-ui-accent) 30%, transparent);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+.tmx-agent-flash {
+  animation: termax-agent-flash 1.4s ease-out forwards;
+}
+
+/* A deletion leaves no lines to highlight, so the seam it closed is marked
+   instead — a rule between the two lines that are now neighbours. */
+@keyframes termax-agent-flash-cut {
+  0% {
+    box-shadow: inset 0 2px 0 -1px color-mix(in srgb, var(--tmx-ui-accent) 75%, transparent);
+  }
+  100% {
+    box-shadow: inset 0 2px 0 -1px transparent;
+  }
+}
+.tmx-agent-flash-cut {
+  animation: termax-agent-flash-cut 1.4s ease-out forwards;
+}
+
+@keyframes termax-agent-flash-gutter {
+  0% {
+    border-left: 2px solid var(--tmx-ui-accent);
+  }
+  100% {
+    border-left: 2px solid transparent;
+  }
+}
+.tmx-agent-flash-gutter {
+  animation: termax-agent-flash-gutter 1.4s ease-out forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bell-pulse {
+    animation: none;
+    border-color: var(--tmx-ui-warn);
+  }
+  .bell-pulse-tab {
+    animation: none;
+    background-color: color-mix(in srgb, var(--tmx-ui-warn) 15%, transparent);
+  }
+  /* Still marked, just not animated: the highlight is information, not
+     decoration, and it is removed on a timer either way. */
+  .tmx-agent-flash {
+    animation: none;
+    background-color: color-mix(in srgb, var(--tmx-ui-accent) 30%, transparent);
+  }
+  .tmx-agent-flash-cut,
+  .tmx-agent-flash-gutter {
+    animation: none;
+  }
+  .tmx-agent-flash-gutter {
+    border-left: 2px solid var(--tmx-ui-accent);
+  }
+}
+
+/* Rendered Markdown preview (EditorPane "Preview" mode). */
+.md-preview {
+  color: var(--tmx-pv-text);
+  font-family: var(--tmx-font-preview);
+  font-size: var(--tmx-font-preview-size);
+  line-height: 1.65;
+  padding: 24px 32px;
+  max-width: 900px;
+  margin: 0 auto;
+  user-select: text;
+}
+.md-preview h1,
+.md-preview h2,
+.md-preview h3,
+.md-preview h4 {
+  color: var(--tmx-pv-heading);
+  font-weight: 600;
+  line-height: 1.25;
+  margin: 1.4em 0 0.5em;
+}
+.md-preview h1 {
+  font-size: 1.9em;
+  border-bottom: 1px solid var(--tmx-pv-border);
+  padding-bottom: 0.3em;
+}
+.md-preview h2 {
+  font-size: 1.5em;
+  border-bottom: 1px solid var(--tmx-pv-border);
+  padding-bottom: 0.25em;
+}
+.md-preview h3 {
+  font-size: 1.25em;
+}
+.md-preview p {
+  margin: 0.7em 0;
+}
+.md-preview a {
+  color: var(--tmx-pv-link);
+  text-decoration: none;
+}
+.md-preview a:hover {
+  text-decoration: underline;
+}
+.md-preview code {
+  color: var(--tmx-pv-code);
+  background: var(--tmx-pv-code-bg);
+  border-radius: 4px;
+  padding: 0.15em 0.4em;
+  font-family: var(--tmx-font-preview-code);
+  font-size: 0.9em;
+}
+.md-preview pre {
+  background: var(--tmx-pv-code-bg);
+  border: 1px solid var(--tmx-pv-border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  overflow-x: auto;
+}
+.md-preview pre code {
+  background: none;
+  padding: 0;
+}
+.md-preview blockquote {
+  border-left: 3px solid var(--tmx-pv-quote-bar);
+  margin: 0.7em 0;
+  padding: 0.2em 1em;
+  color: var(--tmx-pv-muted);
+  background: var(--tmx-pv-quote-bg);
+  border-radius: 0 6px 6px 0;
+}
+.md-preview ul,
+.md-preview ol {
+  margin: 0.6em 0;
+  padding-left: 1.6em;
+}
+.md-preview li {
+  margin: 0.25em 0;
+}
+.md-preview hr {
+  border: none;
+  border-top: 1px solid var(--tmx-pv-border);
+  margin: 1.5em 0;
+}
+.md-preview img {
+  max-width: 100%;
+  border-radius: 6px;
+}
+.md-preview del {
+  color: var(--tmx-pv-muted);
+}

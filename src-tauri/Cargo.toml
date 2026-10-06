@@ -1,0 +1,34 @@
+[package]
+name = "termax"
+version = "1.0.0"
+description = "Terminal multiplexer and project manager for AI coding agents"
+license = "GPL-3.0-only"
+edition = "2021"
+
+[lib]
+name = "termax_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+portable-pty = "0.9"
+notify = "8"
+similar = "2"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
+walkdir = "2"
+dirs = "6"
+vt100 = "0.16.2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[profile.release]
+lto = true
+codegen-units = 1
