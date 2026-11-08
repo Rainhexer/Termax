@@ -219,6 +219,14 @@ export function toggleMaximizedPane(paneId: string) {
   maximizedPaneId.update((current) => (current === paneId ? null : paneId));
 }
 
+// A maximized pane that leaves the visible layout (closed, moved to another
+// tab, or the tab switched away) must release fullscreen. TilingLayout hides
+// every pane but the maximized one, so a stale id would blank the whole area.
+layout.subscribe((tree) => {
+  const id = get(maximizedPaneId);
+  if (id && !layoutOps.findPane(tree, id)) maximizedPaneId.set(null);
+});
+
 /** The pane currently in hand, so the UI can react to a drag in flight (the tab
  *  bar reveals itself, the "+" offers a tear-off). Written only by paneDrag.ts. */
 export const draggedPaneId = writable<string | null>(null);
