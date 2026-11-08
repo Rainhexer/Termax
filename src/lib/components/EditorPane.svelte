@@ -1246,8 +1246,9 @@ import { getMonaco, languageForPath, MONACO_THEME } from "../monaco";
   {:else}
     <!-- Monaco host stays mounted so the buffer/undo survive mode switches. -->
     <div class="min-h-0 flex-1 {viewMode === 'preview' ? 'hidden' : ''}" bind:this={host}></div>
-    <!-- Preview container stays in the DOM across view-mode toggles so the
-         browser preserves its scroll position naturally. Only hidden via CSS. -->
+    <!-- The markdown container stays in the DOM across view-mode toggles so
+         the browser preserves its scroll position naturally. The html/svg
+         frame does not; see the note on it below. -->
     {#if previewKind === "markdown"}
       <div
         bind:this={previewEl}
@@ -1267,11 +1268,18 @@ import { getMonaco, languageForPath, MONACO_THEME } from "../monaco";
            `allow-same-origin` grants the frame its *own* 127.0.0.1 origin, not
            ours — without it the document is opaque again and none of the above
            works. That origin is still not the app's, so the parent cannot read
-           the frame; scroll position is exchanged over postMessage as before. -->
-      {#if frameUrl}
+           the frame; scroll position is exchanged over postMessage as before.
+
+           Mounted only while previewing, unlike the markdown view above. A
+           hidden frame is still a live page: every overlay push while typing,
+           and every write an agent makes to anything the page uses, reloads it
+           and fetches all of its assets again, and WebKit keeps the copies.
+           Kept mounted behind the editor, a page with a few megabytes of images
+           grew to gigabytes over an afternoon of editing its source. The
+           frame's "ready" message restores the scroll position on remount. -->
+      {#if frameUrl && viewMode === "preview"}
         <iframe
           bind:this={previewFrame}
-          class:hidden={viewMode !== "preview"}
           class="min-h-0 flex-1 border-0 bg-[var(--tmx-pv-page)]"
           title="Preview of {fileName}"
           sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
