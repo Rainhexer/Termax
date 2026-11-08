@@ -1177,9 +1177,9 @@ export function detach(paneId: string, host: HTMLElement) {
   if (!entry || entry.el.parentElement !== host) return;
   entry.el.remove();
   setVisible(entry, false);
-  // Hand the GL context back so a pane that is actually on screen can use it.
-  // xterm has already stopped drawing this one (its IntersectionObserver sees
-  // the detached element), so a plain canvas renderer costs it nothing.
+  // Give up the renderer's canvases and any GL context: xterm has already
+  // stopped drawing this pane (its IntersectionObserver sees the detached
+  // element), and a pane on screen can use the context.
   if (entry.opened) renderers.apply(paneId, entry.term, false);
 }
 

@@ -642,7 +642,8 @@ fn send_disk_file(
 ) -> std::io::Result<Flow> {
     let mime = mime_for(&abs.to_string_lossy());
     let mut file = std::fs::File::open(abs)?;
-    let len = file.metadata()?.len();
+    let meta = file.metadata()?;
+    let len = meta.len();
 
     // Injected documents change length, so they are sent whole; media is
     // streamed and honours Range, without which audio and video cannot seek.
@@ -654,13 +655,46 @@ fn send_disk_file(
         return Ok(Flow::Keep);
     }
 
-    let range = req.header("range").and_then(|h| parse_range(h, len));
+    // Revalidated rather than re-sent. Under `no-store` every reload of the
+    // page downloaded every asset again, and WebKit keeps each download's
+    // bytes for the life of the web process — closing the preview does not
+    // give them back. A page with a few dozen photos grew by its whole weight
+    // per reload, into gigabytes after a minute of clicking reload. With a
+    // validator an unchanged file is answered with an empty 304 and the copy
+    // already held is reused; `no-cache` still makes every use ask, so an
+    // edited asset is never shown stale.
+    let etag = disk_etag(&meta);
+    let range_header = req.header("range");
+    if range_header.is_none()
+        && req
+            .header("if-none-match")
+            .is_some_and(|tags| etag_matches(tags, &etag))
+    {
+        let mut sink = out;
+        sink.write_all(
+            format!(
+                "HTTP/1.1 304 Not Modified\r\n\
+                 Cache-Control: no-cache\r\n\
+                 ETag: {etag}\r\n\
+                 Connection: keep-alive\r\n\r\n"
+            )
+            .as_bytes(),
+        )?;
+        sink.flush()?;
+        return Ok(Flow::Keep);
+    }
+
+    let range = range_header.and_then(|h| parse_range(h, len));
     let (status, start, count) = match range {
         Some((start, end)) => ("206 Partial Content", start, end - start + 1),
         None => ("200 OK", 0, len),
     };
     let content_range = range.map(|(s, e)| format!("bytes {s}-{e}/{len}"));
-    let mut extra: Vec<(&str, &str)> = vec![("Accept-Ranges", "bytes")];
+    let mut extra: Vec<(&str, &str)> = vec![
+        ("Accept-Ranges", "bytes"),
+        ("Cache-Control", "no-cache"),
+        ("ETag", etag.as_str()),
+    ];
     if let Some(value) = &content_range {
         extra.push(("Content-Range", value.as_str()));
     }
@@ -675,12 +709,41 @@ fn send_disk_file(
     Ok(Flow::Keep)
 }
 
+/// Validator for a file on disk: its size and modification time, which is what
+/// changes when anything rewrites it.
+fn disk_etag(meta: &std::fs::Metadata) -> String {
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("\"{:x}-{:x}\"", meta.len(), mtime)
+}
+
+/// Whether an `If-None-Match` list names `etag` (weak comparison, as a GET
+/// is allowed to use).
+fn etag_matches(header: &str, etag: &str) -> bool {
+    header.split(',').any(|tag| {
+        let tag = tag.trim();
+        tag == "*" || tag.trim_start_matches("W/") == etag
+    })
+}
+
+/// Response head. Responses are `no-store` unless `extra` says otherwise:
+/// documents carry the reload client and possibly an unsaved buffer, so they
+/// must never be reused.
 fn head(status: &str, mime: &str, len: u64, extra: &[(&str, &str)]) -> String {
+    let cache = if extra.iter().any(|(name, _)| *name == "Cache-Control") {
+        String::new()
+    } else {
+        "Cache-Control: no-store\r\n".to_string()
+    };
     let mut out = format!(
         "HTTP/1.1 {status}\r\n\
          Content-Type: {mime}\r\n\
          Content-Length: {len}\r\n\
-         Cache-Control: no-store\r\n\
+         {cache}\
          Connection: keep-alive\r\n"
     );
     for (name, value) in extra {
@@ -1048,6 +1111,45 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.dir);
         }
+    }
+
+    #[test]
+    fn unchanged_assets_revalidate_instead_of_resending() {
+        let f = Fixture::new("etag");
+        let path = format!("/{}/app.css", f.token());
+        let (head, _) = get(f.port(), &path);
+        assert!(head.contains("Cache-Control: no-cache"), "{head}");
+        let etag = head
+            .lines()
+            .find_map(|l| l.strip_prefix("ETag: "))
+            .expect("asset carries a validator")
+            .trim()
+            .to_string();
+
+        let conditional = |tag: &str| {
+            request(
+                f.port(),
+                &format!(
+                    "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nIf-None-Match: {tag}\r\nConnection: close\r\n\r\n"
+                ),
+            )
+        };
+        let (head, body) = conditional(&etag);
+        assert!(head.starts_with("HTTP/1.1 304"), "{head}");
+        assert!(body.is_empty());
+
+        // A rewrite changes the validator, so the new bytes are sent.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(f.dir.join("app.css"), "body{color:blue;}").unwrap();
+        let (head, body) = conditional(&etag);
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        assert_eq!(body, b"body{color:blue;}");
+
+        // Documents are never reused: they carry the reload client and any
+        // unsaved buffer.
+        let (head, _) = get(f.port(), &format!("/{}/index.html", f.token()));
+        assert!(head.contains("Cache-Control: no-store"), "{head}");
+        assert!(!head.contains("ETag"), "{head}");
     }
 
     #[test]
