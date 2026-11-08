@@ -1,6 +1,6 @@
 [package]
 name = "termax"
-version = "1.0.0"
+version = "1.0.1"
 description = "Terminal multiplexer and project manager for AI coding agents"
 license = "GPL-3.0-only"
 edition = "2021"
