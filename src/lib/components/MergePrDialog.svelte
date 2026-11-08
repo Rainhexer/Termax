@@ -92,6 +92,10 @@
     if (blocker || busy || merged) return;
     busy = true;
     error = null;
+    // Taken before merging: `gh pr merge --delete-branch` can delete the tree
+    // itself, and once a refresh marks it missing `tree` goes null — which would
+    // skip the cleanup below and leave its record and tabs behind.
+    const target = removeTree ? tree : null;
     try {
       await ipc.ghPrMerge(pr.number, method, deleteBranch, $activeRoot ?? undefined);
       merged = true;
@@ -107,8 +111,8 @@
     // worktree panel this tree is finished with.
     forgetSettledPr(pr.headRefName);
 
-    if (removeTree && tree) {
-      const problem = await removeWorktree(tree.path);
+    if (target) {
+      const problem = await removeWorktree(target.path);
       if (problem) {
         // The merge itself succeeded; only the cleanup did not. Say so, and
         // leave the dialog open rather than closing on a half-done action.

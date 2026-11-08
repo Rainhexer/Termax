@@ -574,7 +574,16 @@ pub fn worktree_remove(
         return Err("the project's main worktree cannot be removed".into());
     }
     manager.sessions.lock().unwrap().remove(&key);
-    git::worktree_remove(&root, Path::new(&path), force)?;
+    if let Err(problem) = git::worktree_remove(&root, Path::new(&path), force) {
+        // Something else may have removed the tree first — `gh pr merge
+        // --delete-branch` deletes the worktree the branch is checked out in.
+        // git unregisters a tree whose directory is merely missing, so a refusal
+        // with the directory gone means it is already fully removed: the outcome
+        // the caller asked for, not a failure.
+        if Path::new(&path).exists() {
+            return Err(problem);
+        }
+    }
     git::worktrees(&root)
 }
 
