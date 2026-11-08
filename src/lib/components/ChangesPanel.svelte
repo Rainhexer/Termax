@@ -254,7 +254,7 @@
   };
 
   function badge(change: ChangeEntry): { char: string; color: string } {
-    if (change.area === "untracked") return { char: "?", color: "text-blue-400" };
+    if (change.area === "untracked") return { char: "U", color: "text-blue-400" };
     if (change.area === "staged" || change.area === "unstaged") {
       // Staged entries used to collapse to a single "S", which hid whether the
       // staged change was an add or a *delete*, and made the same file staged vs
